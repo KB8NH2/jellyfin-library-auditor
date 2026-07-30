@@ -12,6 +12,8 @@ from pathlib import Path
 
 
 ENGLISH_LANGUAGE_CODES = frozenset({"", "en", "eng"})
+MOVIE_LIBRARY_TYPES = frozenset({"movies"})
+TV_LIBRARY_TYPES = frozenset({"tv", "tvshows"})
 ULTRA_HD_HEIGHT = 2160
 FULL_HD_HEIGHT = 1080
 HD_HEIGHT = 720
@@ -49,6 +51,57 @@ def _format_season_episode(
     season_text = "S??" if season_number is None else f"S{season_number:02d}"
     episode_text = "E??" if episode_number is None else f"E{episode_number:02d}"
     return f"{season_text}{episode_text}"
+
+
+@dataclass(frozen=True, slots=True)
+class MediaLibrary:
+    """Represents a normalized Jellyfin media library."""
+
+    id: str
+    name: str
+    collection_type: str | None
+    locations: tuple[Path, ...]
+
+    def __post_init__(self) -> None:
+        """Normalize library metadata and filesystem locations."""
+        object.__setattr__(self, "id", self.id.strip())
+        object.__setattr__(self, "name", self.name.strip())
+        object.__setattr__(
+            self,
+            "collection_type",
+            self._normalize_optional_text(self.collection_type),
+        )
+        object.__setattr__(
+            self,
+            "locations",
+            tuple(Path(location) for location in self.locations),
+        )
+
+    @staticmethod
+    def _normalize_optional_text(value: str | None) -> str | None:
+        """Normalize optional library text fields.
+
+        Args:
+            value: Raw text value.
+
+        Returns:
+            The normalized lowercase text value, or ``None`` when blank.
+        """
+        if value is None:
+            return None
+
+        normalized_value = value.strip().lower()
+        return normalized_value or None
+
+    @property
+    def is_movie_library(self) -> bool:
+        """Return whether the library contains movie items."""
+        return self.collection_type in MOVIE_LIBRARY_TYPES
+
+    @property
+    def is_tv_library(self) -> bool:
+        """Return whether the library contains TV episode items."""
+        return self.collection_type in TV_LIBRARY_TYPES
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +277,9 @@ __all__ = [
     "AudioTrack",
     "ENGLISH_LANGUAGE_CODES",
     "MediaItem",
+    "MediaLibrary",
+    "MOVIE_LIBRARY_TYPES",
     "SubtitleTrack",
+    "TV_LIBRARY_TYPES",
     "VideoTrack",
 ]
