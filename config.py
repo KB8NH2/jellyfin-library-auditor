@@ -15,6 +15,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 
 JELLYFIN_API_KEY_ENV_VAR = "JELLYFIN_API_KEY"
@@ -61,8 +62,8 @@ class JellyfinConfig:
 class CsvOutputConfig:
     """Output filenames for CSV reports."""
 
-    movies: str
-    tv: str
+    movies: Path
+    tv: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +137,15 @@ def _read_bool(name: str, default: bool) -> bool:
         f"{name} must be one of {sorted(TRUE_VALUES | FALSE_VALUES)}; "
         f"received {value!r}."
     )
+
+
+def _read_path(name: str, default: str | Path) -> Path:
+    """Read a filesystem path from an environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return Path(default)
+
+    return Path(value.strip())
 
 
 def _read_positive_int(name: str, default: int) -> int:
@@ -231,11 +241,11 @@ def load_config() -> AppConfig:
             DEFAULT_REPORT_MEDIA_PATH_PREFIX,
         ),
         csv_output=CsvOutputConfig(
-            movies=_read_string(
+            movies=_read_path(
                 MOVIES_CSV_FILENAME_ENV_VAR,
                 DEFAULT_MOVIES_CSV_FILENAME,
             ),
-            tv=_read_string(
+            tv=_read_path(
                 TV_CSV_FILENAME_ENV_VAR,
                 DEFAULT_TV_CSV_FILENAME,
             ),
@@ -267,33 +277,3 @@ def clear_config_cache() -> None:
     """Clear the cached configuration, mainly for tests or environment reloads."""
     get_config.cache_clear()
 
-
-__all__ = [
-    "AppConfig",
-    "ConfigError",
-    "CsvOutputConfig",
-    "DEFAULT_ENGLISH_LANGUAGE_CODES",
-    "DEFAULT_HTTP_TIMEOUT_SECONDS",
-    "DEFAULT_JELLYFIN_PAGE_SIZE",
-    "DEFAULT_JELLYFIN_SERVER_URL",
-    "DEFAULT_MOVIES_CSV_FILENAME",
-    "DEFAULT_REPORT_MEDIA_PATH_PREFIX",
-    "DEFAULT_TV_CSV_FILENAME",
-    "ENABLE_MOVIES_ENV_VAR",
-    "ENABLE_TV_ENV_VAR",
-    "ENGLISH_LANGUAGE_CODES_ENV_VAR",
-    "HTTP_TIMEOUT_SECONDS_ENV_VAR",
-    "JELLYFIN_API_KEY_ENV_VAR",
-    "JELLYFIN_PAGE_SIZE_ENV_VAR",
-    "JELLYFIN_SERVER_URL_ENV_VAR",
-    "JellyfinConfig",
-    "MOVIES_CSV_FILENAME_ENV_VAR",
-    "ProcessingConfig",
-    "REPORT_MEDIA_PATH_PREFIX_ENV_VAR",
-    "REQUIRED_ENGLISH_LANGUAGE_CODES",
-    "ReportingConfig",
-    "TV_CSV_FILENAME_ENV_VAR",
-    "clear_config_cache",
-    "get_config",
-    "load_config",
-]
