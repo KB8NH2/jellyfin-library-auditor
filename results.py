@@ -56,6 +56,7 @@ class AuditServerResult:
         libraries_audited: Number of libraries that were audited.
         media_items_processed: Number of media items evaluated.
         library_results: Per-library audit results and summary metrics.
+        server_name: Jellyfin server display name when available.
         findings: Findings produced while auditing the server.
     """
 
@@ -63,6 +64,7 @@ class AuditServerResult:
     media_items_processed: int
     library_results: tuple[LibraryAuditResult, ...]
     findings: tuple[AuditFinding, ...]
+    server_name: str | None = None
 
     @property
     def findings_count(self) -> int:

@@ -96,6 +96,7 @@ def audit_server(
             raise JellyfinRequestError(
                 f"Unable to reach Jellyfin server at {config.jellyfin.server_url}."
             )
+        server_name = client.get_server_name()
 
         libraries = client.get_libraries()
         selected_libraries = _select_audit_libraries(
@@ -120,6 +121,7 @@ def audit_server(
         media_items_processed=media_items_processed,
         library_results=tuple(library_results),
         findings=tuple(findings),
+        server_name=server_name,
     )
 
 
@@ -187,6 +189,7 @@ def filter_audit_result(
         media_items_processed=result.media_items_processed,
         library_results=result.library_results,
         findings=findings,
+        server_name=result.server_name,
     )
 
 

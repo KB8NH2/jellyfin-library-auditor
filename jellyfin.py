@@ -117,6 +117,20 @@ class JellyfinClient:
 
         return libraries
 
+    def get_server_name(self) -> str | None:
+        """Return the Jellyfin server name reported by the API.
+
+        Returns:
+            The server display name, or ``None`` when Jellyfin does not provide
+            one in the public system info response.
+        """
+        payload = self._request("GET", PING_ENDPOINT)
+        server_name = self._get_optional_str(payload, "ServerName")
+        if server_name is not None:
+            return server_name
+
+        return self._get_optional_str(payload, "Name")
+
     def get_library_items(self, library_id: str) -> list[MediaItem]:
         """Return every movie or episode contained in a Jellyfin library.
 

@@ -14,6 +14,7 @@ def render_dashboard_page(
     category_filenames: dict[audit_types.AuditCategory, str],
     library_slug_map: dict[str, str],
     generated_at_text: str,
+    server_display_name: str,
 ) -> str:
     """Return the dashboard page HTML body."""
     error_count, warning_count, info_count = templates.finding_count_summary(result.findings)
@@ -67,7 +68,7 @@ def render_dashboard_page(
         title="Dashboard",
         current_nav="Dashboard",
         relative_prefix="",
-        heading="Jellyfin Library Auditor",
+        heading=f"Jellyfin Library Auditor ({server_display_name})",
         intro=(
             "Dashboard overview for the latest Jellyfin library audit run. "
             f"Generated {generated_at_text}."

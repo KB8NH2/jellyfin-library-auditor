@@ -6,6 +6,7 @@ import csv
 from datetime import datetime
 import shutil
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import audit_types
 from config import get_config
@@ -62,9 +63,13 @@ def write_html_report(result: AuditServerResult) -> Path:
 
 def write_reports(result: AuditServerResult) -> Path:
     """Generate the full static site and return the dashboard path."""
-    site_paths = _site_paths(get_config().reporting.output.audit_html)
+    config = get_config()
+    site_paths = _site_paths(config.reporting.output.audit_html)
     _prepare_site_root(site_paths.root_dir)
     generated_at_text = _generated_at_text()
+    server_display_name = result.server_name or _server_display_name(
+        config.jellyfin.server_url
+    )
 
     library_slug_map = _library_slug_map(result)
     category_filenames = {
@@ -84,6 +89,7 @@ def write_reports(result: AuditServerResult) -> Path:
         category_filenames=category_filenames,
         library_slug_map=library_slug_map,
         generated_at_text=generated_at_text,
+        server_display_name=server_display_name,
     )
     write_category_pages(
         result,
@@ -109,6 +115,7 @@ def write_dashboard(
     category_filenames: dict[audit_types.AuditCategory, str],
     library_slug_map: dict[str, str],
     generated_at_text: str,
+    server_display_name: str,
 ) -> None:
     """Write the dashboard page."""
     body = render_dashboard_page(
@@ -116,6 +123,7 @@ def write_dashboard(
         category_filenames=category_filenames,
         library_slug_map=library_slug_map,
         generated_at_text=generated_at_text,
+        server_display_name=server_display_name,
     )
     site_paths.index_path.write_text(
         templates.page_document(
@@ -274,3 +282,16 @@ def _artwork_source(has_local_artwork: bool, has_jellyfin_artwork: bool) -> str:
 def _generated_at_text() -> str:
     """Return a display-friendly local timestamp for the dashboard."""
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _server_display_name(server_url: str) -> str:
+    """Return a dashboard-friendly server name from the configured URL."""
+    parsed_url = urlsplit(server_url.strip())
+    if parsed_url.hostname:
+        return parsed_url.hostname
+
+    if parsed_url.netloc:
+        return parsed_url.netloc
+
+    stripped_url = server_url.strip().rstrip("/")
+    return stripped_url or "unknown"
