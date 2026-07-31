@@ -6,54 +6,25 @@ formatting.
 """
 
 from __future__ import annotations
-from config import ProcessingConfig
 
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
 
-from audit import AuditCategory
-from audit import AuditFinding
 from audit import audit_media_item
+from audit_types import AuditCategory
+from audit_types import AuditFinding
 from config import ConfigError
+from config import ProcessingConfig
 from config import get_config
 from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
 from jellyfin import JellyfinRequestError
 from models import MediaLibrary
+from results import AuditServerResult
+from results import LibraryAuditResult
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class LibraryAuditResult:
-    """Structured audit output for one library.
-
-    Attributes:
-        library: Library that was audited.
-        media_items_processed: Number of media items evaluated.
-        findings: Findings produced while auditing the library.
-    """
-
-    library: MediaLibrary
-    media_items_processed: int
-    findings: tuple[AuditFinding, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class AuditServerResult:
-    """Structured audit output for one Jellyfin server run.
-
-    Attributes:
-        libraries_audited: Number of libraries that were audited.
-        media_items_processed: Number of media items evaluated.
-        findings: Findings produced while auditing the server.
-    """
-
-    libraries_audited: int
-    media_items_processed: int
-    findings: tuple[AuditFinding, ...]
 
 
 def configure_logging() -> None:

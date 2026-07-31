@@ -7,9 +7,9 @@ findings. It operates only on application models and helper functions from
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
-
+from audit_types import AuditCategory
+from audit_types import AuditFinding
+from audit_types import AuditSeverity
 from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
@@ -18,44 +18,6 @@ from media import local_backdrop_exists
 from media import local_nfo_exists
 from media import local_poster_exists
 from models import MediaItem
-
-
-class AuditSeverity(StrEnum):
-    """Severity levels for audit findings."""
-
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"
-
-
-class AuditCategory(StrEnum):
-    """Categories used to group audit findings."""
-
-    SUBTITLES = "subtitles"
-    ARTWORK = "artwork"
-    METADATA = "metadata"
-    VIDEO = "video"
-    AUDIO = "audio"
-    FILESYSTEM = "filesystem"
-
-
-@dataclass(frozen=True, slots=True)
-class AuditFinding:
-    """Represents one structured finding for a media item.
-
-    Attributes:
-        category: High-level area the finding belongs to.
-        severity: Severity level of the finding.
-        check_name: Stable name of the audit check that produced the finding.
-        message: Human-readable finding description.
-        media_item: Media item associated with the finding.
-    """
-
-    category: AuditCategory
-    severity: AuditSeverity
-    check_name: str
-    message: str
-    media_item: MediaItem
 
 
 def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:

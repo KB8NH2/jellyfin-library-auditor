@@ -11,19 +11,17 @@ import csv
 from html import escape
 from pathlib import Path
 
-from audit import AuditCategory
-from audit import AuditFinding
-from audit import AuditSeverity
-from auditor import AuditServerResult
+import audit_types
 from config import get_config
 from media import get_display_path
+from results import AuditServerResult
 
 
 CSV_HEADER = ("Category", "Severity", "Check", "Title", "Path", "Message")
 SEVERITY_SORT_ORDER = {
-    AuditSeverity.ERROR: 0,
-    AuditSeverity.WARNING: 1,
-    AuditSeverity.INFO: 2,
+    audit_types.AuditSeverity.ERROR: 0,
+    audit_types.AuditSeverity.WARNING: 1,
+    audit_types.AuditSeverity.INFO: 2,
 }
 
 
@@ -89,8 +87,8 @@ def write_html_report(result: AuditServerResult) -> Path:
 
 
 def findings_by_category(
-    findings: tuple[AuditFinding, ...],
-) -> dict[AuditCategory, tuple[AuditFinding, ...]]:
+    findings: tuple[audit_types.AuditFinding, ...],
+) -> dict[audit_types.AuditCategory, tuple[audit_types.AuditFinding, ...]]:
     """Group findings by audit category.
 
     Args:
@@ -99,7 +97,7 @@ def findings_by_category(
     Returns:
         A dictionary keyed by category containing grouped findings.
     """
-    grouped: dict[AuditCategory, list[AuditFinding]] = {}
+    grouped: dict[audit_types.AuditCategory, list[audit_types.AuditFinding]] = {}
 
     for finding in findings:
         grouped.setdefault(finding.category, []).append(finding)
@@ -108,8 +106,8 @@ def findings_by_category(
 
 
 def findings_by_severity(
-    findings: tuple[AuditFinding, ...],
-) -> dict[AuditSeverity, tuple[AuditFinding, ...]]:
+    findings: tuple[audit_types.AuditFinding, ...],
+) -> dict[audit_types.AuditSeverity, tuple[audit_types.AuditFinding, ...]]:
     """Group findings by audit severity.
 
     Args:
@@ -118,7 +116,7 @@ def findings_by_severity(
     Returns:
         A dictionary keyed by severity containing grouped findings.
     """
-    grouped: dict[AuditSeverity, list[AuditFinding]] = {}
+    grouped: dict[audit_types.AuditSeverity, list[audit_types.AuditFinding]] = {}
 
     for finding in findings:
         grouped.setdefault(finding.severity, []).append(finding)
@@ -126,7 +124,9 @@ def findings_by_severity(
     return {severity: tuple(items) for severity, items in grouped.items()}
 
 
-def sort_findings(findings: tuple[AuditFinding, ...]) -> tuple[AuditFinding, ...]:
+def sort_findings(
+    findings: tuple[audit_types.AuditFinding, ...],
+) -> tuple[audit_types.AuditFinding, ...]:
     """Sort findings by severity, category, and title.
 
     Args:
@@ -159,21 +159,20 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     rows: list[tuple[str, ...]] = []
 
     for finding in sort_findings(result.findings):
-        rows.append(
-            (
-                finding.category.value.title(),
-                finding.severity.value.title(),
-                finding.check_name,
-                finding.media_item.display_name,
-                get_display_path(finding.media_item),
-                finding.message,
-            )
+        row: tuple[str, ...] = (
+            finding.category.value.title(),
+            finding.severity.value.title(),
+            finding.check_name,
+            finding.media_item.display_name,
+            get_display_path(finding.media_item),
+            finding.message,
         )
+        rows.append(row)
 
     return tuple(rows)
 
 
-def _html_table(findings: tuple[AuditFinding, ...]) -> str:
+def _html_table(findings: tuple[audit_types.AuditFinding, ...]) -> str:
     """Return HTML for the findings table.
 
     Args:
@@ -381,12 +380,3 @@ def _ensure_parent_directory(path: Path) -> None:
         path: Report path to prepare.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-
-
-__all__ = [
-    "findings_by_category",
-    "findings_by_severity",
-    "sort_findings",
-    "write_csv_report",
-    "write_html_report",
-]
