@@ -34,6 +34,15 @@ GENERIC_NFO_FILENAMES = (
     "season.nfo",
 )
 PRIMARY_IMAGE_TAG = "Primary"
+BACKDROP_IMAGE_TAG = "Backdrop"
+LOGO_IMAGE_TAG = "Logo"
+THUMB_IMAGE_TAG = "Thumb"
+JELLYFIN_IMAGE_TAGS = (
+    BACKDROP_IMAGE_TAG,
+    LOGO_IMAGE_TAG,
+    PRIMARY_IMAGE_TAG,
+    THUMB_IMAGE_TAG,
+)
 
 
 def _configured_english_language_codes() -> frozenset[str]:
@@ -100,6 +109,23 @@ def _strip_configured_prefix(path: Path, prefix: str) -> str:
 def _track_language_matches(track: SubtitleTrack, language_codes: frozenset[str]) -> bool:
     """Return whether a subtitle track language is in the configured set."""
     return track.language in language_codes
+
+
+def _has_jellyfin_image_tag(item: MediaItem, tag_name: str) -> bool:
+    """Return whether Jellyfin reported a non-empty image tag for the item.
+
+    Args:
+        item: Media item to inspect.
+        tag_name: Image tag name from Jellyfin.
+
+    Returns:
+        ``True`` when the image tag exists and is non-empty.
+    """
+    tag_value = item.image_tags.get(tag_name)
+    if tag_value is None:
+        return False
+
+    return bool(tag_value.strip())
 
 
 # Subtitle helpers
@@ -171,8 +197,62 @@ def has_jellyfin_primary_image(item: MediaItem) -> bool:
     Returns:
         ``True`` when a non-empty ``Primary`` image tag is present.
     """
-    primary_tag = item.image_tags.get(PRIMARY_IMAGE_TAG)
-    return bool(primary_tag)
+    return _has_jellyfin_image_tag(item, PRIMARY_IMAGE_TAG)
+
+
+def has_jellyfin_backdrop(item: MediaItem) -> bool:
+    """Return whether Jellyfin reports a backdrop image tag for the item.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        ``True`` when a non-empty ``Backdrop`` image tag is present.
+    """
+    return _has_jellyfin_image_tag(item, BACKDROP_IMAGE_TAG)
+
+
+def has_jellyfin_logo(item: MediaItem) -> bool:
+    """Return whether Jellyfin reports a logo image tag for the item.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        ``True`` when a non-empty ``Logo`` image tag is present.
+    """
+    return _has_jellyfin_image_tag(item, LOGO_IMAGE_TAG)
+
+
+def has_jellyfin_thumb(item: MediaItem) -> bool:
+    """Return whether Jellyfin reports a thumb image tag for the item.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        ``True`` when a non-empty ``Thumb`` image tag is present.
+    """
+    return _has_jellyfin_image_tag(item, THUMB_IMAGE_TAG)
+
+
+def jellyfin_image_types(item: MediaItem) -> tuple[str, ...]:
+    """Return the sorted Jellyfin image tag types reported for the item.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        A tuple containing each known Jellyfin image tag type whose value exists
+        and is non-empty, sorted alphabetically.
+    """
+    return tuple(
+        sorted(
+            tag_name
+            for tag_name in JELLYFIN_IMAGE_TAGS
+            if _has_jellyfin_image_tag(item, tag_name)
+        )
+    )
 
 
 def local_poster_exists(item: MediaItem) -> bool:
@@ -346,4 +426,3 @@ def media_files(item: MediaItem) -> tuple[Path, ...]:
     ]
     matching_files.sort(key=lambda path: path.name.casefold())
     return tuple(matching_files)
-

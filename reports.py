@@ -14,10 +14,30 @@ from pathlib import Path
 import audit_types
 from config import get_config
 from media import get_display_path
+from media import has_jellyfin_backdrop
+from media import has_jellyfin_logo
+from media import has_jellyfin_primary_image
+from media import has_jellyfin_thumb
+from media import local_backdrop_exists
+from media import local_poster_exists
 from results import AuditServerResult
+from results import LibraryAuditResult
 
 
-CSV_HEADER = ("Category", "Severity", "Check", "Title", "Path", "Message")
+CSV_HEADER = (
+    "Category",
+    "Severity",
+    "Check",
+    "Title",
+    "Path",
+    "Local Poster",
+    "Local Backdrop",
+    "Jellyfin Primary",
+    "Jellyfin Backdrop",
+    "Jellyfin Logo",
+    "Jellyfin Thumb",
+    "Message",
+)
 SEVERITY_SORT_ORDER = {
     audit_types.AuditSeverity.ERROR: 0,
     audit_types.AuditSeverity.WARNING: 1,
@@ -159,15 +179,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     rows: list[tuple[str, ...]] = []
 
     for finding in sort_findings(result.findings):
-        row: tuple[str, ...] = (
-            finding.category.value.title(),
-            finding.severity.value.title(),
-            finding.check_name,
-            finding.media_item.display_name,
-            get_display_path(finding.media_item),
-            finding.message,
-        )
-        rows.append(row)
+        rows.append(_finding_report_row(finding))
 
     return tuple(rows)
 
@@ -187,6 +199,12 @@ def _html_table(findings: tuple[audit_types.AuditFinding, ...]) -> str:
         "Check",
         "Title",
         "Path",
+        "Local Poster",
+        "Local Backdrop",
+        "Jellyfin Primary",
+        "Jellyfin Backdrop",
+        "Jellyfin Logo",
+        "Jellyfin Thumb",
         "Message",
     )
     header_html = "".join(
@@ -196,14 +214,7 @@ def _html_table(findings: tuple[audit_types.AuditFinding, ...]) -> str:
 
     row_html: list[str] = []
     for finding in findings:
-        cells = (
-            finding.category.value.title(),
-            finding.severity.value.title(),
-            finding.check_name,
-            finding.media_item.display_name,
-            get_display_path(finding.media_item),
-            finding.message,
-        )
+        cells = _finding_report_row(finding)
         row_html.append(
             "<tr>"
             + "".join(f"<td>{escape(cell)}</td>" for cell in cells)
@@ -215,10 +226,12 @@ def _html_table(findings: tuple[audit_types.AuditFinding, ...]) -> str:
         (
             '    <section class="report-section">',
             "      <h2>Findings</h2>",
-            '      <table id="findings-table">',
-            f"        <thead><tr>{header_html}</tr></thead>",
-            f"        <tbody>{table_rows}</tbody>",
-            "      </table>",
+            '      <div class="table-container">',
+            '        <table id="findings-table">',
+            f"          <thead><tr>{header_html}</tr></thead>",
+            f"          <tbody>{table_rows}</tbody>",
+            "        </table>",
+            "      </div>",
             "    </section>",
         )
     )
@@ -275,6 +288,10 @@ def _html_summary(result: AuditServerResult) -> str:
             severity_list,
             "        </ul>",
             "      </div>",
+            "      <div>",
+            "        <h2>Library Coverage</h2>",
+            _html_library_summary_list(result.library_results),
+            "      </div>",
             "    </section>",
         )
     )
@@ -306,6 +323,9 @@ def _embedded_css() -> str:
             "  display: grid;",
             "  gap: 20px;",
             "  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));",
+            "}",
+            ".table-container {",
+            "  overflow-x: auto;",
             "}",
             "h1, h2 {",
             "  margin-top: 0;",
@@ -339,6 +359,14 @@ def _embedded_css() -> str:
             "ul {",
             "  margin: 0;",
             "  padding-left: 20px;",
+            "}",
+            ".library-summary-list {",
+            "  list-style: none;",
+            "  margin: 0;",
+            "  padding-left: 0;",
+            "}",
+            ".library-summary-list li + li {",
+            "  margin-top: 12px;",
             "}",
         )
     )
@@ -380,3 +408,58 @@ def _ensure_parent_directory(path: Path) -> None:
         path: Report path to prepare.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _finding_report_row(finding: audit_types.AuditFinding) -> tuple[str, ...]:
+    """Return the report row values for one finding."""
+    item = finding.media_item
+    return (
+        finding.category.value.title(),
+        finding.severity.value.title(),
+        finding.check_name,
+        item.display_name,
+        get_display_path(item),
+        _yes_no(local_poster_exists(item)),
+        _yes_no(local_backdrop_exists(item)),
+        _yes_no(has_jellyfin_primary_image(item)),
+        _yes_no(has_jellyfin_backdrop(item)),
+        _yes_no(has_jellyfin_logo(item)),
+        _yes_no(has_jellyfin_thumb(item)),
+        finding.message,
+    )
+
+
+def _html_library_summary_list(
+    library_results: tuple[LibraryAuditResult, ...],
+) -> str:
+    """Return HTML for per-library content coverage summaries."""
+    if not library_results:
+        return "        <p>No libraries audited.</p>"
+
+    items = []
+    for library_result in library_results:
+        items.append(
+            (
+                "        <li>"
+                f"<strong>{escape(library_result.library.name)}</strong>: "
+                f"English subtitles {_format_percentage(library_result.items_with_english_subtitles, library_result.media_items_processed)}, "
+                f"local NFO {_format_percentage(library_result.items_with_local_nfo, library_result.media_items_processed)}, "
+                f"posters {_format_percentage(library_result.items_with_local_poster, library_result.media_items_processed)}, "
+                f"backdrop {_format_percentage(library_result.items_with_local_backdrop, library_result.media_items_processed)}"
+                "</li>"
+            )
+        )
+
+    return "\n".join(("        <ul class=\"library-summary-list\">", *items, "        </ul>"))
+
+
+def _format_percentage(count: int, total: int) -> str:
+    """Return a display-friendly percentage with supporting counts."""
+    if total <= 0:
+        return "0.0% (0/0)"
+    return f"{(count / total) * 100.0:.1f}% ({count}/{total})"
+
+
+def _yes_no(value: bool) -> str:
+    """Return ``Yes`` or ``No`` for a boolean value."""
+    return "Yes" if value else "No"

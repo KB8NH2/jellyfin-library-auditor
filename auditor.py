@@ -24,6 +24,10 @@ from config import get_config
 from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
 from jellyfin import JellyfinRequestError
+from media import has_english_subtitles
+from media import local_backdrop_exists
+from media import local_nfo_exists
+from media import local_poster_exists
 from models import MediaLibrary
 from reports import write_csv_report, write_html_report
 from results import AuditServerResult
@@ -101,17 +105,20 @@ def audit_server(
         )
 
         findings: list[AuditFinding] = []
+        library_results: list[LibraryAuditResult] = []
         media_items_processed = 0
 
         for library in selected_libraries:
             LOGGER.info("Auditing library %s...", library.name)
             library_result = _audit_library_result(client, library)
+            library_results.append(library_result)
             media_items_processed += library_result.media_items_processed
             findings.extend(library_result.findings)
 
     return AuditServerResult(
         libraries_audited=len(selected_libraries),
         media_items_processed=media_items_processed,
+        library_results=tuple(library_results),
         findings=tuple(findings),
     )
 
@@ -178,6 +185,7 @@ def filter_audit_result(
     return AuditServerResult(
         libraries_audited=result.libraries_audited,
         media_items_processed=result.media_items_processed,
+        library_results=result.library_results,
         findings=findings,
     )
 
@@ -213,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     LOGGER.info("Libraries audited: %d", filtered_result.libraries_audited)
     LOGGER.info("Media items processed: %d", filtered_result.media_items_processed)
     LOGGER.info("Total findings: %d", len(filtered_result.findings))
+    _log_library_summaries(filtered_result.library_results)
 
     for category, count in sorted(findings_by_category.items(), key=lambda entry: entry[0]):
         LOGGER.info("Findings in %s: %d", category.value, count)
@@ -224,15 +233,55 @@ def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> Libr
     """Return full audit results for one library."""
     items = client.get_library_items(library.id)
     findings: list[AuditFinding] = []
+    items_with_english_subtitles = 0
+    items_with_local_nfo = 0
+    items_with_local_poster = 0
+    items_with_local_backdrop = 0
 
     for item in items:
+        items_with_english_subtitles += int(has_english_subtitles(item))
+        items_with_local_nfo += int(local_nfo_exists(item))
+        items_with_local_poster += int(local_poster_exists(item))
+        items_with_local_backdrop += int(local_backdrop_exists(item))
         findings.extend(audit_media_item(item))
 
     return LibraryAuditResult(
         library=library,
         media_items_processed=len(items),
+        items_with_english_subtitles=items_with_english_subtitles,
+        items_with_local_nfo=items_with_local_nfo,
+        items_with_local_poster=items_with_local_poster,
+        items_with_local_backdrop=items_with_local_backdrop,
         findings=tuple(findings),
     )
+
+
+def _log_library_summaries(library_results: Iterable[LibraryAuditResult]) -> None:
+    """Log per-library content coverage summaries."""
+    for library_result in library_results:
+        LOGGER.info(
+            (
+                "Library summary for %s: English subtitles %s, local NFO %s, "
+                "posters %s, backdrop %s"
+            ),
+            library_result.library.name,
+            _format_percentage(
+                library_result.items_with_english_subtitles,
+                library_result.media_items_processed,
+            ),
+            _format_percentage(
+                library_result.items_with_local_nfo,
+                library_result.media_items_processed,
+            ),
+            _format_percentage(
+                library_result.items_with_local_poster,
+                library_result.media_items_processed,
+            ),
+            _format_percentage(
+                library_result.items_with_local_backdrop,
+                library_result.media_items_processed,
+            ),
+        )
 
 
 def _is_enabled_library_type(library: MediaLibrary, processing: ProcessingConfig) -> bool:
@@ -359,6 +408,13 @@ def _parse_severities(values: Iterable[str]) -> frozenset[AuditSeverity] | None:
     """Parse severity strings into enum values."""
     severities = frozenset(AuditSeverity(value) for value in values)
     return severities or None
+
+
+def _format_percentage(count: int, total: int) -> str:
+    """Return a display-friendly percentage with supporting counts."""
+    if total <= 0:
+        return "0.0% (0/0)"
+    return f"{(count / total) * 100.0:.1f}% ({count}/{total})"
 
 
 if __name__ == "__main__":
