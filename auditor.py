@@ -20,6 +20,7 @@ from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
 from jellyfin import JellyfinRequestError
 from models import MediaLibrary
+from reports import write_csv_report, write_html_report
 from results import AuditServerResult
 from results import LibraryAuditResult
 
@@ -108,6 +109,8 @@ def main() -> int:
 
     try:
         result = audit_server()
+        write_csv_report(result)
+        write_html_report(result)
     except (ConfigError, JellyfinError) as error:
         LOGGER.error("%s", error)
         return 1

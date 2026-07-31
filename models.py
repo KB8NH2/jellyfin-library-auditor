@@ -66,15 +66,8 @@ class MediaLibrary:
         """Normalize library metadata and filesystem locations."""
         object.__setattr__(self, "id", self.id.strip())
         object.__setattr__(self, "name", self.name.strip())
-        object.__setattr__(
-            self,
-            "collection_type",
-            self._normalize_optional_text(self.collection_type),
-        )
-        object.__setattr__(
-            self,
-            "locations",
-            tuple(Path(location) for location in self.locations),
+        object.__setattr__(self, "collection_type", self._normalize_optional_text(self.collection_type),)
+        object.__setattr__(self, "locations", tuple(Path(location) for location in self.locations),
         )
 
     @staticmethod

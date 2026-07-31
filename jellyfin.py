@@ -157,8 +157,9 @@ class JellyfinClient:
             raw_items = self._get_required_list(payload, "Items", "items response")
 
             for raw_item in raw_items:
-                media_items.append(self._media_item_from_json(raw_item, library))
-
+                media_item = self._media_item_from_json(raw_item, library)
+                if media_item is not None:
+                    media_items.append(media_item)
             total_count = self._get_optional_int(payload, "TotalRecordCount")
             start_index += len(raw_items)
 
@@ -311,7 +312,7 @@ class JellyfinClient:
         self,
         item_data: Mapping[str, Any],
         library: MediaLibrary,
-    ) -> MediaItem:
+    ) -> MediaItem | None:
         """Convert one Jellyfin media item into a normalized model.
 
         Args:
@@ -321,6 +322,7 @@ class JellyfinClient:
         Returns:
             A normalized media item.
         """
+
         item_type = self._get_required_str(item_data, "Type", "media item").lower()
         if item_type not in {"movie", "episode"}:
             raise JellyfinResponseError(
@@ -353,25 +355,30 @@ class JellyfinClient:
                 audio_tracks.append(self._audio_track_from_stream(stream_data))
             elif stream_type == VIDEO_STREAM_TYPE and video_track is None:
                 video_track = self._video_track_from_stream(stream_data)
-
-        return MediaItem(
-            id=self._get_required_str(item_data, "Id", "media item"),
-            title=self._get_required_str(item_data, "Name", "media item"),
-            path=Path(self._get_required_str(item_data, "Path", "media item")),
-            is_movie=item_type == "movie",
-            is_episode=item_type == "episode",
-            library=library.name,
-            series_name=self._get_optional_str(item_data, "SeriesName"),
-            season_name=self._get_optional_str(item_data, "SeasonName"),
-            season_number=self._get_optional_int(item_data, "ParentIndexNumber"),
-            episode_number=self._get_optional_int(item_data, "IndexNumber"),
-            year=self._get_optional_int(item_data, "ProductionYear"),
-            runtime_ticks=self._get_optional_int(item_data, "RunTimeTicks"),
-            image_tags=self._get_string_dict(item_data, "ImageTags"),
-            subtitle_tracks=tuple(subtitle_tracks),
-            audio_tracks=tuple(audio_tracks),
-            video_track=video_track,
-        )
+        try:
+            if "Path" not in item_data:
+                return None
+            return MediaItem(
+                id=self._get_required_str(item_data, "Id", "media item"),
+                title=self._get_required_str(item_data, "Name", "media item"),
+                path=Path(self._get_required_str(item_data, "Path", "media item")),
+                is_movie=item_type == "movie",
+                is_episode=item_type == "episode",
+                library=library.name,
+                series_name=self._get_optional_str(item_data, "SeriesName"),
+                season_name=self._get_optional_str(item_data, "SeasonName"),
+                season_number=self._get_optional_int(item_data, "ParentIndexNumber"),
+                episode_number=self._get_optional_int(item_data, "IndexNumber"),
+                year=self._get_optional_int(item_data, "ProductionYear"),
+                runtime_ticks=self._get_optional_int(item_data, "RunTimeTicks"),
+                image_tags=self._get_string_dict(item_data, "ImageTags"),
+                subtitle_tracks=tuple(subtitle_tracks),
+                audio_tracks=tuple(audio_tracks),
+                video_track=video_track,
+            )
+        except Exception as e:
+            print(item_data)
+            raise e
 
     def _subtitle_track_from_stream(
         self,
