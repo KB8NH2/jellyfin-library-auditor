@@ -55,6 +55,7 @@ class AuditFinding:
     severity: AuditSeverity
     check_name: str
     message: str
+    media_item: MediaItem
 
 
 def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
@@ -94,11 +95,13 @@ def _finding(
     check_name: str,
     message: str,
 ) -> AuditFinding:
+    """Build an audit finding for a media item."""
     return AuditFinding(
         category=category,
         severity=severity,
         check_name=check_name,
         message=message,
+        media_item=item,
     )
 
 

@@ -85,6 +85,14 @@ class JellyfinClient:
         """Close the underlying HTTP session."""
         self._session.close()
 
+    def __enter__(self) -> JellyfinClient:
+        """Return the client for context manager usage."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        """Close the HTTP session when leaving a context manager."""
+        self.close()
+
     def ping(self) -> bool:
         """Return whether the Jellyfin server is reachable."""
         try:
