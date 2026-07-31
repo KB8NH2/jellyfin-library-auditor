@@ -67,8 +67,7 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
     Returns:
         A tuple containing every finding produced for the media item.
     """
-
-    AUDITS = (
+    audits = (
         missing_english_subtitles,
         missing_poster,
         missing_backdrop,
@@ -77,32 +76,14 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
         unknown_audio_codec,
         hdr_video,
     )
+    findings: list[AuditFinding] = []
 
-    findings = []
-
-    for audit in AUDITS:
+    for audit in audits:
         finding = audit(item)
-        if finding:
+        if finding is not None:
             findings.append(finding)
 
     return tuple(findings)
-
-
-def _finding(
-    item: MediaItem,
-    category: AuditCategory,
-    severity: AuditSeverity,
-    check_name: str,
-    message: str,
-) -> AuditFinding:
-    """Build an audit finding for a media item."""
-    return AuditFinding(
-        category=category,
-        severity=severity,
-        check_name=check_name,
-        message=message,
-        media_item=item,
-    )
 
 
 def missing_english_subtitles(item: MediaItem) -> AuditFinding | None:
@@ -251,3 +232,47 @@ def hdr_video(item: MediaItem) -> AuditFinding | None:
         check_name="hdr_video",
         message="The media item has HDR video.",
     )
+
+
+def _finding(
+    item: MediaItem,
+    *,
+    category: AuditCategory,
+    severity: AuditSeverity,
+    check_name: str,
+    message: str,
+) -> AuditFinding:
+    """Build an audit finding for a media item.
+
+    Args:
+        item: Media item associated with the finding.
+        category: Finding category.
+        severity: Finding severity.
+        check_name: Stable audit check name.
+        message: Human-readable description.
+
+    Returns:
+        A structured audit finding.
+    """
+    return AuditFinding(
+        category=category,
+        severity=severity,
+        check_name=check_name,
+        message=message,
+        media_item=item,
+    )
+
+
+__all__ = [
+    "AuditCategory",
+    "AuditFinding",
+    "AuditSeverity",
+    "audit_media_item",
+    "hdr_video",
+    "missing_backdrop",
+    "missing_english_subtitles",
+    "missing_nfo",
+    "missing_poster",
+    "unknown_audio_codec",
+    "unknown_video_codec",
+]

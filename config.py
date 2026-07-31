@@ -23,6 +23,8 @@ JELLYFIN_SERVER_URL_ENV_VAR = "JELLYFIN_SERVER_URL"
 REPORT_MEDIA_PATH_PREFIX_ENV_VAR = "REPORT_MEDIA_PATH_PREFIX"
 MOVIES_CSV_FILENAME_ENV_VAR = "MOVIES_CSV_FILENAME"
 TV_CSV_FILENAME_ENV_VAR = "TV_CSV_FILENAME"
+AUDIT_CSV_FILENAME_ENV_VAR = "AUDIT_CSV_FILENAME"
+AUDIT_HTML_FILENAME_ENV_VAR = "AUDIT_HTML_FILENAME"
 ENABLE_MOVIES_ENV_VAR = "ENABLE_MOVIES"
 ENABLE_TV_ENV_VAR = "ENABLE_TV"
 HTTP_TIMEOUT_SECONDS_ENV_VAR = "HTTP_TIMEOUT_SECONDS"
@@ -33,6 +35,8 @@ DEFAULT_JELLYFIN_SERVER_URL = "http://jellyfin:8096"
 DEFAULT_REPORT_MEDIA_PATH_PREFIX = ""
 DEFAULT_MOVIES_CSV_FILENAME = "movies_report.csv"
 DEFAULT_TV_CSV_FILENAME = "tv_report.csv"
+DEFAULT_AUDIT_CSV_FILENAME = "audit_report.csv"
+DEFAULT_AUDIT_HTML_FILENAME = "audit_report.html"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
 DEFAULT_JELLYFIN_PAGE_SIZE = 200
 
@@ -67,11 +71,20 @@ class CsvOutputConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ReportOutputConfig:
+    """Output filenames for generated audit reports."""
+
+    audit_csv: Path
+    audit_html: Path
+
+
+@dataclass(frozen=True, slots=True)
 class ReportingConfig:
     """Settings that shape report formatting and export behavior."""
 
     media_path_prefix: str
     csv_output: CsvOutputConfig
+    output: ReportOutputConfig
     english_language_codes: tuple[str, ...]
 
 
@@ -250,6 +263,16 @@ def load_config() -> AppConfig:
                 DEFAULT_TV_CSV_FILENAME,
             ),
         ),
+        output=ReportOutputConfig(
+            audit_csv=_read_path(
+                AUDIT_CSV_FILENAME_ENV_VAR,
+                DEFAULT_AUDIT_CSV_FILENAME,
+            ),
+            audit_html=_read_path(
+                AUDIT_HTML_FILENAME_ENV_VAR,
+                DEFAULT_AUDIT_HTML_FILENAME,
+            ),
+        ),
         english_language_codes=_read_language_codes(
             ENGLISH_LANGUAGE_CODES_ENV_VAR,
         ),
@@ -276,4 +299,3 @@ def get_config() -> AppConfig:
 def clear_config_cache() -> None:
     """Clear the cached configuration, mainly for tests or environment reloads."""
     get_config.cache_clear()
-
