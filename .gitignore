@@ -1,9 +1,18 @@
+# PyCharm
+.idea/
+
+# Python
 __pycache__/
 *.py[cod]
+
+# Virtual environments
 .venv/
 venv/
-.idea/workspace.xml
-.idea/shelf/
-.idea/httpRequests/
-dist/
-build/
+env/
+
+# Generated reports
+*.csv
+*.html
+
+# Logs
+*.log
