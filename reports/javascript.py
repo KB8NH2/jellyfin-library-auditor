@@ -1,0 +1,98 @@
+"""Shared JavaScript asset writer for static audit reports."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def write_javascript(path: Path) -> None:
+    """Write the shared JavaScript asset."""
+    path.write_text(_script(), encoding="utf-8")
+
+
+def _script() -> str:
+    """Return the shared report JavaScript."""
+    return "\n".join(
+        (
+            "(function () {",
+            "  const root = document.querySelector('[data-nav-current]');",
+            "  if (!root) { return; }",
+            "  const currentNav = root.dataset.navCurrent;",
+            "  document.querySelectorAll('.nav-link[data-nav]').forEach((link) => {",
+            "    if (link.dataset.nav === currentNav) {",
+            "      link.classList.add('is-active');",
+            "    }",
+            "  });",
+            "",
+            "  const searchInput = document.getElementById('report-search');",
+            "  const detailsGroups = Array.from(document.querySelectorAll('details[data-group]'));",
+            "",
+            "  function applySearch() {",
+            "    const query = (searchInput?.value || '').trim().toLowerCase();",
+            "",
+            "    document.querySelectorAll('[data-finding-row]').forEach((row) => {",
+            "      const matches = query === '' || row.dataset.search.includes(query);",
+            "      row.hidden = !matches;",
+            "    });",
+            "",
+            "    document.querySelectorAll('[data-search-card]').forEach((card) => {",
+            "      const matches = query === '' || card.dataset.search.includes(query);",
+            "      card.hidden = !matches;",
+            "    });",
+            "",
+            "    document.querySelectorAll('[data-table-wrapper]').forEach((wrapper) => {",
+            "      const hasVisibleRows = wrapper.querySelector('[data-finding-row]:not([hidden])') !== null;",
+            "      wrapper.hidden = !hasVisibleRows;",
+            "    });",
+            "",
+            "    detailsGroups.slice().reverse().forEach((group) => {",
+            "      const ownMatch = query === '' || (group.dataset.search || '').includes(query);",
+            "      const visibleRows = group.querySelector('[data-finding-row]:not([hidden])') !== null;",
+            "      const visibleCards = group.querySelector('[data-search-card]:not([hidden])') !== null;",
+            "      const visibleGroups = Array.from(group.querySelectorAll(':scope > .details-body > details[data-group]'))",
+            "        .some((nested) => nested.style.display !== 'none');",
+            "      const visible = ownMatch || visibleRows || visibleCards || visibleGroups;",
+            "      group.style.display = visible ? '' : 'none';",
+            "      if (query !== '' && visible) {",
+            "        group.open = true;",
+            "      }",
+            "      if (query === '') {",
+            "        group.open = false;",
+            "      }",
+            "    });",
+            "  }",
+            "",
+            "  function setAll(expanded) {",
+            "    detailsGroups.forEach((group) => {",
+            "      if (group.style.display !== 'none') {",
+            "        group.open = expanded;",
+            "      }",
+            "    });",
+            "  }",
+            "",
+            "  searchInput?.addEventListener('input', applySearch);",
+            "  document.getElementById('expand-all-button')?.addEventListener('click', () => setAll(true));",
+            "  document.getElementById('collapse-all-button')?.addEventListener('click', () => setAll(false));",
+            "  applySearch();",
+            "})();",
+            "",
+            "function sortReportTable(button) {",
+            "  const table = button.closest('table');",
+            "  const body = table.tBodies[0];",
+            "  const columnIndex = Number(button.dataset.column);",
+            "  const rows = Array.from(body.rows);",
+            "  const ascending = table.dataset.sortColumn !== String(columnIndex)",
+            "    || table.dataset.sortDirection !== 'asc';",
+            "  rows.sort((left, right) => {",
+            "    const leftValue = left.cells[columnIndex].textContent.trim().toLowerCase();",
+            "    const rightValue = right.cells[columnIndex].textContent.trim().toLowerCase();",
+            "    if (leftValue < rightValue) { return ascending ? -1 : 1; }",
+            "    if (leftValue > rightValue) { return ascending ? 1 : -1; }",
+            "    return 0;",
+            "  });",
+            "  rows.forEach((row) => body.appendChild(row));",
+            "  table.dataset.sortColumn = String(columnIndex);",
+            "  table.dataset.sortDirection = ascending ? 'asc' : 'desc';",
+            "}",
+        )
+    )
