@@ -17,33 +17,11 @@ def render_dashboard_page(
 ) -> str:
     """Return the dashboard landing page HTML body."""
     summary_cards = (
-        templates.SummaryCard(
-            title="Server Name",
-            value=server_display_name,
-            accent="server",
-            subtitle="Jellyfin server",
-        ),
-        templates.SummaryCard(
-            title="Newest Report",
-            value=generated_at_text,
-            accent="timestamp",
-            subtitle="Generated timestamp",
-        ),
-        templates.SummaryCard(
-            title="Libraries Audited",
-            value=str(libraries_audited),
-            accent="libraries",
-        ),
-        templates.SummaryCard(
-            title="Media Items",
-            value=str(media_items_processed),
-            accent="media",
-        ),
-        templates.SummaryCard(
-            title="Actionable Findings",
-            value=str(actionable_findings_count),
-            accent="findings",
-        ),
+        templates.SummaryCard("Server Name", server_display_name, "server", subtitle="Jellyfin server"),
+        templates.SummaryCard("Newest Report", generated_at_text, "timestamp", subtitle="Generated timestamp"),
+        templates.SummaryCard("Libraries Audited", str(libraries_audited), "libraries"),
+        templates.SummaryCard("Media Items", str(media_items_processed), "media"),
+        templates.SummaryCard("Actionable Findings", str(actionable_findings_count), "findings"),
     )
     return templates.render_page(
         title="Dashboard",
@@ -57,36 +35,16 @@ def render_dashboard_page(
         content="\n".join(
             (
                 templates.render_summary_cards(summary_cards),
-                _card_section(
-                    "Libraries",
-                    "Open a compact maintenance view for each library.",
-                    library_cards,
-                    section_id="libraries-overview",
-                ),
-                _card_section(
-                    "Audit Checks",
-                    "Fix one class of issue at a time.",
-                    check_cards,
-                    section_id="checks-overview",
-                ),
+                _card_section("Libraries", "Open a compact maintenance view for each library.", library_cards, section_id="libraries-overview"),
+                _card_section("Audit Checks", "Fix one class of issue at a time.", check_cards, section_id="checks-overview"),
             )
         ),
     )
 
 
-def _card_section(
-    title: str,
-    subtitle: str,
-    cards: tuple[templates.SummaryCard, ...],
-    *,
-    section_id: str,
-) -> str:
+def _card_section(title: str, subtitle: str, cards: tuple[templates.SummaryCard, ...], *, section_id: str) -> str:
     """Return a dashboard card section."""
-    body = (
-        templates.render_summary_cards(cards)
-        if cards
-        else '    <p class="muted-text">No actionable items.</p>'
-    )
+    body = templates.render_summary_cards(cards) if cards else '    <p class="muted-text">No actionable items.</p>'
     return "\n".join(
         (
             f'  <section class="section-card" id="{section_id}">',

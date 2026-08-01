@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime
-import shutil
 from pathlib import Path
+import shutil
 from urllib.parse import urlsplit
 
 from config import get_config
@@ -40,25 +40,17 @@ CSV_HEADER = (
     "Artwork Source",
     "Message",
 )
-NON_ACTIONABLE_CHECKS = frozenset(
-    {
-        "hdr_video",
-        "unknown_video_codec",
-        "unknown_audio_codec",
-    }
-)
+NON_ACTIONABLE_CHECKS = frozenset({"hdr_video", "missing_nfo"})
 
 
 def write_csv_report(result: AuditServerResult) -> Path:
     """Write a CSV report containing one row per finding."""
     output_path = get_config().reporting.output.audit_csv
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(CSV_HEADER)
         writer.writerows(_csv_rows(result))
-
     return output_path
 
 
@@ -77,12 +69,12 @@ def write_reports(result: AuditServerResult) -> Path:
     site_links = _site_links(result, actionable_findings)
     generated_at_text = _generated_at_text()
     server_display_name = result.server_name or _server_display_name(
-        config.jellyfin.server_url
+        result.server_url or ""
     )
 
     write_css(site_paths.css_path)
     write_javascript(site_paths.js_path)
-    write_dashboard(
+    _write_dashboard(
         result,
         actionable_findings=actionable_findings,
         site_links=site_links,
@@ -90,22 +82,21 @@ def write_reports(result: AuditServerResult) -> Path:
         generated_at_text=generated_at_text,
         server_display_name=server_display_name,
     )
-    write_library_pages(
+    _write_library_pages(
         result,
         actionable_findings=actionable_findings,
         site_links=site_links,
         site_paths=site_paths,
     )
-    write_check_pages(
+    _write_check_pages(
         actionable_findings=actionable_findings,
         site_links=site_links,
         site_paths=site_paths,
     )
-
     return site_paths.index_path
 
 
-def write_dashboard(
+def _write_dashboard(
     result: AuditServerResult,
     *,
     actionable_findings: tuple,
@@ -136,7 +127,7 @@ def write_dashboard(
     )
 
 
-def write_library_pages(
+def _write_library_pages(
     result: AuditServerResult,
     *,
     actionable_findings: tuple,
@@ -162,7 +153,7 @@ def write_library_pages(
         )
 
 
-def write_check_pages(
+def _write_check_pages(
     *,
     actionable_findings: tuple,
     site_links: templates.SiteLinks,
@@ -172,10 +163,7 @@ def write_check_pages(
     grouped = templates.group_findings_by_check(actionable_findings)
     for check_name, findings in sorted(
         grouped.items(),
-        key=lambda entry: (
-            -len(entry[1]),
-            templates.check_display_label(entry[0]).casefold(),
-        ),
+        key=lambda entry: (-len(entry[1]), templates.check_display_label(entry[0]).casefold()),
     ):
         page_path = site_paths.checks_dir / site_links.check_filename_map[check_name]
         body = render_check_page(
@@ -222,7 +210,6 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 finding.message,
             )
         )
-
     return tuple(rows)
 
 
@@ -275,10 +262,7 @@ def _check_cards(
     cards: list[templates.SummaryCard] = []
     for check_name, findings in sorted(
         grouped.items(),
-        key=lambda entry: (
-            -len(entry[1]),
-            templates.check_display_label(entry[0]).casefold(),
-        ),
+        key=lambda entry: (-len(entry[1]), templates.check_display_label(entry[0]).casefold()),
     ):
         cards.append(
             templates.SummaryCard(
@@ -316,7 +300,6 @@ def _media_anchor_map(actionable_findings: tuple) -> dict[tuple[str, str], str]:
     grouped = templates.group_findings_by_media(actionable_findings)
     anchors: dict[tuple[str, str], str] = {}
     used_anchors: set[str] = set()
-
     for media_key, media_findings in grouped.items():
         item = templates.media_item_from_findings(media_findings)
         base_anchor = templates.slugify(f"{item.display_name}_{item.id}")
@@ -327,16 +310,12 @@ def _media_anchor_map(actionable_findings: tuple) -> dict[tuple[str, str], str]:
             counter += 1
         anchors[media_key] = anchor
         used_anchors.add(anchor)
-
     return anchors
 
 
 def _library_names(result: AuditServerResult) -> tuple[str, ...]:
     """Return all audited library names."""
-    names = {
-        library_result.library.name
-        for library_result in result.library_results
-    }
+    names = {library_result.library.name for library_result in result.library_results}
     names.update(finding.media_item.library for finding in result.findings)
     return tuple(sorted(names, key=str.casefold))
 

@@ -18,6 +18,7 @@ from audit import audit_media_item
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
+from comparison import write_comparison_reports
 from config import ConfigError
 from config import ProcessingConfig
 from config import get_config
@@ -47,6 +48,7 @@ class AuditRunOptions:
     """Normalized command-line options for an audit run."""
 
     server_key: str | None
+    compare_server_key: str | None
     write_csv: bool
     write_html: bool
     library_names: tuple[str, ...]
@@ -101,6 +103,7 @@ def audit_server(
                 f"Unable to reach Jellyfin server at {server.url}."
             )
         server_name = client.get_server_name()
+        server_display_name = server_name or server.name
 
         libraries = client.get_libraries()
         selected_libraries = _select_audit_libraries(
@@ -114,7 +117,11 @@ def audit_server(
         media_items_processed = 0
 
         for library in selected_libraries:
-            LOGGER.info("Auditing library %s...", library.name)
+            LOGGER.info(
+                "Auditing library %s on server %s...",
+                library.name,
+                server_display_name,
+            )
             library_result = _audit_library_result(client, library)
             library_results.append(library_result)
             media_items_processed += library_result.media_items_processed
@@ -170,6 +177,7 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
         server_key=_normalize_optional_server_key(args.server),
+        compare_server_key=_normalize_optional_server_key(args.compare),
         write_csv=args.csv or not report_flags_selected,
         write_html=args.html or not report_flags_selected,
         library_names=_normalize_requested_library_names(args.library),
@@ -219,6 +227,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_csv_report(filtered_result)
         if options.write_html:
             write_html_report(filtered_result)
+        if options.compare_server_key is not None:
+            compare_result = audit_server(
+                options.compare_server_key,
+                options.library_names,
+            )
+            _write_comparison_site(result, compare_result)
     except CommandLineUsageError as error:
         LOGGER.error("%s", error)
         return 2
@@ -361,6 +375,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         help="Select a configured server from servers.toml. Defaults to default_server.",
     )
     parser.add_argument(
+        "--compare",
+        metavar="SERVER",
+        help="Compare the selected server against another configured server and generate comparison reports.",
+    )
+    parser.add_argument(
         "--html",
         action="store_true",
         help="Write the HTML audit report. Defaults to enabled unless --csv/--html is used.",
@@ -431,6 +450,17 @@ def _select_server(config, server_key: str | None) -> ServerConfig:
     if server_key is None:
         return config.servers.get_default()
     return config.servers.get(server_key)
+
+
+def _write_comparison_site(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+) -> None:
+    """Write comparison reports for two audited servers."""
+    if left_result.server_key == right_result.server_key:
+        raise CommandLineUsageError("--compare must target a different server.")
+
+    write_comparison_reports(left_result, right_result)
 
 
 def _parse_categories(values: Iterable[str]) -> frozenset[AuditCategory] | None:

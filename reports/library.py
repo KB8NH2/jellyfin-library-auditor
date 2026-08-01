@@ -21,33 +21,14 @@ TABLE_HEADERS = (
 )
 
 
-def render_library_page(
-    library_name: str,
-    findings: tuple,
-    *,
-    site_links: templates.SiteLinks,
-) -> str:
+def render_library_page(library_name: str, findings: tuple, *, site_links: templates.SiteLinks) -> str:
     """Return one library report page."""
     media_groups = templates.group_findings_by_media(findings)
     cards = (
-        templates.SummaryCard(
-            title="Library",
-            value=library_name,
-            accent="library",
-            subtitle="Current library",
-        ),
-        templates.SummaryCard(
-            title="Media Items With Issues",
-            value=str(len(media_groups)),
-            accent="media",
-        ),
-        templates.SummaryCard(
-            title="Actionable Findings",
-            value=str(len(findings)),
-            accent="findings",
-        ),
+        templates.SummaryCard("Library", library_name, "library", subtitle="Current library"),
+        templates.SummaryCard("Media Items With Issues", str(len(media_groups)), "media"),
+        templates.SummaryCard("Actionable Findings", str(len(findings)), "findings"),
     )
-
     content = "\n".join(
         (
             templates.render_summary_cards(cards),
@@ -56,11 +37,7 @@ def render_library_page(
             "    <p class=\"muted-text\">Rows represent media items that need attention.</p>",
             templates.render_sortable_table(
                 TABLE_HEADERS,
-                _media_rows(
-                    findings,
-                    site_links=site_links,
-                    relative_prefix="../",
-                ),
+                _media_rows(findings, site_links=site_links, relative_prefix="../"),
             ),
             "  </section>",
         )
@@ -82,16 +59,10 @@ def render_library_page(
     )
 
 
-def _media_rows(
-    findings: tuple,
-    *,
-    site_links: templates.SiteLinks,
-    relative_prefix: str,
-) -> tuple[str, ...]:
+def _media_rows(findings: tuple, *, site_links: templates.SiteLinks, relative_prefix: str) -> tuple[str, ...]:
     """Return one sortable row per media item."""
     grouped = templates.group_findings_by_media(findings)
     rows: list[str] = []
-
     for _, media_findings in sorted(
         grouped.items(),
         key=lambda entry: templates.media_item_from_findings(entry[1]).display_name.casefold(),
@@ -112,16 +83,10 @@ def _media_rows(
                 )
             )
         )
-
     return tuple(rows)
 
 
-def _findings_summary(
-    findings: tuple,
-    *,
-    site_links: templates.SiteLinks,
-    relative_prefix: str,
-) -> str:
+def _findings_summary(findings: tuple, *, site_links: templates.SiteLinks, relative_prefix: str) -> str:
     """Return a compact linked findings summary."""
     unique_checks: list[str] = []
     seen: set[str] = set()
@@ -130,10 +95,8 @@ def _findings_summary(
             continue
         seen.add(finding.check_name)
         unique_checks.append(finding.check_name)
-
     parts = [
-        f'<a href="{templates.check_page_href(check_name, site_links=site_links, relative_prefix=relative_prefix)}">'
-        f"{templates.escape(templates.check_summary_label(check_name))}</a>"
+        f'<a href="{templates.check_page_href(check_name, site_links=site_links, relative_prefix=relative_prefix)}">{templates.escape(templates.check_summary_label(check_name))}</a>'
         for check_name in unique_checks
     ]
     return ", ".join(parts)
