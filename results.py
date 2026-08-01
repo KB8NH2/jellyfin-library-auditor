@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from audit_types import AuditFinding
+from models import MediaItem
 from models import MediaLibrary
 
 
@@ -11,6 +12,7 @@ class LibraryAuditResult:
     Attributes:
         library: Library that was audited.
         media_items_processed: Number of media items evaluated.
+        audited_items: Media items that were evaluated for the library.
         items_with_english_subtitles: Number of items with configured English
             subtitles.
         items_with_local_nfo: Number of items with a local NFO file.
@@ -21,6 +23,7 @@ class LibraryAuditResult:
 
     library: MediaLibrary
     media_items_processed: int
+    audited_items: tuple[MediaItem, ...]
     items_with_english_subtitles: int
     items_with_local_nfo: int
     items_with_local_poster: int
@@ -56,7 +59,9 @@ class AuditServerResult:
         libraries_audited: Number of libraries that were audited.
         media_items_processed: Number of media items evaluated.
         library_results: Per-library audit results and summary metrics.
+        server_key: Configured server key used for the audit.
         server_name: Jellyfin server display name when available.
+        server_url: Jellyfin server URL used for the audit.
         findings: Findings produced while auditing the server.
     """
 
@@ -64,7 +69,9 @@ class AuditServerResult:
     media_items_processed: int
     library_results: tuple[LibraryAuditResult, ...]
     findings: tuple[AuditFinding, ...]
+    server_key: str | None = None
     server_name: str | None = None
+    server_url: str | None = None
 
     @property
     def findings_count(self) -> int:
@@ -73,6 +80,14 @@ class AuditServerResult:
     @property
     def has_findings(self) -> bool:
         return bool(self.findings)
+
+    @property
+    def audited_items(self) -> tuple[MediaItem, ...]:
+        """Return every media item evaluated across all audited libraries."""
+        items: list[MediaItem] = []
+        for library_result in self.library_results:
+            items.extend(library_result.audited_items)
+        return tuple(items)
 
 
 def _percentage(count: int, total: int) -> float:
@@ -86,4 +101,5 @@ __all__ = [
     "AuditFinding",
     "AuditServerResult",
     "LibraryAuditResult",
+    "MediaItem",
 ]

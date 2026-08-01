@@ -13,9 +13,8 @@ from audit_types import AuditSeverity
 from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
-from media import is_hdr
+from media import has_jellyfin_primary_image
 from media import local_backdrop_exists
-from media import local_nfo_exists
 from media import local_poster_exists
 from models import MediaItem
 
@@ -33,10 +32,9 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
         missing_english_subtitles,
         missing_poster,
         missing_backdrop,
-        missing_nfo,
+        missing_primary_image,
         unknown_video_codec,
         unknown_audio_codec,
-        hdr_video,
     )
     findings: list[AuditFinding] = []
 
@@ -111,24 +109,25 @@ def missing_backdrop(item: MediaItem) -> AuditFinding | None:
     )
 
 
-def missing_nfo(item: MediaItem) -> AuditFinding | None:
-    """Return a finding when no NFO file exists.
+def missing_primary_image(item: MediaItem) -> AuditFinding | None:
+    """Return a finding when Jellyfin has no primary image for the item.
 
     Args:
         item: Media item to evaluate.
 
     Returns:
-        An informational finding, or ``None`` when an NFO file exists.
+        An informational finding, or ``None`` when Jellyfin reports a primary
+        image.
     """
-    if local_nfo_exists(item):
+    if has_jellyfin_primary_image(item):
         return None
 
     return _finding(
         item,
-        category=AuditCategory.METADATA,
+        category=AuditCategory.ARTWORK,
         severity=AuditSeverity.INFO,
-        check_name="missing_nfo",
-        message="No local NFO file was found.",
+        check_name="missing_primary_image",
+        message="No Jellyfin primary image was found.",
     )
 
 
@@ -175,27 +174,6 @@ def unknown_audio_codec(item: MediaItem) -> AuditFinding | None:
     )
 
 
-def hdr_video(item: MediaItem) -> AuditFinding | None:
-    """Return an informational finding when the item is HDR.
-
-    Args:
-        item: Media item to evaluate.
-
-    Returns:
-        An informational finding, or ``None`` when the item is not HDR.
-    """
-    if not is_hdr(item):
-        return None
-
-    return _finding(
-        item,
-        category=AuditCategory.VIDEO,
-        severity=AuditSeverity.INFO,
-        check_name="hdr_video",
-        message="The media item has HDR video.",
-    )
-
-
 def _finding(
     item: MediaItem,
     *,
@@ -230,10 +208,9 @@ __all__ = [
     "AuditFinding",
     "AuditSeverity",
     "audit_media_item",
-    "hdr_video",
     "missing_backdrop",
     "missing_english_subtitles",
-    "missing_nfo",
+    "missing_primary_image",
     "missing_poster",
     "unknown_audio_codec",
     "unknown_video_codec",

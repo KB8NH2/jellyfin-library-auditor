@@ -13,7 +13,8 @@ from typing import Any
 
 import requests
 
-from config import get_config
+from config import ProcessingConfig
+from config import ServerConfig
 from models import AudioTrack
 from models import MediaItem
 from models import MediaLibrary
@@ -38,6 +39,8 @@ VIDEO_STREAM_TYPE = "video"
 AUDIO_STREAM_TYPE = "audio"
 SUBTITLE_STREAM_TYPE = "subtitle"
 RequestParamValue = str | bytes | int | float | list[str] | tuple[str, ...] | None
+DEFAULT_TIMEOUT_SECONDS = 30.0
+DEFAULT_PAGE_SIZE = 200
 
 
 class JellyfinError(RuntimeError):
@@ -59,25 +62,32 @@ class JellyfinResponseError(JellyfinError):
 class JellyfinClient:
     """HTTP client that reads Jellyfin data and returns normalized models."""
 
-    def __init__(self) -> None:
-        """Initialize the Jellyfin client from application configuration."""
-        self._config = get_config()
+    def __init__(
+        self,
+        server: ServerConfig,
+        *,
+        processing: ProcessingConfig | None = None,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        page_size: int = DEFAULT_PAGE_SIZE,
+    ) -> None:
+        """Initialize the Jellyfin client from one server configuration."""
         self._session = requests.Session()
+        self._processing = processing
 
-        api_key = self._config.jellyfin.api_key
-        if not api_key:
+        if not server.api_key:
             raise JellyfinConfigurationError(
-                "JELLYFIN_API_KEY must be configured before using JellyfinClient."
+                "servers.toml must define a non-empty api_key for the selected server."
             )
 
-        self._server_url = self._config.jellyfin.server_url.rstrip("/")
-        self._timeout = self._config.jellyfin.timeout_seconds
-        self._page_size = self._config.jellyfin.page_size
+        self._server = server
+        self._server_url = server.url.rstrip("/")
+        self._timeout = timeout_seconds
+        self._page_size = page_size
 
         self._session.headers.update(
             {
                 "Accept": "application/json",
-                "X-Emby-Token": api_key,
+                "X-Emby-Token": server.api_key,
             }
         )
 
@@ -197,9 +207,17 @@ class JellyfinClient:
         media_items: list[MediaItem] = []
 
         for library in self.get_libraries():
-            if library.is_movie_library and not self._config.processing.enable_movies:
+            if (
+                self._processing is not None
+                and library.is_movie_library
+                and not self._processing.enable_movies
+            ):
                 continue
-            if library.is_tv_library and not self._config.processing.enable_tv:
+            if (
+                self._processing is not None
+                and library.is_tv_library
+                and not self._processing.enable_tv
+            ):
                 continue
             if not library.is_movie_library and not library.is_tv_library:
                 continue

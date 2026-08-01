@@ -1,4 +1,4 @@
-"""Shared HTML fragments and helpers for report generation."""
+"""Shared HTML fragments and grouping helpers for report generation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from html import escape
 from pathlib import Path
 
 import audit_types
+from models import MediaItem
 
 
 SEVERITY_SORT_ORDER = {
@@ -17,12 +18,22 @@ SEVERITY_SORT_ORDER = {
 }
 CHECK_DISPLAY_LABELS = {
     "missing_english_subtitles": "Missing English Subtitles",
-    "missing_poster": "Missing Posters",
-    "missing_backdrop": "Missing Backdrops",
+    "missing_poster": "Missing Poster",
+    "missing_backdrop": "Missing Backdrop",
+    "missing_primary_image": "Missing Primary Image",
     "missing_nfo": "Missing NFO",
     "unknown_video_codec": "Unknown Video Codec",
     "unknown_audio_codec": "Unknown Audio Codec",
     "hdr_video": "HDR Video",
+}
+CHECK_SUMMARY_LABELS = {
+    "missing_english_subtitles": "English Subtitles",
+    "missing_poster": "Poster",
+    "missing_backdrop": "Backdrop",
+    "missing_primary_image": "Primary Image",
+    "missing_nfo": "NFO",
+    "unknown_video_codec": "Video Codec",
+    "unknown_audio_codec": "Audio Codec",
 }
 
 
@@ -35,7 +46,14 @@ class SummaryCard:
     accent: str
     href: str | None = None
     subtitle: str | None = None
-    search_text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Breadcrumb:
+    """Represents one breadcrumb item."""
+
+    label: str
+    href: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,51 +62,35 @@ class SitePaths:
 
     root_dir: Path
     index_path: Path
+    libraries_dir: Path
+    checks_dir: Path
     css_path: Path
     js_path: Path
-    categories_dir: Path
-    libraries_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class SiteLinks:
+    """Holds filename and anchor mappings for generated pages."""
+
+    library_slug_map: dict[str, str]
+    check_filename_map: dict[str, str]
+    media_anchor_map: dict[tuple[str, str], str]
 
 
 def sort_findings(
     findings: tuple[audit_types.AuditFinding, ...],
 ) -> tuple[audit_types.AuditFinding, ...]:
-    """Sort findings by severity, category, and title."""
+    """Sort findings by severity, title, and check name."""
     return tuple(
         sorted(
             findings,
             key=lambda finding: (
                 SEVERITY_SORT_ORDER[finding.severity],
-                finding.category.value,
                 finding.media_item.display_name.casefold(),
+                check_display_label(finding.check_name).casefold(),
             ),
         )
     )
-
-
-def sort_findings_by_title(
-    findings: tuple[audit_types.AuditFinding, ...],
-) -> tuple[audit_types.AuditFinding, ...]:
-    """Sort findings alphabetically by display title."""
-    return tuple(
-        sorted(
-            findings,
-            key=lambda finding: (
-                finding.media_item.display_name.casefold(),
-                finding.check_name.casefold(),
-            ),
-        )
-    )
-
-
-def group_findings_by_category(
-    findings: tuple[audit_types.AuditFinding, ...],
-) -> dict[audit_types.AuditCategory, tuple[audit_types.AuditFinding, ...]]:
-    """Group findings by category."""
-    grouped: dict[audit_types.AuditCategory, list[audit_types.AuditFinding]] = {}
-    for finding in findings:
-        grouped.setdefault(finding.category, []).append(finding)
-    return {key: tuple(items) for key, items in grouped.items()}
 
 
 def group_findings_by_library(
@@ -101,13 +103,23 @@ def group_findings_by_library(
     return {key: tuple(items) for key, items in grouped.items()}
 
 
-def group_findings_by_severity(
+def group_findings_by_check(
     findings: tuple[audit_types.AuditFinding, ...],
-) -> dict[audit_types.AuditSeverity, tuple[audit_types.AuditFinding, ...]]:
-    """Group findings by severity."""
-    grouped: dict[audit_types.AuditSeverity, list[audit_types.AuditFinding]] = {}
+) -> dict[str, tuple[audit_types.AuditFinding, ...]]:
+    """Group findings by check name."""
+    grouped: dict[str, list[audit_types.AuditFinding]] = {}
     for finding in findings:
-        grouped.setdefault(finding.severity, []).append(finding)
+        grouped.setdefault(finding.check_name, []).append(finding)
+    return {key: tuple(items) for key, items in grouped.items()}
+
+
+def group_findings_by_media(
+    findings: tuple[audit_types.AuditFinding, ...],
+) -> dict[tuple[str, str], tuple[audit_types.AuditFinding, ...]]:
+    """Group findings by unique media item."""
+    grouped: dict[tuple[str, str], list[audit_types.AuditFinding]] = {}
+    for finding in findings:
+        grouped.setdefault(media_key(finding.media_item), []).append(finding)
     return {key: tuple(items) for key, items in grouped.items()}
 
 
@@ -117,8 +129,9 @@ def group_findings_by_series(
     """Group findings by series name."""
     grouped: dict[str, list[audit_types.AuditFinding]] = {}
     for finding in findings:
-        series_name = finding.media_item.series_name or "Unknown Series"
-        grouped.setdefault(series_name, []).append(finding)
+        grouped.setdefault(finding.media_item.series_name or "Unknown Series", []).append(
+            finding
+        )
     return {key: tuple(items) for key, items in grouped.items()}
 
 
@@ -142,7 +155,7 @@ def group_findings_by_season(
 def sort_named_groups(
     grouped: dict[str, tuple[audit_types.AuditFinding, ...]],
 ) -> tuple[tuple[str, tuple[audit_types.AuditFinding, ...]], ...]:
-    """Sort string-keyed groups by count and name."""
+    """Sort named groups by finding count and name."""
     return tuple(
         sorted(
             grouped.items(),
@@ -155,6 +168,7 @@ def sort_season_groups(
     grouped: dict[str, tuple[audit_types.AuditFinding, ...]],
 ) -> tuple[tuple[str, tuple[audit_types.AuditFinding, ...]], ...]:
     """Sort season groups numerically when possible."""
+
     def sort_key(entry: tuple[str, tuple[audit_types.AuditFinding, ...]]) -> tuple[int, str]:
         label = entry[0]
         match = re.search(r"(\d+)$", label)
@@ -166,7 +180,7 @@ def sort_season_groups(
 
 
 def build_slug_map(names: tuple[str, ...]) -> dict[str, str]:
-    """Return unique slugs for names."""
+    """Return unique slugs for the supplied names."""
     slug_map: dict[str, str] = {}
     used_slugs: set[str] = set()
 
@@ -195,37 +209,87 @@ def check_display_label(check_name: str) -> str:
     return CHECK_DISPLAY_LABELS.get(check_name, check_name.replace("_", " ").title())
 
 
-def search_text_for_finding(finding: audit_types.AuditFinding) -> str:
-    """Return normalized search text for a finding."""
-    parts = (
-        finding.media_item.display_name,
-        finding.media_item.series_name or "",
-        check_display_label(finding.check_name),
-        finding.message,
+def check_summary_label(check_name: str) -> str:
+    """Return a concise check label for the findings summary column."""
+    return CHECK_SUMMARY_LABELS.get(check_name, check_display_label(check_name))
+
+
+def media_key(item: MediaItem) -> tuple[str, str]:
+    """Return a stable media item key."""
+    return (item.library, item.id)
+
+
+def media_item_from_findings(
+    findings: tuple[audit_types.AuditFinding, ...],
+) -> MediaItem:
+    """Return the media item shared by a grouped set of findings."""
+    return findings[0].media_item
+
+
+def media_anchor(item: MediaItem, site_links: SiteLinks) -> str:
+    """Return the table row anchor for a media item."""
+    return site_links.media_anchor_map[media_key(item)]
+
+
+def library_page_href(
+    library_name: str,
+    *,
+    site_links: SiteLinks,
+    relative_prefix: str,
+) -> str:
+    """Return the relative href for a library page."""
+    return f"{relative_prefix}libraries/{site_links.library_slug_map[library_name]}.html"
+
+
+def check_page_href(
+    check_name: str,
+    *,
+    site_links: SiteLinks,
+    relative_prefix: str,
+) -> str:
+    """Return the relative href for a check page."""
+    return f"{relative_prefix}checks/{site_links.check_filename_map[check_name]}"
+
+
+def library_row_href(
+    item: MediaItem,
+    *,
+    site_links: SiteLinks,
+    relative_prefix: str,
+) -> str:
+    """Return the relative href to the media row on its library page."""
+    return (
+        f"{library_page_href(item.library, site_links=site_links, relative_prefix=relative_prefix)}"
+        f"#{media_anchor(item, site_links)}"
     )
+
+
+def row_search_text(findings: tuple[audit_types.AuditFinding, ...]) -> str:
+    """Return normalized search text for a media row."""
+    item = media_item_from_findings(findings)
+    parts = [
+        item.display_name,
+        item.title,
+        item.library,
+        item.series_name or "",
+        item.season_name or "",
+        str(item.year) if item.year is not None else "",
+    ]
+    for finding in findings:
+        parts.append(check_display_label(finding.check_name))
+        parts.append(check_summary_label(finding.check_name))
+        parts.append(finding.message)
+
     return " ".join(part.strip().lower() for part in parts if part.strip())
 
 
-def finding_row_id(finding_id_map: dict[int, str], finding: audit_types.AuditFinding) -> str:
-    """Return the stable row id for a finding."""
-    return finding_id_map[id(finding)]
-
-
-def finding_link(
-    finding: audit_types.AuditFinding,
-    *,
-    library_slug_map: dict[str, str],
-    finding_id_map: dict[int, str],
-    relative_prefix: str,
-    current_library_name: str | None = None,
-) -> str:
-    """Return the href for a finding title link."""
-    row_id = finding_row_id(finding_id_map, finding)
-    if current_library_name == finding.media_item.library:
-        return f"#{row_id}"
-
-    library_slug = library_slug_map[finding.media_item.library]
-    return f"{relative_prefix}libraries/{library_slug}.html#{row_id}"
+def media_sort_key(item: MediaItem) -> tuple[int, int, str]:
+    """Return a stable sort key for grouped media items."""
+    return (
+        item.season_number or 0,
+        item.episode_number or 0,
+        item.display_name.casefold(),
+    )
 
 
 def render_page(
@@ -236,18 +300,27 @@ def render_page(
     heading: str,
     intro: str,
     content: str,
+    breadcrumbs: tuple[Breadcrumb, ...],
+    include_search: bool,
+    include_expand_controls: bool,
 ) -> str:
-    """Return a full HTML page document body."""
+    """Return a full HTML page body."""
+    toolbar_html = render_toolbar(include_expand_controls) if include_search else ""
     return "\n".join(
         (
             f'<main class="page-shell" data-nav-current="{escape(current_nav)}">',
+            '  <header class="sticky-header">',
             render_navigation(relative_prefix),
-            "  <header class=\"page-header\">",
-            f"    <h1>{escape(heading)}</h1>",
-            f"    <p class=\"page-intro\">{escape(intro)}</p>",
+            render_breadcrumbs(breadcrumbs),
+            "    <section class=\"page-header-card\">",
+            f"      <h1>{escape(heading)}</h1>",
+            f"      <p class=\"page-intro\">{escape(intro)}</p>",
+            "    </section>",
+            toolbar_html,
             "  </header>",
-            render_toolbar(),
+            '  <section class="page-content">',
             content,
+            "  </section>",
             render_about_section(title),
             "</main>",
         )
@@ -255,52 +328,80 @@ def render_page(
 
 
 def render_navigation(relative_prefix: str) -> str:
-    """Return the shared navigation bar."""
-    dashboard_href = f"{relative_prefix}index.html"
-    libraries_href = f"{relative_prefix}index.html#libraries-overview"
-    categories_href = f"{relative_prefix}index.html#categories-overview"
+    """Return the shared primary navigation."""
     return "\n".join(
         (
-            '  <nav class="site-nav">',
-            f'    <a class="nav-link" data-nav="Dashboard" href="{escape(dashboard_href)}">Dashboard</a>',
-            f'    <a class="nav-link" data-nav="Libraries" href="{escape(libraries_href)}">Libraries</a>',
-            f'    <a class="nav-link" data-nav="Categories" href="{escape(categories_href)}">Categories</a>',
-            '    <a class="nav-link" data-nav="Search" href="#page-search">Search</a>',
-            '    <a class="nav-link" data-nav="About" href="#about">About</a>',
-            "  </nav>",
+            '    <nav class="site-nav" aria-label="Primary">',
+            f'      <a class="nav-link" data-nav="Dashboard" href="{escape(f"{relative_prefix}index.html")}">Dashboard</a>',
+            f'      <a class="nav-link" data-nav="Libraries" href="{escape(f"{relative_prefix}index.html#libraries-overview")}">Libraries</a>',
+            f'      <a class="nav-link" data-nav="Checks" href="{escape(f"{relative_prefix}index.html#checks-overview")}">Audit Checks</a>',
+            '      <a class="nav-link" data-nav="About" href="#about">About</a>',
+            "    </nav>",
         )
     )
 
 
-def render_toolbar() -> str:
-    """Return the shared search and control toolbar."""
+def render_breadcrumbs(breadcrumbs: tuple[Breadcrumb, ...]) -> str:
+    """Return breadcrumb navigation."""
+    items: list[str] = []
+    for breadcrumb in breadcrumbs:
+        if breadcrumb.href:
+            items.append(
+                "        <li>"
+                f'<a href="{escape(breadcrumb.href)}">{escape(breadcrumb.label)}</a>'
+                "</li>"
+            )
+        else:
+            items.append(
+                f'        <li aria-current="page">{escape(breadcrumb.label)}</li>'
+            )
+
     return "\n".join(
         (
-            '  <section class="toolbar-card" id="page-search">',
-            "    <div>",
-            "      <h2>Search</h2>",
-            "      <p class=\"muted-text\">Filter visible findings instantly.</p>",
-            "    </div>",
-            "    <div class=\"toolbar-controls\">",
-            '      <label class="search-field">',
-            "        <span>Search findings</span>",
-            '        <input id="report-search" type="search" placeholder="Search title, series, finding, or message..." autocomplete="off">',
-            "      </label>",
-            '      <button type="button" class="toolbar-button" id="expand-all-button">Expand All</button>',
-            '      <button type="button" class="toolbar-button" id="collapse-all-button">Collapse All</button>',
-            "    </div>",
-            "  </section>",
+            '    <nav class="breadcrumbs" aria-label="Breadcrumb">',
+            "      <ol>",
+            *items,
+            "      </ol>",
+            "    </nav>",
+        )
+    )
+
+
+def render_toolbar(include_expand_controls: bool) -> str:
+    """Return the shared search toolbar."""
+    buttons = ()
+    if include_expand_controls:
+        buttons = (
+            '        <button type="button" class="toolbar-button" id="expand-all-button">Expand All</button>',
+            '        <button type="button" class="toolbar-button" id="collapse-all-button">Collapse All</button>',
+        )
+
+    return "\n".join(
+        (
+            '    <section class="toolbar-card" id="page-search">',
+            "      <div>",
+            "        <h2>Search</h2>",
+            "        <p class=\"muted-text\">Filter visible media rows instantly.</p>",
+            "      </div>",
+            '      <div class="toolbar-controls">',
+            '        <label class="search-field">',
+            "          <span>Search items</span>",
+            '          <input id="report-search" type="search" placeholder="Search title, series, finding, or message..." autocomplete="off">',
+            "        </label>",
+            *buttons,
+            "      </div>",
+            "    </section>",
         )
     )
 
 
 def render_summary_cards(cards: tuple[SummaryCard, ...]) -> str:
-    """Return a responsive summary card grid."""
-    card_html = [render_summary_card(card) for card in cards]
+    """Return a grid of summary cards."""
+    rendered_cards = [render_summary_card(card) for card in cards]
     return "\n".join(
         (
             '  <section class="summary-card-grid">',
-            *card_html,
+            *rendered_cards,
             "  </section>",
         )
     )
@@ -315,12 +416,10 @@ def render_summary_card(card: SummaryCard) -> str:
         if card.subtitle
         else ""
     )
-    search_attribute = escape(card.search_text or f"{card.title} {card.value}")
     return "\n".join(
         (
-            f'    <{tag_name} class="summary-card summary-card-{escape(card.accent)}" '
-            f'data-search-card data-search="{search_attribute}"{href_attribute}>',
-            f'      <h3>{escape(card.title)}</h3>',
+            f'    <{tag_name} class="summary-card summary-card-{escape(card.accent)}"{href_attribute}>',
+            f"      <h3>{escape(card.title)}</h3>",
             f'      <p class="summary-card-value">{escape(card.value)}</p>',
             subtitle_html,
             f"    </{tag_name}>",
@@ -330,58 +429,43 @@ def render_summary_card(card: SummaryCard) -> str:
 
 def render_details_group(
     *,
-    title: str,
+    title_html: str,
     count: int,
     body: str,
     search_text: str,
 ) -> str:
-    """Return a collapsible details group."""
+    """Return a collapsible details section."""
     return "\n".join(
         (
-            f'  <details class="details-group" data-group data-search-container data-search="{escape(search_text.casefold())}">',
-            "    <summary>",
-            f'      <span class="details-title">{escape(title)}</span>',
-            f'      <span class="details-count">({count})</span>',
-            "    </summary>",
-            '    <div class="details-body">',
+            f'    <details class="details-group" data-group data-search="{escape(search_text.casefold())}">',
+            "      <summary>",
+            f'        <span class="details-title">{title_html}</span>',
+            f'        <span class="details-count">({count} findings)</span>',
+            "      </summary>",
+            '      <div class="details-body">',
             body,
-            "    </div>",
-            "  </details>",
+            "      </div>",
+            "    </details>",
         )
     )
 
 
-def render_findings_table(
-    findings: tuple[audit_types.AuditFinding, ...],
-    *,
-    library_slug_map: dict[str, str],
-    finding_id_map: dict[int, str],
-    relative_prefix: str,
-    current_library_name: str | None = None,
-) -> str:
-    """Return one compact findings table."""
+def render_sortable_table(headers: tuple[str, ...], rows: tuple[str, ...]) -> str:
+    """Return a sortable table wrapper."""
     header_html = "".join(
-        (
-            _table_header(0, "Severity"),
-            _table_header(1, "Title"),
-            _table_header(2, "Finding"),
-            _table_header(3, "Message"),
-        )
+        _table_header(index, label)
+        for index, label in enumerate(headers)
     )
-    row_html = [render_finding_row(
-        finding,
-        library_slug_map=library_slug_map,
-        finding_id_map=finding_id_map,
-        relative_prefix=relative_prefix,
-        current_library_name=current_library_name,
-    ) for finding in findings]
+    body_rows = rows or (
+        '<tr class="empty-row"><td colspan="99">No actionable items.</td></tr>',
+    )
     return "\n".join(
         (
-            '    <div class="table-shell" data-table-wrapper>',
-            '      <table class="findings-table">',
+            '    <div class="table-shell">',
+            '      <table class="data-table">',
             f"        <thead><tr>{header_html}</tr></thead>",
             "        <tbody>",
-            *row_html,
+            *body_rows,
             "        </tbody>",
             "      </table>",
             "    </div>",
@@ -389,42 +473,11 @@ def render_findings_table(
     )
 
 
-def _table_header(index: int, label: str) -> str:
-    """Return one sortable table header cell."""
-    return (
-        f'<th><button type="button" class="sort-button" '
-        f'data-column="{index}" onclick="sortReportTable(this)">'
-        f"{escape(label)}</button></th>"
-    )
-
-
-def render_finding_row(
-    finding: audit_types.AuditFinding,
-    *,
-    library_slug_map: dict[str, str],
-    finding_id_map: dict[int, str],
-    relative_prefix: str,
-    current_library_name: str | None = None,
-) -> str:
-    """Return one findings table row."""
-    row_id = finding_row_id(finding_id_map, finding)
-    title_href = finding_link(
-        finding,
-        library_slug_map=library_slug_map,
-        finding_id_map=finding_id_map,
-        relative_prefix=relative_prefix,
-        current_library_name=current_library_name,
-    )
-    return "\n".join(
-        (
-            f'          <tr id="{escape(row_id)}" data-finding-row data-search="{escape(search_text_for_finding(finding))}">',
-            f'            <td>{render_severity_badge(finding.severity)}</td>',
-            f'            <td><a class="finding-link" href="{escape(title_href)}">{escape(finding.media_item.display_name)}</a></td>',
-            f'            <td>{escape(check_display_label(finding.check_name))}</td>',
-            f'            <td>{escape(finding.message)}</td>',
-            "          </tr>",
-        )
-    )
+def render_status_label(present: bool) -> str:
+    """Return a compact present/missing status label."""
+    if present:
+        return '<span class="status-label status-present">✓ present</span>'
+    return '<span class="status-label status-missing">✗ missing</span>'
 
 
 def render_severity_badge(severity: audit_types.AuditSeverity) -> str:
@@ -455,8 +508,6 @@ def page_document(
     body: str,
 ) -> str:
     """Return a full standalone HTML document."""
-    css_href = f"{relative_prefix}css/style.css"
-    js_href = f"{relative_prefix}js/report.js"
     return "\n".join(
         (
             "<!DOCTYPE html>",
@@ -465,31 +516,37 @@ def page_document(
             '  <meta charset="utf-8">',
             '  <meta name="viewport" content="width=device-width, initial-scale=1">',
             f"  <title>{escape(title)}</title>",
-            f'  <link rel="stylesheet" href="{escape(css_href)}">',
+            f'  <link rel="stylesheet" href="{escape(f"{relative_prefix}css/style.css")}">',
             "</head>",
             "<body>",
             body,
-            f'  <script src="{escape(js_href)}"></script>',
+            f'  <script src="{escape(f"{relative_prefix}js/report.js")}"></script>',
             "</body>",
             "</html>",
         )
     )
 
 
-def relative_prefix_for(page_path: Path, root_dir: Path) -> str:
-    """Return the relative prefix from a page back to the site root."""
-    relative_path = page_path.relative_to(root_dir)
-    depth = len(relative_path.parents) - 1
-    if depth <= 0:
-        return ""
-    return "../" * depth
-
-
-def finding_count_summary(findings: tuple[audit_types.AuditFinding, ...]) -> tuple[str, str, str]:
+def finding_count_summary(
+    findings: tuple[audit_types.AuditFinding, ...],
+) -> tuple[str, str, str]:
     """Return counts for errors, warnings, and info findings."""
-    by_severity = group_findings_by_severity(findings)
+    error_count = 0
+    warning_count = 0
+    info_count = 0
+    for finding in findings:
+        if finding.severity == audit_types.AuditSeverity.ERROR:
+            error_count += 1
+        elif finding.severity == audit_types.AuditSeverity.WARNING:
+            warning_count += 1
+        else:
+            info_count += 1
+    return str(error_count), str(warning_count), str(info_count)
+
+
+def _table_header(index: int, label: str) -> str:
+    """Return one sortable table header cell."""
     return (
-        str(len(by_severity.get(audit_types.AuditSeverity.ERROR, ()))),
-        str(len(by_severity.get(audit_types.AuditSeverity.WARNING, ()))),
-        str(len(by_severity.get(audit_types.AuditSeverity.INFO, ()))),
+        f'<th><button type="button" class="sort-button" '
+        f'data-column="{index}" onclick="sortReportTable(this)">{escape(label)}</button></th>'
     )

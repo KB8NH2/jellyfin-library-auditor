@@ -3,10 +3,6 @@
 This module keeps configuration in one place so the rest of the project can
 depend on typed settings instead of scattered environment variable lookups and
 hardcoded defaults.
-
-The structure is intentionally grouped by subsystem to make future audit areas
-easy to add, such as subtitle, poster, NFO, codec, HDR, chapter, and duplicate
-checks.
 """
 
 from __future__ import annotations
@@ -17,9 +13,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.11+ provides tomllib.
+    import tomli as tomllib  # type: ignore[no-redef]
 
-JELLYFIN_API_KEY_ENV_VAR = "JELLYFIN_API_KEY"
-JELLYFIN_SERVER_URL_ENV_VAR = "JELLYFIN_SERVER_URL"
+
 REPORT_MEDIA_PATH_PREFIX_ENV_VAR = "REPORT_MEDIA_PATH_PREFIX"
 MOVIES_CSV_FILENAME_ENV_VAR = "MOVIES_CSV_FILENAME"
 TV_CSV_FILENAME_ENV_VAR = "TV_CSV_FILENAME"
@@ -27,20 +26,15 @@ AUDIT_CSV_FILENAME_ENV_VAR = "AUDIT_CSV_FILENAME"
 AUDIT_HTML_FILENAME_ENV_VAR = "AUDIT_HTML_FILENAME"
 ENABLE_MOVIES_ENV_VAR = "ENABLE_MOVIES"
 ENABLE_TV_ENV_VAR = "ENABLE_TV"
-HTTP_TIMEOUT_SECONDS_ENV_VAR = "HTTP_TIMEOUT_SECONDS"
-JELLYFIN_PAGE_SIZE_ENV_VAR = "JELLYFIN_PAGE_SIZE"
 ENGLISH_LANGUAGE_CODES_ENV_VAR = "ENGLISH_LANGUAGE_CODES"
 
-DEFAULT_JELLYFIN_SERVER_URL = "http://localhost:8096"
 DEFAULT_REPORT_MEDIA_PATH_PREFIX = ""
 DEFAULT_MOVIES_CSV_FILENAME = "movies_report.csv"
 DEFAULT_TV_CSV_FILENAME = "tv_report.csv"
 DEFAULT_AUDIT_CSV_FILENAME = "audit_report.csv"
-DEFAULT_AUDIT_HTML_FILENAME = "audit_report.html"
-DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
-DEFAULT_JELLYFIN_PAGE_SIZE = 200
+DEFAULT_AUDIT_HTML_FILENAME = "reports"
+DEFAULT_SERVERS_TOML = "servers.toml"
 
-# A blank language code is common when media metadata is missing or incomplete.
 REQUIRED_ENGLISH_LANGUAGE_CODES = ("en", "eng", "")
 DEFAULT_ENGLISH_LANGUAGE_CODES = ("en", "eng", "")
 
@@ -53,13 +47,59 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class JellyfinConfig:
-    """Settings for Jellyfin API access and pagination."""
+class ServerConfig:
+    """Connection settings for one Jellyfin server."""
 
-    api_key: str | None
-    server_url: str
-    timeout_seconds: float
-    page_size: int
+    key: str
+    name: str
+    url: str
+    api_key: str
+
+    def __post_init__(self) -> None:
+        """Normalize server configuration values."""
+        object.__setattr__(self, "key", self.key.strip())
+        object.__setattr__(self, "name", self.name.strip())
+        object.__setattr__(self, "url", self.url.strip().rstrip("/"))
+        object.__setattr__(self, "api_key", self.api_key.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class ServerCollection:
+    """Represents all configured Jellyfin servers."""
+
+    default_server: str
+    servers: dict[str, ServerConfig]
+
+    def __post_init__(self) -> None:
+        """Validate server collection consistency."""
+        object.__setattr__(self, "default_server", self.default_server.strip())
+        normalized_servers = {
+            key.strip(): value
+            for key, value in self.servers.items()
+        }
+        object.__setattr__(self, "servers", normalized_servers)
+
+        if self.default_server not in normalized_servers:
+            available = ", ".join(sorted(normalized_servers)) or "none"
+            raise ConfigError(
+                f"default_server {self.default_server!r} was not found in servers.toml. "
+                f"Available servers: {available}."
+            )
+
+    def get_default(self) -> ServerConfig:
+        """Return the configured default server."""
+        return self.servers[self.default_server]
+
+    def get(self, server_key: str) -> ServerConfig:
+        """Return one configured server by key."""
+        normalized_key = server_key.strip()
+        try:
+            return self.servers[normalized_key]
+        except KeyError as error:
+            available = ", ".join(sorted(self.servers)) or "none"
+            raise ConfigError(
+                f"Unknown server {server_key!r}. Available servers: {available}."
+            ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +112,7 @@ class CsvOutputConfig:
 
 @dataclass(frozen=True, slots=True)
 class ReportOutputConfig:
-    """Output filenames for generated audit reports."""
+    """Output locations for generated audit reports."""
 
     audit_csv: Path
     audit_html: Path
@@ -96,14 +136,12 @@ class ProcessingConfig:
     enable_tv: bool
 
     def enabled_library_types(self) -> tuple[str, ...]:
-        """Return the enabled library types in display-friendly order."""
+        """Return enabled library types in display-friendly order."""
         enabled: list[str] = []
-
         if self.enable_movies:
             enabled.append("movies")
         if self.enable_tv:
             enabled.append("tv")
-
         return tuple(enabled)
 
 
@@ -111,9 +149,9 @@ class ProcessingConfig:
 class AppConfig:
     """Complete application configuration grouped by subsystem."""
 
-    jellyfin: JellyfinConfig
     reporting: ReportingConfig
     processing: ProcessingConfig
+    servers: ServerCollection
 
 
 def _read_string(name: str, default: str) -> str:
@@ -122,16 +160,6 @@ def _read_string(name: str, default: str) -> str:
     if value is None:
         return default
     return value.strip()
-
-
-def _read_optional_string(name: str) -> str | None:
-    """Read an optional string environment variable with whitespace trimmed."""
-    value = os.getenv(name)
-    if value is None:
-        return None
-
-    stripped_value = value.strip()
-    return stripped_value or None
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -157,44 +185,7 @@ def _read_path(name: str, default: str | Path) -> Path:
     value = os.getenv(name)
     if value is None:
         return Path(default)
-
     return Path(value.strip())
-
-
-def _read_positive_int(name: str, default: int) -> int:
-    """Read a positive integer environment variable."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-
-    try:
-        parsed_value = int(value.strip())
-    except ValueError as error:
-        raise ConfigError(f"{name} must be an integer; received {value!r}.") from error
-
-    if parsed_value <= 0:
-        raise ConfigError(f"{name} must be greater than zero; received {value!r}.")
-
-    return parsed_value
-
-
-def _read_positive_float(name: str, default: float) -> float:
-    """Read a positive floating-point environment variable."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-
-    try:
-        parsed_value = float(value.strip())
-    except ValueError as error:
-        raise ConfigError(
-            f"{name} must be a number; received {value!r}."
-        ) from error
-
-    if parsed_value <= 0:
-        raise ConfigError(f"{name} must be greater than zero; received {value!r}.")
-
-    return parsed_value
 
 
 def _read_language_codes(name: str) -> tuple[str, ...]:
@@ -216,14 +207,12 @@ def _normalize_language_codes(codes: Iterable[str]) -> tuple[str, ...]:
         normalized_code = str(code).strip().lower()
         if normalized_code in seen:
             continue
-
         normalized_codes.append(normalized_code)
         seen.add(normalized_code)
 
     for required_code in REQUIRED_ENGLISH_LANGUAGE_CODES:
         if required_code in seen:
             continue
-
         normalized_codes.append(required_code)
         seen.add(required_code)
 
@@ -231,23 +220,7 @@ def _normalize_language_codes(codes: Iterable[str]) -> tuple[str, ...]:
 
 
 def load_config() -> AppConfig:
-    """Build application configuration from environment variables."""
-    jellyfin_config = JellyfinConfig(
-        api_key=_read_optional_string(JELLYFIN_API_KEY_ENV_VAR),
-        server_url=_read_string(
-            JELLYFIN_SERVER_URL_ENV_VAR,
-            DEFAULT_JELLYFIN_SERVER_URL,
-        ),
-        timeout_seconds=_read_positive_float(
-            HTTP_TIMEOUT_SECONDS_ENV_VAR,
-            DEFAULT_HTTP_TIMEOUT_SECONDS,
-        ),
-        page_size=_read_positive_int(
-            JELLYFIN_PAGE_SIZE_ENV_VAR,
-            DEFAULT_JELLYFIN_PAGE_SIZE,
-        ),
-    )
-
+    """Build application configuration from configuration sources."""
     reporting_config = ReportingConfig(
         media_path_prefix=_read_string(
             REPORT_MEDIA_PATH_PREFIX_ENV_VAR,
@@ -273,9 +246,7 @@ def load_config() -> AppConfig:
                 DEFAULT_AUDIT_HTML_FILENAME,
             ),
         ),
-        english_language_codes=_read_language_codes(
-            ENGLISH_LANGUAGE_CODES_ENV_VAR,
-        ),
+        english_language_codes=_read_language_codes(ENGLISH_LANGUAGE_CODES_ENV_VAR),
     )
 
     processing_config = ProcessingConfig(
@@ -284,9 +255,52 @@ def load_config() -> AppConfig:
     )
 
     return AppConfig(
-        jellyfin=jellyfin_config,
         reporting=reporting_config,
         processing=processing_config,
+        servers=load_server_collection(),
+    )
+
+
+def load_server_collection(path: Path | None = None) -> ServerCollection:
+    """Load the configured Jellyfin servers from TOML."""
+    servers_path = path or _default_servers_path()
+    if not servers_path.is_file():
+        raise ConfigError(
+            f"Server configuration file was not found at {servers_path}."
+        )
+
+    try:
+        payload = tomllib.loads(servers_path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"Invalid TOML in {servers_path}: {error}") from error
+
+    if not isinstance(payload, dict):
+        raise ConfigError(f"{servers_path} must contain a TOML table.")
+
+    default_server = payload.get("default_server")
+    if not isinstance(default_server, str) or not default_server.strip():
+        raise ConfigError(f"{servers_path} must define a non-empty default_server.")
+
+    raw_servers = payload.get("servers")
+    if not isinstance(raw_servers, dict) or not raw_servers:
+        raise ConfigError(f"{servers_path} must define at least one [servers.*] table.")
+
+    servers: dict[str, ServerConfig] = {}
+    for key, raw_server in raw_servers.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ConfigError(f"{servers_path} contains an invalid server key.")
+        if not isinstance(raw_server, dict):
+            raise ConfigError(f"[servers.{key}] must be a TOML table.")
+        servers[key.strip()] = ServerConfig(
+            key=key,
+            name=_required_toml_string(raw_server, "name", f"[servers.{key}]"),
+            url=_required_toml_string(raw_server, "url", f"[servers.{key}]"),
+            api_key=_required_toml_string(raw_server, "api_key", f"[servers.{key}]"),
+        )
+
+    return ServerCollection(
+        default_server=default_server,
+        servers=servers,
     )
 
 
@@ -296,6 +310,30 @@ def get_config() -> AppConfig:
     return load_config()
 
 
+@lru_cache(maxsize=1)
+def get_server_collection() -> ServerCollection:
+    """Return the cached server configuration collection."""
+    return load_server_collection()
+
+
 def clear_config_cache() -> None:
-    """Clear the cached configuration, mainly for tests or environment reloads."""
+    """Clear cached configuration, mainly for tests or reloads."""
     get_config.cache_clear()
+    get_server_collection.cache_clear()
+
+
+def _default_servers_path() -> Path:
+    """Return the default path to servers.toml."""
+    return Path(__file__).resolve().parent / DEFAULT_SERVERS_TOML
+
+
+def _required_toml_string(
+    data: dict[str, object],
+    key: str,
+    context: str,
+) -> str:
+    """Return a required non-empty string from parsed TOML data."""
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{context} must define a non-empty {key!r} value.")
+    return value.strip()

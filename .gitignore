@@ -16,3 +16,6 @@ env/
 
 # Logs
 *.log
+
+# Configuration files
+servers.toml

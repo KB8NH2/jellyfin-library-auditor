@@ -2,117 +2,138 @@
 
 from __future__ import annotations
 
+from media import has_english_subtitles
+from media import has_jellyfin_logo
+from media import has_jellyfin_primary_image
+from media import local_backdrop_exists
+from media import local_poster_exists
 from . import templates
+
+
+TABLE_HEADERS = (
+    "Title",
+    "Poster",
+    "Backdrop",
+    "Logo",
+    "Primary Image",
+    "English Subtitles",
+    "Issues",
+)
 
 
 def render_library_page(
     library_name: str,
-    findings: tuple[audit_types.AuditFinding, ...],
+    findings: tuple,
     *,
-    library_slug_map: dict[str, str],
-    finding_id_map: dict[int, str],
+    site_links: templates.SiteLinks,
 ) -> str:
     """Return one library report page."""
-    errors, warnings, info = templates.finding_count_summary(findings)
+    media_groups = templates.group_findings_by_media(findings)
     cards = (
         templates.SummaryCard(
             title="Library",
             value=library_name,
             accent="library",
             subtitle="Current library",
-            search_text=library_name,
         ),
         templates.SummaryCard(
-            title="Findings",
+            title="Media Items With Issues",
+            value=str(len(media_groups)),
+            accent="media",
+        ),
+        templates.SummaryCard(
+            title="Actionable Findings",
             value=str(len(findings)),
             accent="findings",
-            subtitle="Findings in this library",
         ),
-        templates.SummaryCard(title="Errors", value=errors, accent="error"),
-        templates.SummaryCard(title="Warnings", value=warnings, accent="warning"),
-        templates.SummaryCard(title="Information", value=info, accent="info"),
     )
-
-    movies = tuple(finding for finding in findings if not finding.media_item.is_episode)
-    episodes = tuple(finding for finding in findings if finding.media_item.is_episode)
-    sections: list[str] = []
-
-    if movies:
-        sections.append(
-            templates.render_details_group(
-                title="Movies",
-                count=len(movies),
-                search_text=f"{library_name} movies",
-                body=templates.render_findings_table(
-                    templates.sort_findings_by_title(movies),
-                    library_slug_map=library_slug_map,
-                    finding_id_map=finding_id_map,
-                    relative_prefix="../",
-                    current_library_name=library_name,
-                ),
-            )
-        )
-
-    for series_name, series_findings in templates.sort_named_groups(
-        templates.group_findings_by_series(episodes)
-    ):
-        season_sections = []
-        for season_label, season_findings in templates.sort_season_groups(
-            templates.group_findings_by_season(series_findings)
-        ):
-            ordered_findings = tuple(
-                sorted(
-                    season_findings,
-                    key=lambda finding: (
-                        finding.media_item.episode_number is None,
-                        finding.media_item.episode_number or 0,
-                        finding.media_item.display_name.casefold(),
-                    ),
-                )
-            )
-            season_sections.append(
-                templates.render_details_group(
-                    title=season_label,
-                    count=len(season_findings),
-                    search_text=f"{series_name} {season_label}",
-                    body=templates.render_findings_table(
-                        ordered_findings,
-                        library_slug_map=library_slug_map,
-                        finding_id_map=finding_id_map,
-                        relative_prefix="../",
-                        current_library_name=library_name,
-                    ),
-                )
-            )
-
-        sections.append(
-            templates.render_details_group(
-                title=series_name,
-                count=len(series_findings),
-                search_text=f"{library_name} {series_name}",
-                body="\n".join(season_sections),
-            )
-        )
-
-    if not sections:
-        sections.append('    <p class="muted-text">No findings in this library.</p>')
 
     content = "\n".join(
         (
             templates.render_summary_cards(cards),
             '  <section class="section-card">',
             f"    <h2>{library_name}</h2>",
-            "    <p class=\"muted-text\">Episodes are grouped by series and season. Movies are listed alphabetically.</p>",
-            *sections,
+            "    <p class=\"muted-text\">Rows represent media items that need attention.</p>",
+            templates.render_sortable_table(
+                TABLE_HEADERS,
+                _media_rows(
+                    findings,
+                    site_links=site_links,
+                    relative_prefix="../",
+                ),
+            ),
             "  </section>",
         )
     )
-
     return templates.render_page(
         title=f"{library_name} Findings",
         current_nav="Libraries",
         relative_prefix="../",
         heading=library_name,
-        intro=f"Detailed findings for the {library_name} library.",
+        intro="Sortable maintenance checklist for this library.",
+        breadcrumbs=(
+            templates.Breadcrumb("Dashboard", "../index.html"),
+            templates.Breadcrumb("Libraries", "../index.html#libraries-overview"),
+            templates.Breadcrumb(library_name),
+        ),
+        include_search=True,
+        include_expand_controls=False,
         content=content,
     )
+
+
+def _media_rows(
+    findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+    relative_prefix: str,
+) -> tuple[str, ...]:
+    """Return one sortable row per media item."""
+    grouped = templates.group_findings_by_media(findings)
+    rows: list[str] = []
+
+    for _, media_findings in sorted(
+        grouped.items(),
+        key=lambda entry: templates.media_item_from_findings(entry[1]).display_name.casefold(),
+    ):
+        item = templates.media_item_from_findings(media_findings)
+        rows.append(
+            "\n".join(
+                (
+                    f'          <tr id="{templates.media_anchor(item, site_links)}" data-search-row data-search="{templates.row_search_text(media_findings)}">',
+                    f"            <td>{templates.escape(item.display_name)}</td>",
+                    f"            <td>{templates.render_status_label(local_poster_exists(item))}</td>",
+                    f"            <td>{templates.render_status_label(local_backdrop_exists(item))}</td>",
+                    f"            <td>{templates.render_status_label(has_jellyfin_logo(item))}</td>",
+                    f"            <td>{templates.render_status_label(has_jellyfin_primary_image(item))}</td>",
+                    f"            <td>{templates.render_status_label(has_english_subtitles(item))}</td>",
+                    f"            <td>{_findings_summary(media_findings, site_links=site_links, relative_prefix=relative_prefix)}</td>",
+                    "          </tr>",
+                )
+            )
+        )
+
+    return tuple(rows)
+
+
+def _findings_summary(
+    findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+    relative_prefix: str,
+) -> str:
+    """Return a compact linked findings summary."""
+    unique_checks: list[str] = []
+    seen: set[str] = set()
+    for finding in templates.sort_findings(findings):
+        if finding.check_name in seen:
+            continue
+        seen.add(finding.check_name)
+        unique_checks.append(finding.check_name)
+
+    parts = [
+        f'<a href="{templates.check_page_href(check_name, site_links=site_links, relative_prefix=relative_prefix)}">'
+        f"{templates.escape(templates.check_summary_label(check_name))}</a>"
+        for check_name in unique_checks
+    ]
+    return ", ".join(parts)

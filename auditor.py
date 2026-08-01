@@ -21,6 +21,7 @@ from audit_types import AuditSeverity
 from config import ConfigError
 from config import ProcessingConfig
 from config import get_config
+from config import ServerConfig
 from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
 from jellyfin import JellyfinRequestError
@@ -45,6 +46,7 @@ class CommandLineUsageError(ValueError):
 class AuditRunOptions:
     """Normalized command-line options for an audit run."""
 
+    server_key: str | None
     write_csv: bool
     write_html: bool
     library_names: tuple[str, ...]
@@ -74,6 +76,7 @@ def audit_library(client: JellyfinClient, library: MediaLibrary) -> tuple[AuditF
 
 
 def audit_server(
+    server_key: str | None = None,
     requested_library_names: Iterable[str] = (),
 ) -> AuditServerResult:
     """Audit all enabled movie and TV libraries on the configured server.
@@ -90,11 +93,12 @@ def audit_server(
         JellyfinError: If Jellyfin cannot be reached or returns invalid data.
     """
     config = get_config()
+    server = _select_server(config, server_key)
 
-    with JellyfinClient() as client:
+    with JellyfinClient(server, processing=config.processing) as client:
         if not client.ping():
             raise JellyfinRequestError(
-                f"Unable to reach Jellyfin server at {config.jellyfin.server_url}."
+                f"Unable to reach Jellyfin server at {server.url}."
             )
         server_name = client.get_server_name()
 
@@ -121,7 +125,9 @@ def audit_server(
         media_items_processed=media_items_processed,
         library_results=tuple(library_results),
         findings=tuple(findings),
+        server_key=server.key,
         server_name=server_name,
+        server_url=server.url,
     )
 
 
@@ -163,6 +169,7 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
 
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
+        server_key=_normalize_optional_server_key(args.server),
         write_csv=args.csv or not report_flags_selected,
         write_html=args.html or not report_flags_selected,
         library_names=_normalize_requested_library_names(args.library),
@@ -189,7 +196,9 @@ def filter_audit_result(
         media_items_processed=result.media_items_processed,
         library_results=result.library_results,
         findings=findings,
+        server_key=result.server_key,
         server_name=result.server_name,
+        server_url=result.server_url,
     )
 
 
@@ -199,7 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         options = parse_args(argv)
-        result = audit_server(options.library_names)
+        result = audit_server(options.server_key, options.library_names)
         filtered_result = filter_audit_result(
             result,
             categories=options.categories,
@@ -251,6 +260,7 @@ def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> Libr
     return LibraryAuditResult(
         library=library,
         media_items_processed=len(items),
+        audited_items=tuple(items),
         items_with_english_subtitles=items_with_english_subtitles,
         items_with_local_nfo=items_with_local_nfo,
         items_with_local_poster=items_with_local_poster,
@@ -346,6 +356,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         exit_on_error=False,
     )
     parser.add_argument(
+        "--server",
+        metavar="SERVER",
+        help="Select a configured server from servers.toml. Defaults to default_server.",
+    )
+    parser.add_argument(
         "--html",
         action="store_true",
         help="Write the HTML audit report. Defaults to enabled unless --csv/--html is used.",
@@ -399,6 +414,23 @@ def _normalize_requested_library_names(names: Iterable[str]) -> tuple[str, ...]:
         seen.add(key)
 
     return tuple(normalized_names)
+
+
+def _normalize_optional_server_key(server_key: str | None) -> str | None:
+    """Normalize an optional server selection key."""
+    if server_key is None:
+        return None
+    normalized_key = server_key.strip()
+    if not normalized_key:
+        raise CommandLineUsageError("--server requires a non-empty server key.")
+    return normalized_key
+
+
+def _select_server(config, server_key: str | None) -> ServerConfig:
+    """Return the configured server selected for this audit run."""
+    if server_key is None:
+        return config.servers.get_default()
+    return config.servers.get(server_key)
 
 
 def _parse_categories(values: Iterable[str]) -> frozenset[AuditCategory] | None:
