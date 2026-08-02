@@ -7,6 +7,7 @@ from pathlib import Path
 
 def write_css(path: Path) -> None:
     """Write the shared stylesheet."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_stylesheet(), encoding="utf-8")
 
 

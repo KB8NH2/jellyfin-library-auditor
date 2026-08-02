@@ -16,6 +16,14 @@ from media import has_jellyfin_primary_image
 from media import has_jellyfin_thumb
 from media import local_backdrop_exists
 from media import local_poster_exists
+from output_layout import audit_results_root
+from output_layout import comparison_output_dir
+from output_layout import server_csv_path
+from output_layout import server_output_dir
+from output_layout import shared_css_path
+from output_layout import shared_js_path
+from output_layout import write_server_report_metadata
+from output_layout import write_audit_results_index
 from . import templates
 from .checks import render_check_page
 from .css import write_css
@@ -45,7 +53,13 @@ NON_ACTIONABLE_CHECKS = frozenset({"hdr_video", "missing_nfo"})
 
 def write_csv_report(result: AuditServerResult) -> Path:
     """Write a CSV report containing one row per finding."""
-    output_path = get_config().reporting.output.audit_csv
+    config = get_config()
+    output_root = audit_results_root(config.reporting.output.audit_html)
+    output_path = server_csv_path(
+        output_root,
+        result,
+        config.reporting.output.audit_csv,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -62,7 +76,11 @@ def write_html_report(result: AuditServerResult) -> Path:
 def write_reports(result: AuditServerResult) -> Path:
     """Generate the full static site and return the dashboard path."""
     config = get_config()
-    site_paths = _site_paths(config.reporting.output.audit_html)
+    output_root = audit_results_root(config.reporting.output.audit_html)
+    site_paths = _site_paths(
+        server_output_dir(output_root, result),
+        output_root,
+    )
     _prepare_site_root(site_paths)
 
     actionable_findings = _actionable_findings(result.findings)
@@ -93,6 +111,16 @@ def write_reports(result: AuditServerResult) -> Path:
         site_links=site_links,
         site_paths=site_paths,
     )
+    write_server_report_metadata(
+        output_root,
+        result,
+        generated_at_text=generated_at_text,
+    )
+    write_audit_results_index(
+        output_root,
+        (result,),
+        include_comparison=(comparison_output_dir(output_root) / "index.html").exists(),
+    )
     return site_paths.index_path
 
 
@@ -111,6 +139,7 @@ def _write_dashboard(
     body = render_dashboard_page(
         server_display_name=server_display_name,
         generated_at_text=generated_at_text,
+        csv_report_href=get_config().reporting.output.audit_csv.name,
         libraries_audited=result.libraries_audited,
         media_items_processed=result.media_items_processed,
         actionable_findings_count=len(actionable_findings),
@@ -121,6 +150,7 @@ def _write_dashboard(
         templates.page_document(
             title="Jellyfin Library Auditor Dashboard",
             relative_prefix="",
+            asset_prefix="../",
             body=body,
         ),
         encoding="utf-8",
@@ -147,6 +177,7 @@ def _write_library_pages(
             templates.page_document(
                 title=f"{library_name} Findings",
                 relative_prefix="../",
+                asset_prefix="../../",
                 body=body,
             ),
             encoding="utf-8",
@@ -175,6 +206,7 @@ def _write_check_pages(
             templates.page_document(
                 title=f"{templates.check_display_label(check_name)} Findings",
                 relative_prefix="../",
+                asset_prefix="../../",
                 body=body,
             ),
             encoding="utf-8",
@@ -322,25 +354,27 @@ def _library_names(result: AuditServerResult) -> tuple[str, ...]:
 
 def _prepare_site_root(site_paths: templates.SitePaths) -> None:
     """Create a clean output root for the static site."""
-    if site_paths.root_dir.exists():
-        shutil.rmtree(site_paths.root_dir)
     site_paths.root_dir.mkdir(parents=True, exist_ok=True)
+    for stale_dir in (site_paths.libraries_dir, site_paths.checks_dir):
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir)
+    if site_paths.index_path.exists():
+        site_paths.index_path.unlink()
     site_paths.libraries_dir.mkdir(parents=True, exist_ok=True)
     site_paths.checks_dir.mkdir(parents=True, exist_ok=True)
     site_paths.css_path.parent.mkdir(parents=True, exist_ok=True)
     site_paths.js_path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _site_paths(configured_path: Path) -> templates.SitePaths:
-    """Return normalized site output paths from the configured HTML path."""
-    root_dir = configured_path.with_suffix("") if configured_path.suffix else configured_path
+def _site_paths(server_root_dir: Path, output_root: Path) -> templates.SitePaths:
+    """Return normalized site output paths for one server report."""
     return templates.SitePaths(
-        root_dir=root_dir,
-        index_path=root_dir / "index.html",
-        libraries_dir=root_dir / "libraries",
-        checks_dir=root_dir / "checks",
-        css_path=root_dir / "css" / "style.css",
-        js_path=root_dir / "js" / "report.js",
+        root_dir=server_root_dir,
+        index_path=server_root_dir / "index.html",
+        libraries_dir=server_root_dir / "libraries",
+        checks_dir=server_root_dir / "checks",
+        css_path=shared_css_path(output_root),
+        js_path=shared_js_path(output_root),
     )
 
 

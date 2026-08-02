@@ -7,8 +7,7 @@ from html import escape
 from pathlib import Path
 import shutil
 
-from comparison.css import write_css
-from comparison.javascript import write_javascript
+from config import get_config
 from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
@@ -17,10 +16,16 @@ from media import has_jellyfin_primary_image
 from media import local_backdrop_exists
 from media import local_poster_exists
 from models import MediaItem
+from output_layout import audit_results_root
+from output_layout import comparison_output_dir
+from output_layout import shared_css_path
+from output_layout import shared_js_path
+from reports.css import write_css
+from reports.javascript import write_javascript
 from results import AuditServerResult
 
 
-DEFAULT_COMPARISON_OUTPUT_DIR = Path("comparison_reports")
+DEFAULT_COMPARISON_OUTPUT_DIR = Path("audit_results") / "comparison_results"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,21 +43,21 @@ def write_comparison_reports(
     output_dir: Path | None = None,
 ) -> Path:
     """Write a static comparison site for two completed audit results."""
-    root_dir = DEFAULT_COMPARISON_OUTPUT_DIR if output_dir is None else output_dir
+    root_dir = _default_output_dir() if output_dir is None else output_dir
+    output_root = root_dir.parent
     if root_dir.exists():
         shutil.rmtree(root_dir)
-    (root_dir / "css").mkdir(parents=True, exist_ok=True)
-    (root_dir / "js").mkdir(parents=True, exist_ok=True)
+    root_dir.mkdir(parents=True, exist_ok=True)
 
-    write_css(root_dir / "css" / "style.css")
-    write_javascript(root_dir / "js" / "report.js")
+    write_css(shared_css_path(output_root))
+    write_javascript(shared_js_path(output_root))
 
     comparison = _build_comparison(left_result, right_result)
     (root_dir / "index.html").write_text(
         _page_document(
             title="Server Comparison",
             body=_index_page(left_result, right_result, comparison),
-            relative_prefix="",
+            asset_prefix="../",
         ),
         encoding="utf-8",
     )
@@ -60,7 +65,7 @@ def write_comparison_reports(
         _page_document(
             title="Library Comparison",
             body=_libraries_page(left_result, right_result, comparison),
-            relative_prefix="",
+            asset_prefix="../",
         ),
         encoding="utf-8",
     )
@@ -68,7 +73,7 @@ def write_comparison_reports(
         _page_document(
             title="Artwork Comparison",
             body=_artwork_page(left_result, right_result, comparison),
-            relative_prefix="",
+            asset_prefix="../",
         ),
         encoding="utf-8",
     )
@@ -76,7 +81,7 @@ def write_comparison_reports(
         _page_document(
             title="Subtitle Comparison",
             body=_subtitles_page(left_result, right_result, comparison),
-            relative_prefix="",
+            asset_prefix="../",
         ),
         encoding="utf-8",
     )
@@ -84,7 +89,7 @@ def write_comparison_reports(
         _page_document(
             title="Configuration Comparison",
             body=_configuration_page(left_result, right_result, comparison),
-            relative_prefix="",
+            asset_prefix="../",
         ),
         encoding="utf-8",
     )
@@ -240,12 +245,10 @@ def _comparison_identity(item) -> tuple:
             item.season_number,
             item.episode_number,
             item.title.casefold(),
-            item.year,
         )
     return (
         "movie",
         item.title.casefold(),
-        item.year,
     )
 
 
@@ -427,11 +430,29 @@ def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerRes
 def _configuration_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
     """Return configuration and metadata comparison page body."""
     library_rows = tuple(
-        f"<tr data-search-row data-search=\"{escape((library_name + ' ' + left_value + ' ' + right_value).lower())}\"><td>{escape(library_name)}</td><td>{escape(left_value)}</td><td>{escape(right_value)}</td></tr>"
+        "\n".join(
+            (
+                f'<tr data-search-row data-search="{escape((library_name + " " + left_value + " " + right_value).lower())}">',
+                f"  <td>{escape(library_name)}</td>",
+                f"  {_diff_cell(left_value, is_different=True)}",
+                f"  {_diff_cell(right_value, is_different=True)}",
+                "</tr>",
+            )
+        )
         for library_name, left_value, right_value in comparison["library_configuration_differences"]
     )
     metadata_rows = tuple(
-        f"<tr data-search-row data-search=\"{escape((library + ' ' + title + ' ' + field_name + ' ' + left_value + ' ' + right_value).lower())}\"><td>{escape(library)}</td><td>{escape(title)}</td><td>{escape(field_name)}</td><td>{escape(left_value)}</td><td>{escape(right_value)}</td></tr>"
+        "\n".join(
+            (
+                f'<tr data-search-row data-search="{escape((library + " " + title + " " + field_name + " " + left_value + " " + right_value).lower())}">',
+                f"  <td>{escape(library)}</td>",
+                f"  <td>{escape(title)}</td>",
+                f"  <td>{escape(field_name)}</td>",
+                f"  {_diff_cell(left_value, is_different=True)}",
+                f"  {_diff_cell(right_value, is_different=True)}",
+                "</tr>",
+            )
+        )
         for library, title, field_name, left_value, right_value in comparison["metadata_differences"]
     )
     return _page_shell(
@@ -466,7 +487,12 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
     )
 
 
-def _page_document(*, title: str, body: str, relative_prefix: str) -> str:
+def _default_output_dir() -> Path:
+    """Return the configured default comparison output directory."""
+    return comparison_output_dir(audit_results_root(get_config().reporting.output.audit_html))
+
+
+def _page_document(*, title: str, body: str, asset_prefix: str) -> str:
     """Return a full standalone HTML document."""
     return "\n".join(
         (
@@ -476,11 +502,11 @@ def _page_document(*, title: str, body: str, relative_prefix: str) -> str:
             '  <meta charset="utf-8">',
             '  <meta name="viewport" content="width=device-width, initial-scale=1">',
             f"  <title>{escape(title)}</title>",
-            f'  <link rel="stylesheet" href="{escape(f"{relative_prefix}css/style.css")}">',
+            f'  <link rel="stylesheet" href="{escape(f"{asset_prefix}css/style.css")}">',
             "</head>",
             "<body>",
             body,
-            f'  <script src="{escape(f"{relative_prefix}js/report.js")}"></script>',
+            f'  <script src="{escape(f"{asset_prefix}js/report.js")}"></script>',
             "</body>",
             "</html>",
         )
@@ -635,24 +661,34 @@ def _media_missing_row(library_name: str, item) -> str:
 def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult, pair: MatchedPair) -> str:
     """Return one artwork difference row."""
     search_text = f"{pair.library} {pair.left.display_name}".lower()
+    left_poster = _yes_no(local_poster_exists(pair.left))
+    right_poster = _yes_no(local_poster_exists(pair.right))
+    left_backdrop = _yes_no(local_backdrop_exists(pair.left))
+    right_backdrop = _yes_no(local_backdrop_exists(pair.right))
+    left_primary = _yes_no(has_jellyfin_primary_image(pair.left))
+    right_primary = _yes_no(has_jellyfin_primary_image(pair.right))
+    left_logo = _yes_no(has_jellyfin_logo(pair.left))
+    right_logo = _yes_no(has_jellyfin_logo(pair.right))
     return (
         f'<tr data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.display_name)}</td>'
-        f'<td>{_yes_no(local_poster_exists(pair.left))}</td><td>{_yes_no(local_poster_exists(pair.right))}</td>'
-        f'<td>{_yes_no(local_backdrop_exists(pair.left))}</td><td>{_yes_no(local_backdrop_exists(pair.right))}</td>'
-        f'<td>{_yes_no(has_jellyfin_primary_image(pair.left))}</td><td>{_yes_no(has_jellyfin_primary_image(pair.right))}</td>'
-        f'<td>{_yes_no(has_jellyfin_logo(pair.left))}</td><td>{_yes_no(has_jellyfin_logo(pair.right))}</td></tr>'
+        f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
+        f'{_diff_cell(left_backdrop, is_different=left_backdrop != right_backdrop)}{_diff_cell(right_backdrop, is_different=left_backdrop != right_backdrop)}'
+        f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'
+        f'{_diff_cell(left_logo, is_different=left_logo != right_logo)}{_diff_cell(right_logo, is_different=left_logo != right_logo)}</tr>'
     )
 
 
 def _subtitle_row(left_result: AuditServerResult, right_result: AuditServerResult, pair: MatchedPair) -> str:
     """Return one subtitle difference row."""
     search_text = f"{pair.library} {pair.left.display_name} subtitles".lower()
+    left_subtitles = _yes_no(has_english_subtitles(pair.left))
+    right_subtitles = _yes_no(has_english_subtitles(pair.right))
     return (
         f'<tr data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.title)}</td><td>{escape(pair.left.series_name or "")}</td>'
         f'<td>{escape(pair.left.season_name or "")}</td><td>{"" if pair.left.episode_number is None else pair.left.episode_number}</td>'
-        f'<td>{_yes_no(has_english_subtitles(pair.left))}</td><td>{_yes_no(has_english_subtitles(pair.right))}</td></tr>'
+        f'{_diff_cell(left_subtitles, is_different=left_subtitles != right_subtitles)}{_diff_cell(right_subtitles, is_different=left_subtitles != right_subtitles)}</tr>'
     )
 
 
@@ -666,3 +702,9 @@ def _display_value(value: object) -> str:
 def _yes_no(value: bool) -> str:
     """Return Yes or No for comparison output."""
     return "Yes" if value else "No"
+
+
+def _diff_cell(value: object, *, is_different: bool) -> str:
+    """Return one table cell, highlighting it when the compared values differ."""
+    class_attribute = ' class="comparison-diff"' if is_different else ""
+    return f"<td{class_attribute}>{escape(str(value))}</td>"

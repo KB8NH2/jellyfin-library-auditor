@@ -32,7 +32,7 @@ DEFAULT_REPORT_MEDIA_PATH_PREFIX = ""
 DEFAULT_MOVIES_CSV_FILENAME = "movies_report.csv"
 DEFAULT_TV_CSV_FILENAME = "tv_report.csv"
 DEFAULT_AUDIT_CSV_FILENAME = "audit_report.csv"
-DEFAULT_AUDIT_HTML_FILENAME = "audit_reports"
+DEFAULT_AUDIT_HTML_FILENAME = "audit_results"
 DEFAULT_SERVERS_TOML = "servers.toml"
 
 REQUIRED_ENGLISH_LANGUAGE_CODES = ("en", "eng", "")
@@ -100,6 +100,19 @@ class ServerCollection:
             raise ConfigError(
                 f"Unknown server {server_key!r}. Available servers: {available}."
             ) from error
+
+    def ordered(self) -> tuple[ServerConfig, ...]:
+        """Return configured servers in TOML file order."""
+        return tuple(self.servers.values())
+
+    def first_two(self) -> tuple[ServerConfig, ServerConfig]:
+        """Return the first two configured servers in file order."""
+        ordered_servers = self.ordered()
+        if len(ordered_servers) < 2:
+            raise ConfigError(
+                "At least two configured servers are required to use --compare without specifying server names."
+            )
+        return ordered_servers[0], ordered_servers[1]
 
 
 @dataclass(frozen=True, slots=True)

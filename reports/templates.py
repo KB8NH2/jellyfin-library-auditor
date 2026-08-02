@@ -307,7 +307,14 @@ def render_about_section(page_title: str) -> str:
     )
 
 
-def page_document(*, title: str, relative_prefix: str, body: str) -> str:
+def page_document(
+    *,
+    title: str,
+    relative_prefix: str,
+    body: str,
+    asset_prefix: str | None = None,
+) -> str:
+    resolved_asset_prefix = relative_prefix if asset_prefix is None else asset_prefix
     return "\n".join(
         (
             "<!DOCTYPE html>",
@@ -316,11 +323,11 @@ def page_document(*, title: str, relative_prefix: str, body: str) -> str:
             '  <meta charset="utf-8">',
             '  <meta name="viewport" content="width=device-width, initial-scale=1">',
             f"  <title>{escape(title)}</title>",
-            f'  <link rel="stylesheet" href="{escape(f"{relative_prefix}css/style.css")}">',
+            f'  <link rel="stylesheet" href="{escape(f"{resolved_asset_prefix}css/style.css")}">',
             "</head>",
             "<body>",
             body,
-            f'  <script src="{escape(f"{relative_prefix}js/report.js")}"></script>',
+            f'  <script src="{escape(f"{resolved_asset_prefix}js/report.js")}"></script>',
             "</body>",
             "</html>",
         )

@@ -56,6 +56,7 @@ def _stylesheet() -> str:
             ".data-table thead th { position: sticky; top: 0; z-index: 1; background: #eef4fb; }",
             ".data-table tbody tr:nth-child(even) { background: #fbfdff; }",
             ".data-table tbody tr:last-child td { border-bottom: none; }",
+            ".comparison-diff { background: #fff8c5; color: #7d4e00; font-weight: 700; }",
             ".sort-button { width: 100%; border: none; background: transparent; padding: 0; text-align: left; font: inherit; font-weight: 700; cursor: pointer; }",
             ".empty-row td { color: var(--muted); }",
         )

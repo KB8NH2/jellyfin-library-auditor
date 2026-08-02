@@ -7,6 +7,7 @@ from pathlib import Path
 
 def write_javascript(path: Path) -> None:
     """Write the shared JavaScript asset."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_script(), encoding="utf-8")
 
 

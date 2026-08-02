@@ -9,6 +9,7 @@ def render_dashboard_page(
     *,
     server_display_name: str,
     generated_at_text: str,
+    csv_report_href: str,
     libraries_audited: int,
     media_items_processed: int,
     actionable_findings_count: int,
@@ -19,6 +20,7 @@ def render_dashboard_page(
     summary_cards = (
         templates.SummaryCard("Server Name", server_display_name, "server", subtitle="Jellyfin server"),
         templates.SummaryCard("Newest Report", generated_at_text, "timestamp", subtitle="Generated timestamp"),
+        templates.SummaryCard("Download CSV", "Open", "check", href=csv_report_href, subtitle="Spreadsheet export"),
         templates.SummaryCard("Libraries Audited", str(libraries_audited), "libraries"),
         templates.SummaryCard("Media Items", str(media_items_processed), "media"),
         templates.SummaryCard("Actionable Findings", str(actionable_findings_count), "findings"),

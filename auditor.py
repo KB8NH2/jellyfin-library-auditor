@@ -31,12 +31,16 @@ from media import local_backdrop_exists
 from media import local_nfo_exists
 from media import local_poster_exists
 from models import MediaLibrary
+from output_layout import audit_results_root
+from output_layout import reset_audit_results_root
+from output_layout import write_audit_results_index
 from reports import write_csv_report, write_html_report
 from results import AuditServerResult
 from results import LibraryAuditResult
 
 
 LOGGER = logging.getLogger(__name__)
+AUTO_COMPARE_SENTINEL = "__auto_compare__"
 
 
 class CommandLineUsageError(ValueError):
@@ -49,6 +53,7 @@ class AuditRunOptions:
 
     server_key: str | None
     compare_server_key: str | None
+    audit_all: bool
     write_csv: bool
     write_html: bool
     library_names: tuple[str, ...]
@@ -177,7 +182,8 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
         server_key=_normalize_optional_server_key(args.server),
-        compare_server_key=_normalize_optional_server_key(args.compare),
+        compare_server_key=_normalize_optional_compare_server_key(args.compare),
+        audit_all=bool(args.all),
         write_csv=args.csv or not report_flags_selected,
         write_html=args.html or not report_flags_selected,
         library_names=_normalize_requested_library_names(args.library),
@@ -216,23 +222,47 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         options = parse_args(argv)
-        result = audit_server(options.server_key, options.library_names)
-        filtered_result = filter_audit_result(
-            result,
-            categories=options.categories,
-            severities=options.severities,
+        selected_server_keys, compare_server_key = _resolve_run_targets(options)
+        results = tuple(
+            audit_server(server_key, options.library_names)
+            for server_key in selected_server_keys
         )
+        filtered_results = tuple(
+            filter_audit_result(
+                result,
+                categories=options.categories,
+                severities=options.severities,
+            )
+            for result in results
+        )
+        compare_result: AuditServerResult | None = None
+        output_root = None
+        if compare_server_key is not None:
+            compare_result = results[1]
+            if results[0].server_key == compare_result.server_key:
+                raise CommandLineUsageError("--compare must target a different server.")
+
+        should_write_html_site = options.write_html or compare_result is not None
+        if options.write_csv or should_write_html_site:
+            output_root = audit_results_root(get_config().reporting.output.audit_html)
+            reset_audit_results_root(output_root)
 
         if options.write_csv:
-            write_csv_report(filtered_result)
-        if options.write_html:
-            write_html_report(filtered_result)
-        if options.compare_server_key is not None:
-            compare_result = audit_server(
-                options.compare_server_key,
-                options.library_names,
+            for filtered_result in filtered_results:
+                write_csv_report(filtered_result)
+        if should_write_html_site:
+            for filtered_result in filtered_results:
+                write_html_report(filtered_result)
+        if compare_result is not None:
+            _write_comparison_site(results[0], compare_result)
+        if should_write_html_site:
+            if output_root is None:
+                raise RuntimeError("Audit output root was not initialized.")
+            write_audit_results_index(
+                output_root,
+                filtered_results,
+                include_comparison=compare_result is not None,
             )
-            _write_comparison_site(result, compare_result)
     except CommandLineUsageError as error:
         LOGGER.error("%s", error)
         return 2
@@ -243,14 +273,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOGGER.exception("Unexpected application failure.")
         return 1
 
-    findings_by_category = summarize_findings(filtered_result.findings)
-    LOGGER.info("Libraries audited: %d", filtered_result.libraries_audited)
-    LOGGER.info("Media items processed: %d", filtered_result.media_items_processed)
-    LOGGER.info("Total findings: %d", len(filtered_result.findings))
-    _log_library_summaries(filtered_result.library_results)
+    for filtered_result in filtered_results:
+        findings_by_category = summarize_findings(filtered_result.findings)
+        LOGGER.info(
+            "Server audit summary for %s",
+            filtered_result.server_name or filtered_result.server_key or "unknown",
+        )
+        LOGGER.info("Libraries audited: %d", filtered_result.libraries_audited)
+        LOGGER.info("Media items processed: %d", filtered_result.media_items_processed)
+        LOGGER.info("Total findings: %d", len(filtered_result.findings))
+        _log_library_summaries(filtered_result.library_results)
 
-    for category, count in sorted(findings_by_category.items(), key=lambda entry: entry[0]):
-        LOGGER.info("Findings in %s: %d", category.value, count)
+        for category, count in sorted(findings_by_category.items(), key=lambda entry: entry[0]):
+            LOGGER.info("Findings in %s: %d", category.value, count)
 
     return 0
 
@@ -376,8 +411,19 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--compare",
+        nargs="?",
+        const=AUTO_COMPARE_SENTINEL,
         metavar="SERVER",
-        help="Compare the selected server against another configured server and generate comparison reports.",
+        help=(
+            "Compare the selected server against another configured server and "
+            "generate comparison reports. When used without a value and without "
+            "--server, the first two configured servers are compared."
+        ),
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Audit every configured server from servers.toml.",
     )
     parser.add_argument(
         "--html",
@@ -445,6 +491,18 @@ def _normalize_optional_server_key(server_key: str | None) -> str | None:
     return normalized_key
 
 
+def _normalize_optional_compare_server_key(server_key: str | None) -> str | None:
+    """Normalize an optional compare selection key or auto-compare sentinel."""
+    if server_key == AUTO_COMPARE_SENTINEL:
+        return AUTO_COMPARE_SENTINEL
+    if server_key is None:
+        return None
+    normalized_key = server_key.strip()
+    if not normalized_key:
+        raise CommandLineUsageError("--compare requires a non-empty server key.")
+    return normalized_key
+
+
 def _select_server(config, server_key: str | None) -> ServerConfig:
     """Return the configured server selected for this audit run."""
     if server_key is None:
@@ -461,6 +519,27 @@ def _write_comparison_site(
         raise CommandLineUsageError("--compare must target a different server.")
 
     write_comparison_reports(left_result, right_result)
+
+
+def _resolve_run_targets(options: AuditRunOptions) -> tuple[tuple[str | None, ...], str | None]:
+    """Resolve requested audit targets and optional comparison pairing."""
+    config = get_config()
+    if options.audit_all:
+        if options.server_key is not None:
+            raise CommandLineUsageError("--all cannot be used with --server.")
+        if options.compare_server_key is not None:
+            raise CommandLineUsageError("--all cannot be used with --compare.")
+        return tuple(server.key for server in config.servers.ordered()), None
+    if options.compare_server_key != AUTO_COMPARE_SENTINEL:
+        if options.compare_server_key is None:
+            return (options.server_key,), None
+        return (options.server_key, options.compare_server_key), options.compare_server_key
+    if options.server_key is not None:
+        raise CommandLineUsageError(
+            "--compare without a server name can only be used when --server is not specified."
+        )
+    left_server, right_server = config.servers.first_two()
+    return (left_server.key, right_server.key), right_server.key
 
 
 def _parse_categories(values: Iterable[str]) -> frozenset[AuditCategory] | None:
