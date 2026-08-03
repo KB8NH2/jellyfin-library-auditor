@@ -86,12 +86,17 @@ def audit_library(client: JellyfinClient, library: MediaLibrary) -> tuple[AuditF
 def audit_server(
     server_key: str | None = None,
     requested_library_names: Iterable[str] = (),
+    *,
+    include_configuration_snapshot: bool = False,
 ) -> AuditServerResult:
     """Audit all enabled movie and TV libraries on the configured server.
 
     Args:
+        server_key: Optional configured server key to audit.
         requested_library_names: Optional library names that restrict the audit
             scope to matching enabled Jellyfin libraries.
+        include_configuration_snapshot: Whether to include extra server and
+            library settings intended for comparison reporting.
 
     Returns:
         Structured audit results for the server.
@@ -121,6 +126,8 @@ def audit_server(
         findings: list[AuditFinding] = []
         library_results: list[LibraryAuditResult] = []
         media_items_processed = 0
+        server_settings = ()
+        library_settings = ()
 
         for library in selected_libraries:
             LOGGER.info(
@@ -133,6 +140,15 @@ def audit_server(
             media_items_processed += library_result.media_items_processed
             findings.extend(library_result.findings)
 
+        if include_configuration_snapshot:
+            selected_library_names = tuple(
+                library.name for library in selected_libraries
+            )
+            server_settings = client.get_server_user_experience_settings()
+            library_settings = client.get_library_user_experience_settings(
+                selected_library_names
+            )
+
     return AuditServerResult(
         libraries_audited=len(selected_libraries),
         media_items_processed=media_items_processed,
@@ -141,6 +157,8 @@ def audit_server(
         server_key=server.key,
         server_name=server_name,
         server_url=server.url,
+        server_settings=server_settings,
+        library_settings=library_settings,
     )
 
 
@@ -214,6 +232,8 @@ def filter_audit_result(
         server_key=result.server_key,
         server_name=result.server_name,
         server_url=result.server_url,
+        server_settings=result.server_settings,
+        library_settings=result.library_settings,
     )
 
 
@@ -224,8 +244,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         options = parse_args(argv)
         selected_server_keys, compare_server_key = _resolve_run_targets(options)
+        include_configuration_snapshot = compare_server_key is not None
         results = tuple(
-            audit_server(server_key, options.library_names)
+            audit_server(
+                server_key,
+                options.library_names,
+                include_configuration_snapshot=include_configuration_snapshot,
+            )
             for server_key in selected_server_keys
         )
         filtered_results = tuple(

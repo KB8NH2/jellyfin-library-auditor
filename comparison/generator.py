@@ -19,13 +19,17 @@ from media import has_jellyfin_logo
 from media import has_jellyfin_primary_image
 from media import local_poster_exists
 from models import MediaItem
+from models import MediaLibrary
 from output_layout import audit_results_root
 from output_layout import comparison_output_dir
 from output_layout import shared_css_path
 from output_layout import shared_js_path
+from report_theme import render_theme_bootstrap_script
+from report_theme import render_theme_toggle
 from reports.css import write_css
 from reports.javascript import write_javascript
 from results import AuditServerResult
+from results import LibraryComparisonSettings
 
 
 DEFAULT_COMPARISON_OUTPUT_DIR = Path("audit_results") / "comparison_results"
@@ -107,6 +111,12 @@ def _build_comparison(
     """Return all computed comparison sections."""
     left_libraries = {item.library.name: item.library for item in left_result.library_results}
     right_libraries = {item.library.name: item.library for item in right_result.library_results}
+    left_library_settings = {
+        item.library_name: item for item in left_result.library_settings
+    }
+    right_library_settings = {
+        item.library_name: item for item in right_result.library_settings
+    }
     missing_left_libraries = tuple(
         sorted(set(right_libraries) - set(left_libraries), key=str.casefold)
     )
@@ -120,20 +130,27 @@ def _build_comparison(
     artwork_differences: list[MatchedPair] = []
     subtitle_differences: list[MatchedPair] = []
     metadata_differences: list[tuple[str, str, str, str, str]] = []
-    library_configuration_differences: list[tuple[str, str, str]] = []
+    server_settings: list[tuple[str, str, str]] = _server_settings_rows(
+        left_result,
+        right_result,
+    )
+    library_settings: list[tuple[str, str, str, str]] = []
 
-    common_libraries = sorted(set(left_libraries) & set(right_libraries), key=str.casefold)
-    for library_name in common_libraries:
-        left_library = left_libraries[library_name]
-        right_library = right_libraries[library_name]
-        if left_library.collection_type != right_library.collection_type:
-            library_configuration_differences.append(
-                (
-                    library_name,
-                    left_library.collection_type or "",
-                    right_library.collection_type or "",
-                )
+    all_libraries = sorted(set(left_libraries) | set(right_libraries), key=str.casefold)
+    for library_name in all_libraries:
+        left_library = left_libraries.get(library_name)
+        right_library = right_libraries.get(library_name)
+        library_settings.extend(
+            _library_settings_rows(
+                library_name,
+                left_library,
+                right_library,
+                left_library_settings.get(library_name),
+                right_library_settings.get(library_name),
             )
+        )
+        if left_library is None or right_library is None:
+            continue
 
         left_items = _library_items(left_result, library_name)
         right_items = _library_items(right_result, library_name)
@@ -161,7 +178,8 @@ def _build_comparison(
         "artwork_differences": tuple(artwork_differences),
         "subtitle_differences": tuple(subtitle_differences),
         "metadata_differences": tuple(metadata_differences),
-        "library_configuration_differences": tuple(library_configuration_differences),
+        "server_settings": tuple(server_settings),
+        "library_settings": tuple(library_settings),
     }
 
 
@@ -339,6 +357,98 @@ def _metadata_differences(pair: MatchedPair) -> tuple[tuple[str, str, str, str, 
     return tuple(rows)
 
 
+def _server_settings_rows(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+) -> list[tuple[str, str, str]]:
+    """Return all available server-level settings in row form."""
+    left_settings = {
+        "Configured Server Key": _display_value(left_result.server_key),
+        "Reported Server Name": _display_value(left_result.server_name),
+        "Server URL": _display_value(left_result.server_url),
+        "Libraries Audited": _display_value(left_result.libraries_audited),
+        "Media Items Processed": _display_value(left_result.media_items_processed),
+        "Findings Count": _display_value(left_result.findings_count),
+    }
+    right_settings = {
+        "Configured Server Key": _display_value(right_result.server_key),
+        "Reported Server Name": _display_value(right_result.server_name),
+        "Server URL": _display_value(right_result.server_url),
+        "Libraries Audited": _display_value(right_result.libraries_audited),
+        "Media Items Processed": _display_value(right_result.media_items_processed),
+        "Findings Count": _display_value(right_result.findings_count),
+    }
+    left_settings.update(
+        {setting.label: setting.value for setting in left_result.server_settings}
+    )
+    right_settings.update(
+        {setting.label: setting.value for setting in right_result.server_settings}
+    )
+    labels = sorted(
+        set(left_settings) | set(right_settings),
+        key=str.casefold,
+    )
+    return [
+        (
+            label,
+            left_settings.get(label, ""),
+            right_settings.get(label, ""),
+        )
+        for label in labels
+    ]
+
+
+def _library_settings_rows(
+    library_name: str,
+    left_library: MediaLibrary | None,
+    right_library: MediaLibrary | None,
+    left_settings: LibraryComparisonSettings | None = None,
+    right_settings: LibraryComparisonSettings | None = None,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Return all available library-level settings for one library."""
+    left_settings_by_label = {
+        "Present": _yes_no(left_library is not None),
+        "Library ID": _display_value(
+            left_library.id if left_library is not None else None
+        ),
+        "Collection Type": _display_value(
+            left_library.collection_type if left_library is not None else None
+        ),
+        "Locations": _display_locations(left_library),
+    }
+    right_settings_by_label = {
+        "Present": _yes_no(right_library is not None),
+        "Library ID": _display_value(
+            right_library.id if right_library is not None else None
+        ),
+        "Collection Type": _display_value(
+            right_library.collection_type if right_library is not None else None
+        ),
+        "Locations": _display_locations(right_library),
+    }
+    if left_settings is not None:
+        left_settings_by_label.update(
+            {setting.label: setting.value for setting in left_settings.settings}
+        )
+    if right_settings is not None:
+        right_settings_by_label.update(
+            {setting.label: setting.value for setting in right_settings.settings}
+        )
+    labels = sorted(
+        set(left_settings_by_label) | set(right_settings_by_label),
+        key=str.casefold,
+    )
+    return tuple(
+        (
+            library_name,
+            label,
+            left_settings_by_label.get(label, ""),
+            right_settings_by_label.get(label, ""),
+        )
+        for label in labels
+    )
+
+
 def _index_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
     """Return comparison overview page body."""
     cards = "\n".join(
@@ -471,22 +581,37 @@ def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerRes
 
 def _configuration_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
     """Return configuration and metadata comparison page body."""
-    library_rows = tuple(
+    left_server_name = left_result.server_name or left_result.server_key or "Left"
+    right_server_name = right_result.server_name or right_result.server_key or "Right"
+    server_rows = tuple(
         "\n".join(
             (
-                f'<tr data-search-row data-search="{escape((library_name + " " + left_value + " " + right_value).lower())}">',
-                f"  <td>{escape(library_name)}</td>",
-                f"  {_diff_cell(left_value, is_different=True)}",
-                f"  {_diff_cell(right_value, is_different=True)}",
+                f'<tr{" data-diff-row" if left_value != right_value else ""} data-search-row data-search="{escape((setting_name + " " + left_value + " " + right_value).lower())}">',
+                f"  <td>{escape(setting_name)}</td>",
+                f"  {_diff_cell(left_value, is_different=left_value != right_value)}",
+                f"  {_diff_cell(right_value, is_different=left_value != right_value)}",
                 "</tr>",
             )
         )
-        for library_name, left_value, right_value in comparison["library_configuration_differences"]
+        for setting_name, left_value, right_value in comparison["server_settings"]
+    )
+    library_rows = tuple(
+        "\n".join(
+            (
+                f'<tr{" data-diff-row" if left_value != right_value else ""} data-search-row data-search="{escape((library_name + " " + setting_name + " " + left_value + " " + right_value).lower())}">',
+                f"  <td>{escape(library_name)}</td>",
+                f"  <td>{escape(setting_name)}</td>",
+                f"  {_diff_cell(left_value, is_different=left_value != right_value)}",
+                f"  {_diff_cell(right_value, is_different=left_value != right_value)}",
+                "</tr>",
+            )
+        )
+        for library_name, setting_name, left_value, right_value in comparison["library_settings"]
     )
     metadata_rows = tuple(
         "\n".join(
             (
-                f'<tr data-search-row data-search="{escape((library + " " + title + " " + field_name + " " + left_value + " " + right_value).lower())}">',
+                f'<tr data-diff-row data-search-row data-search="{escape((library + " " + title + " " + field_name + " " + left_value + " " + right_value).lower())}">',
                 f"  <td>{escape(library)}</td>",
                 f"  <td>{escape(title)}</td>",
                 f"  <td>{escape(field_name)}</td>",
@@ -499,17 +624,29 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
     )
     return _page_shell(
         "Configuration Comparison",
-        "Library configuration and media metadata differences.",
+        "Side-by-side server and library settings, with differences highlighted.",
         "\n".join(
             (
                 _simple_table_section(
-                    "Library Configuration Differences",
+                    "Server Settings",
+                    (
+                        "Setting",
+                        left_server_name,
+                        right_server_name,
+                    ),
+                    server_rows,
+                    scrollable=True,
+                ),
+                _simple_table_section(
+                    "Library Settings",
                     (
                         "Library",
-                        f"{left_result.server_name or left_result.server_key or 'Left'} Collection Type",
-                        f"{right_result.server_name or right_result.server_key or 'Right'} Collection Type",
+                        "Setting",
+                        left_server_name,
+                        right_server_name,
                     ),
                     library_rows,
+                    scrollable=True,
                 ),
                 _simple_table_section(
                     "Metadata Differences",
@@ -517,10 +654,11 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
                         "Library",
                         "Title",
                         "Field",
-                        f"{left_result.server_name or left_result.server_key or 'Left'}",
-                        f"{right_result.server_name or right_result.server_key or 'Right'}",
+                        left_server_name,
+                        right_server_name,
                     ),
                     metadata_rows,
+                    scrollable=True,
                 ),
             )
         ),
@@ -545,6 +683,7 @@ def _page_document(*, title: str, body: str, asset_prefix: str) -> str:
             '  <meta charset="utf-8">',
             '  <meta name="viewport" content="width=device-width, initial-scale=1">',
             f"  <title>{escape(title)}</title>",
+            f"  {render_theme_bootstrap_script()}",
             f'  <link rel="stylesheet" href="{escape(f"{asset_prefix}css/style.css?v={asset_version}")}">',
             "</head>",
             "<body>",
@@ -601,6 +740,7 @@ def _comparison_nav(current_nav: str) -> str:
         (
             '  <nav class="site-nav" aria-label="Comparison navigation">',
             *[f"    {link}" for link in links],
+            f"    {render_theme_toggle()}",
             "  </nav>",
         )
     )
@@ -638,14 +778,19 @@ def _simple_table_section(
         f'<th><button type="button" class="sort-button" data-column="{index}" onclick="sortReportTable(this)">{escape(label)}</button></th>'
         for index, label in enumerate(headers)
     )
-    body_rows = rows or ('<tr class="empty-row"><td colspan="99">No differences found.</td></tr>',)
+    body_rows = rows or (
+        '<tr class="empty-row" data-static-row><td colspan="99">No differences found.</td></tr>',
+    )
     table_shell_class = "table-shell comparison-scroll-shell" if scrollable else "table-shell"
     return "\n".join(
         (
             '  <section class="section-card">',
-            f"    <h2>{escape(title)}</h2>",
+            '    <div class="table-section-header">',
+            f"      <h2>{escape(title)}</h2>",
+            '      <button type="button" class="toolbar-button table-filter-button" onclick="toggleSameRows(this)" aria-pressed="false">Hide same</button>',
+            "    </div>",
             f'    <div class="{table_shell_class}">',
-            '      <table class="data-table comparison-table">',
+            '      <table class="data-table comparison-table" data-hide-same="false">',
             f"        <thead><tr>{header_html}</tr></thead>",
             "        <tbody>",
             *body_rows,
@@ -702,7 +847,7 @@ def _media_missing_row(library_name: str, item) -> str:
         ) if part
     ).lower()
     return (
-        f'<tr data-search-row data-search="{escape(search_text)}"><td>{escape(library_name)}</td>'
+        f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(library_name)}</td>'
         f'<td>{escape(item.title)}</td><td>{escape(item.series_name or "")}</td>'
         f'<td>{escape(item.season_name or "")}</td><td>{"" if item.episode_number is None else item.episode_number}</td></tr>'
     )
@@ -722,10 +867,10 @@ def _library_list_rows(
         key=str.casefold,
     )
     rows = tuple(
-        f"<tr><td>{escape(left_name or '')}</td><td>{escape(right_name or '')}</td></tr>"
+        f'<tr{" data-diff-row" if left_name != right_name else ""}><td>{escape(left_name or "")}</td><td>{escape(right_name or "")}</td></tr>'
         for left_name, right_name in zip_longest(left_libraries, right_libraries, fillvalue="")
     )
-    return rows or ('<tr class="empty-row"><td colspan="99">No libraries found.</td></tr>',)
+    return rows or ('<tr class="empty-row" data-static-row><td colspan="99">No libraries found.</td></tr>',)
 
 
 def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult, pair: MatchedPair) -> str:
@@ -738,7 +883,7 @@ def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult
     left_logo = _yes_no(has_jellyfin_logo(pair.left))
     right_logo = _yes_no(has_jellyfin_logo(pair.right))
     return (
-        f'<tr class="comparison-diff-row" data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
+        f'<tr class="comparison-diff-row" data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.display_name)}</td>'
         f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
         f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'
@@ -752,7 +897,7 @@ def _subtitle_row(left_result: AuditServerResult, right_result: AuditServerResul
     left_subtitles = _yes_no(has_english_subtitles(pair.left))
     right_subtitles = _yes_no(has_english_subtitles(pair.right))
     return (
-        f'<tr data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
+        f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.title)}</td><td>{escape(pair.left.series_name or "")}</td>'
         f'<td>{escape(pair.left.season_name or "")}</td><td>{"" if pair.left.episode_number is None else pair.left.episode_number}</td>'
         f'{_diff_cell(left_subtitles, is_different=left_subtitles != right_subtitles)}{_diff_cell(right_subtitles, is_different=left_subtitles != right_subtitles)}</tr>'
@@ -764,6 +909,13 @@ def _display_value(value: object) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _display_locations(library: MediaLibrary | None) -> str:
+    """Return a compact display value for library locations."""
+    if library is None:
+        return ""
+    return ", ".join(str(location) for location in library.locations)
 
 
 def _yes_no(value: bool) -> str:

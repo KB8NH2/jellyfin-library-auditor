@@ -6,6 +6,22 @@ from models import MediaLibrary
 
 
 @dataclass(frozen=True, slots=True)
+class ComparisonSetting:
+    """One display-ready configuration setting for comparison output."""
+
+    label: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryComparisonSettings:
+    """Display-ready comparison settings for one Jellyfin library."""
+
+    library_name: str
+    settings: tuple[ComparisonSetting, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LibraryAuditResult:
     """Structured audit output for one library.
 
@@ -63,6 +79,10 @@ class AuditServerResult:
         server_name: Jellyfin server display name when available.
         server_url: Jellyfin server URL used for the audit.
         findings: Findings produced while auditing the server.
+        server_settings: Optional user-experience-oriented server settings for
+            comparison reports.
+        library_settings: Optional user-experience-oriented library settings for
+            comparison reports.
     """
 
     libraries_audited: int
@@ -72,6 +92,8 @@ class AuditServerResult:
     server_key: str | None = None
     server_name: str | None = None
     server_url: str | None = None
+    server_settings: tuple[ComparisonSetting, ...] = ()
+    library_settings: tuple[LibraryComparisonSettings, ...] = ()
 
     @property
     def findings_count(self) -> int:
@@ -100,6 +122,8 @@ def _percentage(count: int, total: int) -> float:
 __all__ = [
     "AuditFinding",
     "AuditServerResult",
+    "ComparisonSetting",
+    "LibraryComparisonSettings",
     "LibraryAuditResult",
     "MediaItem",
 ]

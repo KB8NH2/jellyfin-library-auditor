@@ -7,6 +7,7 @@ reporting, or any assumptions about how media data will be evaluated.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,11 +21,16 @@ from models import MediaItem
 from models import MediaLibrary
 from models import SubtitleTrack
 from models import VideoTrack
+from results import ComparisonSetting
+from results import LibraryComparisonSettings
 
 
 LIBRARIES_ENDPOINT = "/Library/MediaFolders"
 ITEMS_ENDPOINT = "/Items"
 PING_ENDPOINT = "/System/Info/Public"
+SYSTEM_CONFIGURATION_ENDPOINT = "/System/Configuration"
+VIRTUAL_FOLDERS_ENDPOINT = "/Library/VirtualFolders"
+ENCODING_CONFIGURATION_KEY = "encoding"
 ITEM_FIELDS = ",".join(
     [
         "Path",
@@ -41,6 +47,180 @@ SUBTITLE_STREAM_TYPE = "subtitle"
 RequestParamValue = str | bytes | int | float | list[str] | tuple[str, ...] | None
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_PAGE_SIZE = 200
+SERVER_USER_EXPERIENCE_FIELDS = (
+    ("ServerName", "Server Name"),
+    ("UICulture", "UI Culture"),
+    ("PreferredMetadataLanguage", "Preferred Metadata Language"),
+    ("MetadataCountryCode", "Metadata Country Code"),
+    ("EnableFolderView", "Enable Folder View"),
+    ("EnableGroupingMoviesIntoCollections", "Group Movies Into Collections"),
+    ("EnableGroupingShowsIntoCollections", "Group Shows Into Collections"),
+    ("DisplaySpecialsWithinSeasons", "Display Specials Within Seasons"),
+    ("EnableExternalContentInSuggestions", "External Content In Suggestions"),
+    ("ImageSavingConvention", "Image Saving Convention"),
+    ("ChapterImageResolution", "Chapter Image Resolution"),
+    ("RemoteClientBitrateLimit", "Remote Client Bitrate Limit"),
+    ("MinResumePct", "Minimum Resume Percent"),
+    ("MaxResumePct", "Maximum Resume Percent"),
+    ("MinResumeDurationSeconds", "Minimum Resume Duration Seconds"),
+    ("MinAudiobookResume", "Minimum Audiobook Resume"),
+    ("MaxAudiobookResume", "Maximum Audiobook Resume"),
+    ("SortRemoveCharacters", "Sort Remove Characters"),
+    ("SortRemoveWords", "Sort Remove Words"),
+    ("SortReplaceCharacters", "Sort Replace Characters"),
+)
+PLAYBACK_USER_EXPERIENCE_FIELDS = (
+    ("HardwareAccelerationType", "Playback Hardware Acceleration"),
+    ("EnableHardwareEncoding", "Playback Hardware Encoding"),
+    ("HardwareDecodingCodecs", "Playback Hardware Decoding Codecs"),
+    ("AllowHevcEncoding", "Playback Allow HEVC Encoding"),
+    ("AllowAv1Encoding", "Playback Allow AV1 Encoding"),
+    ("RemoteClientBitrateLimit", "Playback Remote Client Bitrate Limit"),
+    ("EncodingThreadCount", "Playback Encoding Thread Count"),
+    ("EncoderPreset", "Playback Encoder Preset"),
+    ("H264Crf", "Playback H264 CRF"),
+    ("H265Crf", "Playback H265 CRF"),
+    ("EnableAudioVbr", "Playback Audio VBR"),
+    ("DownMixAudioBoost", "Playback Downmix Audio Boost"),
+    ("DownMixStereoAlgorithm", "Playback Downmix Stereo Algorithm"),
+    ("MaxMuxingQueueSize", "Playback Max Muxing Queue Size"),
+    ("EnableThrottling", "Playback Transcoding Throttling"),
+    ("ThrottleDelaySeconds", "Playback Throttle Delay Seconds"),
+    ("EnableSegmentDeletion", "Playback Segment Deletion"),
+    ("SegmentKeepSeconds", "Playback Segment Keep Seconds"),
+    ("EnableSubtitleExtraction", "Playback Subtitle Extraction"),
+    ("EnableFallbackFont", "Playback Fallback Font"),
+    ("FallbackFontPath", "Playback Fallback Font Path"),
+    ("TranscodingTempPath", "Playback Transcoding Temp Path"),
+    ("DeinterlaceMethod", "Playback Deinterlace Method"),
+    ("DeinterlaceDoubleRate", "Playback Double Rate Deinterlace"),
+    ("EnableTonemapping", "Playback Tonemapping"),
+    ("TonemappingAlgorithm", "Playback Tonemapping Algorithm"),
+    ("TonemappingMode", "Playback Tonemapping Mode"),
+    ("TonemappingRange", "Playback Tonemapping Range"),
+    ("TonemappingDesat", "Playback Tonemapping Desaturation"),
+    ("TonemappingPeak", "Playback Tonemapping Peak"),
+    ("TonemappingParam", "Playback Tonemapping Parameter"),
+    ("EnableVppTonemapping", "Playback VPP Tonemapping"),
+    ("VppTonemappingBrightness", "Playback VPP Brightness"),
+    ("VppTonemappingContrast", "Playback VPP Contrast"),
+    ("EnableVideoToolboxTonemapping", "Playback VideoToolbox Tonemapping"),
+    ("EnableEnhancedNvdecDecoder", "Playback Enhanced NVDEC Decoder"),
+    ("PreferSystemNativeHwDecoder", "Playback Prefer Native HW Decoder"),
+    ("EnableIntelLowPowerH264HwEncoder", "Playback Intel Low Power H264"),
+    ("EnableIntelLowPowerHevcHwEncoder", "Playback Intel Low Power HEVC"),
+    ("QsvDevice", "Playback QSV Device"),
+    ("VaapiDevice", "Playback VAAPI Device"),
+    ("EnableDecodingColorDepth10Hevc", "Playback 10-bit HEVC Decode"),
+    ("EnableDecodingColorDepth10Vp9", "Playback 10-bit VP9 Decode"),
+    ("EnableDecodingColorDepth10HevcRext", "Playback 10-bit HEVC RExt Decode"),
+    ("EnableDecodingColorDepth12HevcRext", "Playback 12-bit HEVC RExt Decode"),
+)
+LIBRARY_USER_EXPERIENCE_FIELDS = (
+    (("CollectionType",), "Collection Type"),
+    (("Locations",), "Locations"),
+    (("LibraryOptions", "PathInfos"), "Managed Paths"),
+    (("LibraryOptions", "Enabled"), "Enabled"),
+    (("LibraryOptions", "EnablePhotos"), "Enable Photos"),
+    (("LibraryOptions", "AutomaticallyAddToCollection"), "Automatically Add To Collection"),
+    (("LibraryOptions", "EnableRealtimeMonitor"), "Realtime Monitor"),
+    (
+        ("LibraryOptions", "AutomaticRefreshIntervalDays"),
+        "Automatic Refresh Interval Days",
+    ),
+    (
+        ("LibraryOptions", "EnableAutomaticSeriesGrouping"),
+        "Automatic Series Grouping",
+    ),
+    (("LibraryOptions", "EnableEmbeddedTitles"), "Embedded Titles"),
+    (
+        ("LibraryOptions", "EnableEmbeddedEpisodeInfos"),
+        "Embedded Episode Info",
+    ),
+    (
+        ("LibraryOptions", "EnableEmbeddedExtrasTitles"),
+        "Embedded Extras Titles",
+    ),
+    (("LibraryOptions", "EnableInternetProviders"), "Internet Providers"),
+    (("LibraryOptions", "SeasonZeroDisplayName"), "Season Zero Display Name"),
+    (("LibraryOptions", "EnableLUFSScan"), "Enable LUFS Scan"),
+    (
+        ("LibraryOptions", "PreferredMetadataLanguage"),
+        "Preferred Metadata Language",
+    ),
+    (("LibraryOptions", "MetadataCountryCode"), "Metadata Country Code"),
+    (("LibraryOptions", "SaveLocalMetadata"), "Save Local Metadata"),
+    (("LibraryOptions", "MetadataSavers"), "Metadata Savers"),
+    (
+        ("LibraryOptions", "DisabledLocalMetadataReaders"),
+        "Disabled Local Metadata Readers",
+    ),
+    (
+        ("LibraryOptions", "LocalMetadataReaderOrder"),
+        "Local Metadata Reader Order",
+    ),
+    (("LibraryOptions", "AllowEmbeddedSubtitles"), "Allow Embedded Subtitles"),
+    (
+        ("LibraryOptions", "RequirePerfectSubtitleMatch"),
+        "Require Perfect Subtitle Match",
+    ),
+    (
+        ("LibraryOptions", "SkipSubtitlesIfEmbeddedSubtitlesPresent"),
+        "Skip If Embedded Subtitles Present",
+    ),
+    (
+        ("LibraryOptions", "SkipSubtitlesIfAudioTrackMatches"),
+        "Skip If Audio Matches Subtitle Language",
+    ),
+    (
+        ("LibraryOptions", "SubtitleDownloadLanguages"),
+        "Subtitle Download Languages",
+    ),
+    (("LibraryOptions", "SubtitleFetcherOrder"), "Subtitle Fetcher Order"),
+    (
+        ("LibraryOptions", "DisabledSubtitleFetchers"),
+        "Disabled Subtitle Fetchers",
+    ),
+    (("LibraryOptions", "SaveSubtitlesWithMedia"), "Save Subtitles With Media"),
+    (("LibraryOptions", "SaveLyricsWithMedia"), "Save Lyrics With Media"),
+    (
+        ("LibraryOptions", "PreferNonstandardArtistsTag"),
+        "Prefer Nonstandard Artists Tag",
+    ),
+    (("LibraryOptions", "UseCustomTagDelimiters"), "Use Custom Tag Delimiters"),
+    (("LibraryOptions", "CustomTagDelimiters"), "Custom Tag Delimiters"),
+    (("LibraryOptions", "DelimiterWhitelist"), "Delimiter Whitelist"),
+    (
+        ("LibraryOptions", "DisabledMediaSegmentProviders"),
+        "Disabled Media Segment Providers",
+    ),
+    (
+        ("LibraryOptions", "MediaSegmentProviderOrder"),
+        "Media Segment Provider Order",
+    ),
+    (("LibraryOptions", "DisabledLyricFetchers"), "Disabled Lyric Fetchers"),
+    (("LibraryOptions", "LyricFetcherOrder"), "Lyric Fetcher Order"),
+    (
+        ("LibraryOptions", "EnableChapterImageExtraction"),
+        "Chapter Image Extraction",
+    ),
+    (
+        ("LibraryOptions", "ExtractChapterImagesDuringLibraryScan"),
+        "Extract Chapter Images During Scan",
+    ),
+    (
+        ("LibraryOptions", "EnableTrickplayImageExtraction"),
+        "Trickplay Image Extraction",
+    ),
+    (
+        ("LibraryOptions", "ExtractTrickplayImagesDuringLibraryScan"),
+        "Extract Trickplay Images During Scan",
+    ),
+    (
+        ("LibraryOptions", "SaveTrickplayWithMedia"),
+        "Save Trickplay With Media",
+    ),
+)
 
 
 class JellyfinError(RuntimeError):
@@ -106,7 +286,7 @@ class JellyfinClient:
     def ping(self) -> bool:
         """Return whether the Jellyfin server is reachable."""
         try:
-            self._request("GET", PING_ENDPOINT)
+            self._request(PING_ENDPOINT)
         except JellyfinError:
             return False
 
@@ -118,7 +298,7 @@ class JellyfinClient:
         Returns:
             A list of normalized media library objects.
         """
-        payload = self._request("GET", LIBRARIES_ENDPOINT)
+        payload = self._request(LIBRARIES_ENDPOINT)
         raw_libraries = self._get_required_list(payload, "Items", "library response")
 
         libraries: list[MediaLibrary] = []
@@ -134,7 +314,7 @@ class JellyfinClient:
             The server display name, or ``None`` when Jellyfin does not provide
             one in the public system info response.
         """
-        payload = self._request("GET", PING_ENDPOINT)
+        payload = self._request(PING_ENDPOINT)
         server_name = self._get_optional_str(payload, "ServerName")
         if server_name is not None:
             return server_name
@@ -153,6 +333,85 @@ class JellyfinClient:
         library = self._get_library_by_id(library_id)
         return self._get_library_items_for_library(library)
 
+    def get_server_user_experience_settings(self) -> tuple[ComparisonSetting, ...]:
+        """Return selected server settings that can affect user-visible behavior."""
+        payload = self._request(SYSTEM_CONFIGURATION_ENDPOINT)
+        encoding_payload = self._request_named_configuration(
+            ENCODING_CONFIGURATION_KEY
+        )
+        return tuple(
+            [
+                *(
+                    ComparisonSetting(
+                        label=label,
+                        value=self._stringify_setting_value(payload.get(key)),
+                    )
+                    for key, label in SERVER_USER_EXPERIENCE_FIELDS
+                ),
+                *(
+                    ComparisonSetting(
+                        label=label,
+                        value=self._stringify_setting_value(encoding_payload.get(key)),
+                    )
+                    for key, label in PLAYBACK_USER_EXPERIENCE_FIELDS
+                ),
+            ]
+        )
+
+    def get_library_user_experience_settings(
+        self,
+        library_names: Iterable[str] | None = None,
+    ) -> tuple[LibraryComparisonSettings, ...]:
+        """Return selected library settings that can affect user-visible behavior."""
+        payload = self._request_payload("GET", VIRTUAL_FOLDERS_ENDPOINT)
+        if not isinstance(payload, list):
+            raise JellyfinResponseError(
+                "Jellyfin returned an unexpected JSON type for virtual folders."
+            )
+
+        included_names = (
+            None
+            if library_names is None
+            else {name.strip().casefold() for name in library_names if name.strip()}
+        )
+        settings: list[LibraryComparisonSettings] = []
+        for entry in payload:
+            if not isinstance(entry, Mapping):
+                raise JellyfinResponseError(
+                    "Jellyfin returned a non-object virtual folder entry."
+                )
+            library_name = self._get_required_str(entry, "Name", "virtual folder")
+            if included_names is not None and library_name.casefold() not in included_names:
+                continue
+            library_settings = tuple(
+                [
+                    *(
+                        ComparisonSetting(
+                            label=label,
+                            value=self._stringify_setting_value(
+                                self._nested_value(entry, path_parts)
+                            ),
+                        )
+                        for path_parts, label in LIBRARY_USER_EXPERIENCE_FIELDS
+                    ),
+                    *self._type_option_settings(entry),
+                ]
+            )
+            settings.append(
+                LibraryComparisonSettings(
+                    library_name=library_name,
+                    settings=library_settings,
+                )
+            )
+
+        return tuple(
+            sorted(settings, key=lambda item: item.library_name.casefold())
+        )
+
+    def _request_named_configuration(self, key: str) -> dict[str, Any]:
+        """Return one named Jellyfin configuration object."""
+        return self._request(f"{SYSTEM_CONFIGURATION_ENDPOINT}/{key}")
+
     def _get_library_items_for_library(self, library: MediaLibrary) -> list[MediaItem]:
         """Return every movie or episode contained in one normalized library.
 
@@ -167,7 +426,6 @@ class JellyfinClient:
 
         while True:
             payload = self._request(
-                "GET",
                 ITEMS_ENDPOINT,
                 params={
                     "ParentId": library.id,
@@ -228,7 +486,6 @@ class JellyfinClient:
 
     def _request(
         self,
-        method: str,
         path: str,
         *,
         params: Mapping[str, RequestParamValue] | None = None,
@@ -236,7 +493,6 @@ class JellyfinClient:
         """Perform a Jellyfin REST request and decode the JSON response.
 
         Args:
-            method: HTTP method name.
             path: Relative API path.
             params: Optional query string parameters.
 
@@ -247,6 +503,22 @@ class JellyfinClient:
             JellyfinRequestError: If the HTTP request fails.
             JellyfinResponseError: If the response body is not valid JSON.
         """
+        payload = self._request_payload("GET", path, params=params)
+        if not isinstance(payload, dict):
+            raise JellyfinResponseError(
+                f"Jellyfin returned an unexpected JSON type for GET {self._build_url(path)}."
+            )
+
+        return payload
+
+    def _request_payload(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, RequestParamValue] | None = None,
+    ) -> Any:
+        """Perform a Jellyfin REST request and decode any JSON response body."""
         url = self._build_url(path)
 
         try:
@@ -268,18 +540,11 @@ class JellyfinClient:
             ) from error
 
         try:
-            payload = response.json()
+            return response.json()
         except ValueError as error:
             raise JellyfinResponseError(
                 f"Jellyfin returned invalid JSON for {method} {url}."
             ) from error
-
-        if not isinstance(payload, dict):
-            raise JellyfinResponseError(
-                f"Jellyfin returned an unexpected JSON type for {method} {url}."
-            )
-
-        return payload
 
     def _build_url(self, path: str) -> str:
         """Build an absolute Jellyfin API URL.
@@ -646,6 +911,127 @@ class JellyfinClient:
                 normalized_values.append(normalized_value)
 
         return tuple(normalized_values)
+
+    @classmethod
+    def _nested_value(
+        cls,
+        data: Mapping[str, Any],
+        path_parts: tuple[str, ...],
+    ) -> Any:
+        """Return a nested mapping value or ``None`` when any segment is missing."""
+        current: Any = data
+        for path_part in path_parts:
+            if not isinstance(current, Mapping):
+                return None
+            current = current.get(path_part)
+            if current is None:
+                return None
+        return current
+
+    @classmethod
+    def _stringify_setting_value(cls, value: Any) -> str:
+        """Return a compact display value for one configuration setting."""
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, Mapping):
+            return ", ".join(
+                f"{key}={cls._stringify_setting_value(item_value)}"
+                for key, item_value in value.items()
+                if cls._stringify_setting_value(item_value)
+            )
+        if isinstance(value, list):
+            rendered_items = [cls._stringify_setting_value(item) for item in value]
+            return ", ".join(item for item in rendered_items if item)
+        return str(value)
+
+    @classmethod
+    def _type_option_settings(
+        cls,
+        entry: Mapping[str, Any],
+    ) -> tuple[ComparisonSetting, ...]:
+        """Return settings derived from per-type library options."""
+        type_options = cls._nested_value(entry, ("LibraryOptions", "TypeOptions"))
+        if not isinstance(type_options, list):
+            return ()
+
+        settings: list[ComparisonSetting] = []
+        for raw_type_option in type_options:
+            if not isinstance(raw_type_option, Mapping):
+                continue
+            raw_type_name = raw_type_option.get("Type")
+            if not isinstance(raw_type_name, str) or not raw_type_name.strip():
+                continue
+            type_name = raw_type_name.strip()
+            settings.extend(
+                (
+                    ComparisonSetting(
+                        f"{type_name} Metadata Fetchers",
+                        cls._stringify_setting_value(
+                            raw_type_option.get("MetadataFetchers")
+                        ),
+                    ),
+                    ComparisonSetting(
+                        f"{type_name} Metadata Fetcher Order",
+                        cls._stringify_setting_value(
+                            raw_type_option.get("MetadataFetcherOrder")
+                        ),
+                    ),
+                    ComparisonSetting(
+                        f"{type_name} Image Fetchers",
+                        cls._stringify_setting_value(raw_type_option.get("ImageFetchers")),
+                    ),
+                    ComparisonSetting(
+                        f"{type_name} Image Fetcher Order",
+                        cls._stringify_setting_value(
+                            raw_type_option.get("ImageFetcherOrder")
+                        ),
+                    ),
+                    ComparisonSetting(
+                        f"{type_name} Similar Item Providers",
+                        cls._stringify_setting_value(
+                            raw_type_option.get("SimilarItemProviders")
+                        ),
+                    ),
+                    ComparisonSetting(
+                        f"{type_name} Similar Item Provider Order",
+                        cls._stringify_setting_value(
+                            raw_type_option.get("SimilarItemProviderOrder")
+                        ),
+                    ),
+                    ComparisonSetting(
+                        f"{type_name} Image Options",
+                        cls._image_options_summary(raw_type_option.get("ImageOptions")),
+                    ),
+                )
+            )
+
+        return tuple(settings)
+
+    @classmethod
+    def _image_options_summary(cls, value: Any) -> str:
+        """Return a compact summary for one TypeOptions.ImageOptions list."""
+        if not isinstance(value, list):
+            return cls._stringify_setting_value(value)
+
+        parts: list[str] = []
+        for raw_item in value:
+            if not isinstance(raw_item, Mapping):
+                continue
+            type_name = cls._stringify_setting_value(raw_item.get("Type"))
+            limit = cls._stringify_setting_value(raw_item.get("Limit"))
+            min_width = cls._stringify_setting_value(raw_item.get("MinWidth"))
+            item_parts = [part for part in (type_name, f"limit={limit}" if limit else "", f"minWidth={min_width}" if min_width else "") if part]
+            if item_parts:
+                parts.append(" ".join(item_parts))
+        return "; ".join(parts)
 
 
 __all__ = [

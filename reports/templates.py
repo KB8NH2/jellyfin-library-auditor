@@ -10,6 +10,8 @@ from pathlib import Path
 
 import audit_types
 from models import MediaItem
+from report_theme import render_theme_bootstrap_script
+from report_theme import render_theme_toggle
 
 
 SEVERITY_SORT_ORDER = {
@@ -198,6 +200,7 @@ def render_navigation(relative_prefix: str) -> str:
             f'      <a class="nav-link" data-nav="Libraries" href="{escape(f"{relative_prefix}index.html#libraries-overview")}">Libraries</a>',
             f'      <a class="nav-link" data-nav="Checks" href="{escape(f"{relative_prefix}index.html#checks-overview")}">Audit Checks</a>',
             '      <a class="nav-link" data-nav="About" href="#about">About</a>',
+            f"      {render_theme_toggle()}",
             "    </nav>",
         )
     )
@@ -325,6 +328,7 @@ def page_document(
             '  <meta charset="utf-8">',
             '  <meta name="viewport" content="width=device-width, initial-scale=1">',
             f"  <title>{escape(title)}</title>",
+            f"  {render_theme_bootstrap_script()}",
             f'  <link rel="stylesheet" href="{escape(f"{resolved_asset_prefix}css/style.css?v={asset_version}")}">',
             "</head>",
             "<body>",
