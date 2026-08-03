@@ -5,7 +5,6 @@ from __future__ import annotations
 from media import has_english_subtitles
 from media import has_jellyfin_logo
 from media import has_jellyfin_primary_image
-from media import local_backdrop_exists
 from media import local_poster_exists
 from . import templates
 
@@ -13,7 +12,6 @@ from . import templates
 TABLE_HEADERS = (
     "Title",
     "Poster",
-    "Backdrop",
     "Logo",
     "Primary Image",
     "English Subtitles",
@@ -74,7 +72,6 @@ def _media_rows(findings: tuple, *, site_links: templates.SiteLinks, relative_pr
                     f'          <tr id="{templates.media_anchor(item, site_links)}" data-search-row data-search="{templates.row_search_text(media_findings)}">',
                     f"            <td>{templates.escape(item.display_name)}</td>",
                     f"            <td>{templates.render_status_label(local_poster_exists(item))}</td>",
-                    f"            <td>{templates.render_status_label(local_backdrop_exists(item))}</td>",
                     f"            <td>{templates.render_status_label(has_jellyfin_logo(item))}</td>",
                     f"            <td>{templates.render_status_label(has_jellyfin_primary_image(item))}</td>",
                     f"            <td>{templates.render_status_label(has_english_subtitles(item))}</td>",

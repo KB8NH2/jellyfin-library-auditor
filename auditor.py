@@ -34,6 +34,7 @@ from models import MediaLibrary
 from output_layout import audit_results_root
 from output_layout import reset_audit_results_root
 from output_layout import write_audit_results_index
+from report_filters import filter_report_output
 from reports import write_csv_report, write_html_report
 from results import AuditServerResult
 from results import LibraryAuditResult
@@ -228,10 +229,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             for server_key in selected_server_keys
         )
         filtered_results = tuple(
-            filter_audit_result(
-                result,
-                categories=options.categories,
-                severities=options.severities,
+            filter_report_output(
+                filter_audit_result(
+                    result,
+                    categories=options.categories,
+                    severities=options.severities,
+                )
             )
             for result in results
         )
@@ -323,8 +326,7 @@ def _log_library_summaries(library_results: Iterable[LibraryAuditResult]) -> Non
     for library_result in library_results:
         LOGGER.info(
             (
-                "Library summary for %s: English subtitles %s, local NFO %s, "
-                "posters %s, backdrop %s"
+                "Library summary for %s: English subtitles %s, posters %s"
             ),
             library_result.library.name,
             _format_percentage(
@@ -332,16 +334,8 @@ def _log_library_summaries(library_results: Iterable[LibraryAuditResult]) -> Non
                 library_result.media_items_processed,
             ),
             _format_percentage(
-                library_result.items_with_local_nfo,
-                library_result.media_items_processed,
-            ),
-            _format_percentage(
-                library_result.items_with_local_poster,
-                library_result.media_items_processed,
-            ),
-            _format_percentage(
-                library_result.items_with_local_backdrop,
-                library_result.media_items_processed,
+            library_result.items_with_local_poster,
+            library_result.media_items_processed,
             ),
         )
 

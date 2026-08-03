@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from html import escape
+from itertools import zip_longest
 from pathlib import Path
+import re
 import shutil
 
 from config import get_config
@@ -13,7 +17,6 @@ from media import get_video_codec
 from media import has_english_subtitles
 from media import has_jellyfin_logo
 from media import has_jellyfin_primary_image
-from media import local_backdrop_exists
 from media import local_poster_exists
 from models import MediaItem
 from output_layout import audit_results_root
@@ -225,6 +228,12 @@ def _pair_item_group(left_items: list, right_items: list) -> tuple[list[tuple[ob
         if item.id not in set(matched_ids)
     ]
 
+    signature_matched, remaining_left, remaining_right = _pair_by_version_signature(
+        remaining_left,
+        remaining_right,
+    )
+    matched.extend(signature_matched)
+
     pair_count = min(len(remaining_left), len(remaining_right))
     for index in range(pair_count):
         matched.append((remaining_left[index], remaining_right[index]))
@@ -241,14 +250,57 @@ def _comparison_identity(item) -> tuple:
     if item.is_episode:
         return (
             "episode",
-            (item.series_name or "").casefold(),
+            _normalized_comparison_text(item.series_name),
             item.season_number,
             item.episode_number,
-            item.title.casefold(),
+            _normalized_comparison_text(item.title),
         )
     return (
         "movie",
-        item.title.casefold(),
+        _normalized_comparison_text(item.title),
+    )
+
+
+def _pair_by_version_signature(
+    left_items: list[MediaItem],
+    right_items: list[MediaItem],
+) -> tuple[list[tuple[MediaItem, MediaItem]], list[MediaItem], list[MediaItem]]:
+    """Pair duplicate variants using resolution and codec metadata before fallback."""
+    left_groups = _group_items_by_version_signature(left_items)
+    right_groups = _group_items_by_version_signature(right_items)
+
+    matched: list[tuple[MediaItem, MediaItem]] = []
+    remaining_left: list[MediaItem] = []
+    remaining_right: list[MediaItem] = []
+
+    for signature in sorted(set(left_groups) | set(right_groups), key=str):
+        left_group = left_groups.get(signature, [])
+        right_group = right_groups.get(signature, [])
+        pair_count = min(len(left_group), len(right_group))
+        for index in range(pair_count):
+            matched.append((left_group[index], right_group[index]))
+        remaining_left.extend(left_group[pair_count:])
+        remaining_right.extend(right_group[pair_count:])
+
+    return matched, remaining_left, remaining_right
+
+
+def _group_items_by_version_signature(
+    items: list[MediaItem],
+) -> dict[tuple[str, str, str], list[MediaItem]]:
+    """Group same-identity items by a version signature used to align duplicates."""
+    grouped: dict[tuple[str, str, str], list[MediaItem]] = defaultdict(list)
+    for item in items:
+        grouped[_version_signature(item)].append(item)
+    return dict(grouped)
+
+
+def _version_signature(item: MediaItem) -> tuple[str, str, str]:
+    """Return the duplicate-version signature used for stable pairing."""
+    return (
+        item.resolution or "",
+        get_video_codec(item) or "",
+        get_primary_audio_codec(item) or "",
     )
 
 
@@ -257,7 +309,6 @@ def _artwork_differs(left_item, right_item) -> bool:
     return any(
         (
             local_poster_exists(left_item) != local_poster_exists(right_item),
-            local_backdrop_exists(left_item) != local_backdrop_exists(right_item),
             has_jellyfin_primary_image(left_item) != has_jellyfin_primary_image(right_item),
             has_jellyfin_logo(left_item) != has_jellyfin_logo(right_item),
         )
@@ -326,42 +377,35 @@ def _index_page(left_result: AuditServerResult, right_result: AuditServerResult,
 
 def _libraries_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
     """Return libraries comparison page body."""
+    left_server_name = left_result.server_name or left_result.server_key or "Left"
+    right_server_name = right_result.server_name or right_result.server_key or "Right"
     return _page_shell(
         "Libraries Comparison",
-        "Missing libraries and media items between both servers.",
+        "Library lists and missing media items between both servers.",
         "\n".join(
             (
                 _simple_table_section(
-                    "Libraries Missing From Left",
-                    ("Library",),
-                    tuple(
-                        f"<tr><td>{escape(name)}</td></tr>"
-                        for name in comparison["missing_left_libraries"]
-                    ),
+                    "Libraries By Server",
+                    (left_server_name, right_server_name),
+                    _library_list_rows(left_result, right_result),
                 ),
                 _simple_table_section(
-                    "Libraries Missing From Right",
-                    ("Library",),
-                    tuple(
-                        f"<tr><td>{escape(name)}</td></tr>"
-                        for name in comparison["missing_right_libraries"]
-                    ),
-                ),
-                _simple_table_section(
-                    f"Media Missing From {escape(left_result.server_name or left_result.server_key or 'Left')}",
+                    f"Media Missing From {escape(left_server_name)}",
                     ("Library", "Title", "Series", "Season", "Episode"),
                     tuple(
                         _media_missing_row(library_name, item)
                         for library_name, item in comparison["missing_left_media"]
                     ),
+                    scrollable=True,
                 ),
                 _simple_table_section(
-                    f"Media Missing From {escape(right_result.server_name or right_result.server_key or 'Right')}",
+                    f"Media Missing From {escape(right_server_name)}",
                     ("Library", "Title", "Series", "Season", "Episode"),
                     tuple(
                         _media_missing_row(library_name, item)
                         for library_name, item in comparison["missing_right_media"]
                     ),
+                    scrollable=True,
                 ),
             )
         ),
@@ -386,8 +430,6 @@ def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResul
                 "Title",
                 f"{left_result.server_name or left_result.server_key or 'Left'} Poster",
                 f"{right_result.server_name or right_result.server_key or 'Right'} Poster",
-                f"{left_result.server_name or left_result.server_key or 'Left'} Backdrop",
-                f"{right_result.server_name or right_result.server_key or 'Right'} Backdrop",
                 f"{left_result.server_name or left_result.server_key or 'Left'} Primary",
                 f"{right_result.server_name or right_result.server_key or 'Right'} Primary",
                 f"{left_result.server_name or left_result.server_key or 'Left'} Logo",
@@ -494,6 +536,7 @@ def _default_output_dir() -> Path:
 
 def _page_document(*, title: str, body: str, asset_prefix: str) -> str:
     """Return a full standalone HTML document."""
+    asset_version = datetime.now().strftime("%Y%m%d%H%M%S")
     return "\n".join(
         (
             "<!DOCTYPE html>",
@@ -502,11 +545,11 @@ def _page_document(*, title: str, body: str, asset_prefix: str) -> str:
             '  <meta charset="utf-8">',
             '  <meta name="viewport" content="width=device-width, initial-scale=1">',
             f"  <title>{escape(title)}</title>",
-            f'  <link rel="stylesheet" href="{escape(f"{asset_prefix}css/style.css")}">',
+            f'  <link rel="stylesheet" href="{escape(f"{asset_prefix}css/style.css?v={asset_version}")}">',
             "</head>",
             "<body>",
             body,
-            f'  <script src="{escape(f"{asset_prefix}js/report.js")}"></script>',
+            f'  <script src="{escape(f"{asset_prefix}js/report.js?v={asset_version}")}"></script>',
             "</body>",
             "</html>",
         )
@@ -583,19 +626,26 @@ def _search_toolbar() -> str:
     )
 
 
-def _simple_table_section(title: str, headers: tuple[str, ...], rows: tuple[str, ...]) -> str:
+def _simple_table_section(
+    title: str,
+    headers: tuple[str, ...],
+    rows: tuple[str, ...],
+    *,
+    scrollable: bool = False,
+) -> str:
     """Return one simple table section."""
     header_html = "".join(
         f'<th><button type="button" class="sort-button" data-column="{index}" onclick="sortReportTable(this)">{escape(label)}</button></th>'
         for index, label in enumerate(headers)
     )
     body_rows = rows or ('<tr class="empty-row"><td colspan="99">No differences found.</td></tr>',)
+    table_shell_class = "table-shell comparison-scroll-shell" if scrollable else "table-shell"
     return "\n".join(
         (
             '  <section class="section-card">',
             f"    <h2>{escape(title)}</h2>",
-            '    <div class="table-shell">',
-            '      <table class="data-table">',
+            f'    <div class="{table_shell_class}">',
+            '      <table class="data-table comparison-table">',
             f"        <thead><tr>{header_html}</tr></thead>",
             "        <tbody>",
             *body_rows,
@@ -658,22 +708,39 @@ def _media_missing_row(library_name: str, item) -> str:
     )
 
 
+def _library_list_rows(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+) -> tuple[str, ...]:
+    """Return rows listing libraries side-by-side for both servers."""
+    left_libraries = sorted(
+        (library_result.library.name for library_result in left_result.library_results),
+        key=str.casefold,
+    )
+    right_libraries = sorted(
+        (library_result.library.name for library_result in right_result.library_results),
+        key=str.casefold,
+    )
+    rows = tuple(
+        f"<tr><td>{escape(left_name or '')}</td><td>{escape(right_name or '')}</td></tr>"
+        for left_name, right_name in zip_longest(left_libraries, right_libraries, fillvalue="")
+    )
+    return rows or ('<tr class="empty-row"><td colspan="99">No libraries found.</td></tr>',)
+
+
 def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult, pair: MatchedPair) -> str:
     """Return one artwork difference row."""
     search_text = f"{pair.library} {pair.left.display_name}".lower()
     left_poster = _yes_no(local_poster_exists(pair.left))
     right_poster = _yes_no(local_poster_exists(pair.right))
-    left_backdrop = _yes_no(local_backdrop_exists(pair.left))
-    right_backdrop = _yes_no(local_backdrop_exists(pair.right))
     left_primary = _yes_no(has_jellyfin_primary_image(pair.left))
     right_primary = _yes_no(has_jellyfin_primary_image(pair.right))
     left_logo = _yes_no(has_jellyfin_logo(pair.left))
     right_logo = _yes_no(has_jellyfin_logo(pair.right))
     return (
-        f'<tr data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
+        f'<tr class="comparison-diff-row" data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.display_name)}</td>'
         f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
-        f'{_diff_cell(left_backdrop, is_different=left_backdrop != right_backdrop)}{_diff_cell(right_backdrop, is_different=left_backdrop != right_backdrop)}'
         f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'
         f'{_diff_cell(left_logo, is_different=left_logo != right_logo)}{_diff_cell(right_logo, is_different=left_logo != right_logo)}</tr>'
     )
@@ -708,3 +775,12 @@ def _diff_cell(value: object, *, is_different: bool) -> str:
     """Return one table cell, highlighting it when the compared values differ."""
     class_attribute = ' class="comparison-diff"' if is_different else ""
     return f"<td{class_attribute}>{escape(str(value))}</td>"
+
+
+def _normalized_comparison_text(value: str | None) -> str:
+    """Return a normalized comparison key for media titles and series names."""
+    normalized_value = (value or "").strip().casefold()
+    normalized_value = re.sub(r"\s*\(\d{4}\)\s*$", "", normalized_value)
+    normalized_value = re.sub(r"""[\.,:;!\?'\"·-]""", "", normalized_value)
+    normalized_value = re.sub(r"\s+", " ", normalized_value)
+    return normalized_value.strip()

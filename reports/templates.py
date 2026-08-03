@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import re
 from dataclasses import dataclass
 from html import escape
@@ -315,6 +316,7 @@ def page_document(
     asset_prefix: str | None = None,
 ) -> str:
     resolved_asset_prefix = relative_prefix if asset_prefix is None else asset_prefix
+    asset_version = datetime.now().strftime("%Y%m%d%H%M%S")
     return "\n".join(
         (
             "<!DOCTYPE html>",
@@ -323,11 +325,11 @@ def page_document(
             '  <meta charset="utf-8">',
             '  <meta name="viewport" content="width=device-width, initial-scale=1">',
             f"  <title>{escape(title)}</title>",
-            f'  <link rel="stylesheet" href="{escape(f"{resolved_asset_prefix}css/style.css")}">',
+            f'  <link rel="stylesheet" href="{escape(f"{resolved_asset_prefix}css/style.css?v={asset_version}")}">',
             "</head>",
             "<body>",
             body,
-            f'  <script src="{escape(f"{resolved_asset_prefix}js/report.js")}"></script>',
+            f'  <script src="{escape(f"{resolved_asset_prefix}js/report.js?v={asset_version}")}"></script>',
             "</body>",
             "</html>",
         )

@@ -10,11 +10,9 @@ from urllib.parse import urlsplit
 
 from config import get_config
 from media import get_display_path
-from media import has_jellyfin_backdrop
 from media import has_jellyfin_logo
 from media import has_jellyfin_primary_image
 from media import has_jellyfin_thumb
-from media import local_backdrop_exists
 from media import local_poster_exists
 from output_layout import audit_results_root
 from output_layout import comparison_output_dir
@@ -24,6 +22,7 @@ from output_layout import shared_css_path
 from output_layout import shared_js_path
 from output_layout import write_server_report_metadata
 from output_layout import write_audit_results_index
+from report_filters import filter_report_output
 from . import templates
 from .checks import render_check_page
 from .css import write_css
@@ -40,19 +39,18 @@ CSV_HEADER = (
     "Title",
     "Path",
     "Local Poster",
-    "Local Backdrop",
     "Jellyfin Primary",
-    "Jellyfin Backdrop",
     "Jellyfin Logo",
     "Jellyfin Thumb",
     "Artwork Source",
     "Message",
 )
-NON_ACTIONABLE_CHECKS = frozenset({"hdr_video", "missing_nfo"})
+NON_ACTIONABLE_CHECKS = frozenset({"hdr_video", "missing_nfo", "missing_backdrop"})
 
 
 def write_csv_report(result: AuditServerResult) -> Path:
     """Write a CSV report containing one row per finding."""
+    result = filter_report_output(result)
     config = get_config()
     output_root = audit_results_root(config.reporting.output.audit_html)
     output_path = server_csv_path(
@@ -75,6 +73,7 @@ def write_html_report(result: AuditServerResult) -> Path:
 
 def write_reports(result: AuditServerResult) -> Path:
     """Generate the full static site and return the dashboard path."""
+    result = filter_report_output(result)
     config = get_config()
     output_root = audit_results_root(config.reporting.output.audit_html)
     site_paths = _site_paths(
@@ -219,9 +218,9 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     for finding in templates.sort_findings(result.findings):
         item = finding.media_item
         local_poster = local_poster_exists(item)
-        local_backdrop = local_backdrop_exists(item)
         jellyfin_primary = has_jellyfin_primary_image(item)
-        jellyfin_backdrop = has_jellyfin_backdrop(item)
+        jellyfin_logo = has_jellyfin_logo(item)
+        jellyfin_thumb = has_jellyfin_thumb(item)
         rows.append(
             (
                 finding.category.value.title(),
@@ -230,14 +229,12 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 item.display_name,
                 get_display_path(item),
                 _yes_no(local_poster),
-                _yes_no(local_backdrop),
                 _yes_no(jellyfin_primary),
-                _yes_no(jellyfin_backdrop),
-                _yes_no(has_jellyfin_logo(item)),
-                _yes_no(has_jellyfin_thumb(item)),
+                _yes_no(jellyfin_logo),
+                _yes_no(jellyfin_thumb),
                 _artwork_source(
-                    has_local_artwork=local_poster or local_backdrop,
-                    has_jellyfin_artwork=jellyfin_primary or jellyfin_backdrop,
+                    has_local_artwork=local_poster,
+                    has_jellyfin_artwork=jellyfin_primary or jellyfin_logo or jellyfin_thumb,
                 ),
                 finding.message,
             )
