@@ -6,7 +6,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
-from itertools import zip_longest
 from pathlib import Path
 import re
 import shutil
@@ -154,14 +153,14 @@ def _build_comparison(
 
         left_items = _library_items(left_result, library_name)
         right_items = _library_items(right_result, library_name)
-        library_pairs, library_missing_left, library_missing_right = _pair_library_items(
+        library_pairs, library_only_left, library_only_right = _pair_library_items(
             library_name,
             left_items,
             right_items,
         )
         matched_pairs.extend(library_pairs)
-        missing_left_media.extend(library_missing_left)
-        missing_right_media.extend(library_missing_right)
+        missing_left_media.extend(library_only_right)
+        missing_right_media.extend(library_only_left)
 
     for pair in matched_pairs:
         if _artwork_differs(pair.left, pair.right):
@@ -200,8 +199,8 @@ def _pair_library_items(
     left_groups = _group_items_by_identity(left_items)
     right_groups = _group_items_by_identity(right_items)
     matched_pairs: list[MatchedPair] = []
-    missing_left_media: list[tuple[str, object]] = []
-    missing_right_media: list[tuple[str, object]] = []
+    unmatched_left_media: list[MediaItem] = []
+    unmatched_right_media: list[MediaItem] = []
 
     for identity in sorted(set(left_groups) | set(right_groups), key=str):
         left_group = left_groups.get(identity, [])
@@ -211,10 +210,22 @@ def _pair_library_items(
             MatchedPair(left=left_item, right=right_item, library=library_name)
             for left_item, right_item in matched
         )
-        missing_left_media.extend((library_name, item) for item in missing_left)
-        missing_right_media.extend((library_name, item) for item in missing_right)
+        unmatched_left_media.extend(missing_left)
+        unmatched_right_media.extend(missing_right)
 
-    return matched_pairs, missing_left_media, missing_right_media
+    fallback_matches, unmatched_left_media, unmatched_right_media = (
+        _pair_by_loose_identity(unmatched_left_media, unmatched_right_media)
+    )
+    matched_pairs.extend(
+        MatchedPair(left=left_item, right=right_item, library=library_name)
+        for left_item, right_item in fallback_matches
+    )
+
+    return (
+        matched_pairs,
+        [(library_name, item) for item in unmatched_left_media],
+        [(library_name, item) for item in unmatched_right_media],
+    )
 
 
 def _group_items_by_identity(items: tuple) -> dict[tuple, list]:
@@ -222,6 +233,14 @@ def _group_items_by_identity(items: tuple) -> dict[tuple, list]:
     grouped: dict[tuple, list] = {}
     for item in items:
         grouped.setdefault(_comparison_identity(item), []).append(item)
+    return grouped
+
+
+def _group_items_by_loose_identity(items: list[MediaItem]) -> dict[tuple, list[MediaItem]]:
+    """Group items by a looser user-visible identity for fallback pairing."""
+    grouped: dict[tuple, list[MediaItem]] = {}
+    for item in items:
+        grouped.setdefault(_loose_comparison_identity(item), []).append(item)
     return grouped
 
 
@@ -279,6 +298,22 @@ def _comparison_identity(item) -> tuple:
     )
 
 
+def _loose_comparison_identity(item: MediaItem) -> tuple:
+    """Return a user-visible fallback identity for matching near-equal media."""
+    if item.is_episode:
+        return (
+            "episode-fallback",
+            _normalized_comparison_text(item.series_name),
+            _normalized_comparison_text(item.season_name),
+            item.episode_number,
+            _normalized_comparison_text(item.title),
+        )
+    return (
+        "movie-fallback",
+        _normalized_comparison_text(item.title),
+    )
+
+
 def _pair_by_version_signature(
     left_items: list[MediaItem],
     right_items: list[MediaItem],
@@ -299,6 +334,29 @@ def _pair_by_version_signature(
             matched.append((left_group[index], right_group[index]))
         remaining_left.extend(left_group[pair_count:])
         remaining_right.extend(right_group[pair_count:])
+
+    return matched, remaining_left, remaining_right
+
+
+def _pair_by_loose_identity(
+    left_items: list[MediaItem],
+    right_items: list[MediaItem],
+) -> tuple[list[tuple[MediaItem, MediaItem]], list[MediaItem], list[MediaItem]]:
+    """Pair remaining items using a looser identity based on visible metadata."""
+    left_groups = _group_items_by_loose_identity(left_items)
+    right_groups = _group_items_by_loose_identity(right_items)
+
+    matched: list[tuple[MediaItem, MediaItem]] = []
+    remaining_left: list[MediaItem] = []
+    remaining_right: list[MediaItem] = []
+
+    for identity in sorted(set(left_groups) | set(right_groups), key=str):
+        left_group = left_groups.get(identity, [])
+        right_group = right_groups.get(identity, [])
+        loose_matched, group_left, group_right = _pair_item_group(left_group, right_group)
+        matched.extend(loose_matched)
+        remaining_left.extend(group_left)
+        remaining_right.extend(group_right)
 
     return matched, remaining_left, remaining_right
 
@@ -489,6 +547,20 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
     """Return libraries comparison page body."""
     left_server_name = left_result.server_name or left_result.server_key or "Left"
     right_server_name = right_result.server_name or right_result.server_key or "Right"
+    missing_left_rows = tuple(
+        _media_missing_row(library_name, item)
+        for library_name, item in sorted(
+            comparison["missing_left_media"],
+            key=lambda entry: _missing_media_sort_key(entry[0], entry[1]),
+        )
+    )
+    missing_right_rows = tuple(
+        _media_missing_row(library_name, item)
+        for library_name, item in sorted(
+            comparison["missing_right_media"],
+            key=lambda entry: _missing_media_sort_key(entry[0], entry[1]),
+        )
+    )
     return _page_shell(
         "Libraries Comparison",
         "Library lists and missing media items between both servers.",
@@ -502,20 +574,16 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
                 _simple_table_section(
                     f"Media Missing From {escape(left_server_name)}",
                     ("Library", "Title", "Series", "Season", "Episode"),
-                    tuple(
-                        _media_missing_row(library_name, item)
-                        for library_name, item in comparison["missing_left_media"]
-                    ),
+                    missing_left_rows,
                     scrollable=True,
+                    include_hide_same=False,
                 ),
                 _simple_table_section(
                     f"Media Missing From {escape(right_server_name)}",
                     ("Library", "Title", "Series", "Season", "Episode"),
-                    tuple(
-                        _media_missing_row(library_name, item)
-                        for library_name, item in comparison["missing_right_media"]
-                    ),
+                    missing_right_rows,
                     scrollable=True,
+                    include_hide_same=False,
                 ),
             )
         ),
@@ -772,6 +840,7 @@ def _simple_table_section(
     rows: tuple[str, ...],
     *,
     scrollable: bool = False,
+    include_hide_same: bool = True,
 ) -> str:
     """Return one simple table section."""
     header_html = "".join(
@@ -782,15 +851,23 @@ def _simple_table_section(
         '<tr class="empty-row" data-static-row><td colspan="99">No differences found.</td></tr>',
     )
     table_shell_class = "table-shell comparison-scroll-shell" if scrollable else "table-shell"
+    hide_same_button = (
+        '      <button type="button" class="toolbar-button table-filter-button" onclick="toggleSameRows(this)" aria-pressed="false">Hide same</button>'
+        if include_hide_same
+        else ""
+    )
+    table_attributes = ' class="data-table comparison-table"'
+    if include_hide_same:
+        table_attributes += ' data-hide-same="false"'
     return "\n".join(
         (
             '  <section class="section-card">',
             '    <div class="table-section-header">',
             f"      <h2>{escape(title)}</h2>",
-            '      <button type="button" class="toolbar-button table-filter-button" onclick="toggleSameRows(this)" aria-pressed="false">Hide same</button>',
+            hide_same_button,
             "    </div>",
             f'    <div class="{table_shell_class}">',
-            '      <table class="data-table comparison-table" data-hide-same="false">',
+            f"      <table{table_attributes}>",
             f"        <thead><tr>{header_html}</tr></thead>",
             "        <tbody>",
             *body_rows,
@@ -849,7 +926,19 @@ def _media_missing_row(library_name: str, item) -> str:
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(library_name)}</td>'
         f'<td>{escape(item.title)}</td><td>{escape(item.series_name or "")}</td>'
-        f'<td>{escape(item.season_name or "")}</td><td>{"" if item.episode_number is None else item.episode_number}</td></tr>'
+        f'{_table_cell(_display_season(item), sort_value=_season_sort_value(item))}'
+        f'{_table_cell("" if item.episode_number is None else item.episode_number, sort_value=_episode_sort_value(item))}</tr>'
+    )
+
+
+def _missing_media_sort_key(library_name: str, item: MediaItem) -> tuple:
+    """Return a stable sort key for missing-media rows."""
+    return (
+        library_name.casefold(),
+        (item.series_name or "").casefold(),
+        (item.season_name or "").casefold(),
+        item.episode_number if item.episode_number is not None else -1,
+        item.title.casefold(),
     )
 
 
@@ -858,17 +947,22 @@ def _library_list_rows(
     right_result: AuditServerResult,
 ) -> tuple[str, ...]:
     """Return rows listing libraries side-by-side for both servers."""
-    left_libraries = sorted(
-        (library_result.library.name for library_result in left_result.library_results),
-        key=str.casefold,
-    )
-    right_libraries = sorted(
-        (library_result.library.name for library_result in right_result.library_results),
-        key=str.casefold,
-    )
+    left_libraries = {
+        library_result.library.name
+        for library_result in left_result.library_results
+    }
+    right_libraries = {
+        library_result.library.name
+        for library_result in right_result.library_results
+    }
+    all_libraries = sorted(left_libraries | right_libraries, key=str.casefold)
     rows = tuple(
-        f'<tr{" data-diff-row" if left_name != right_name else ""}><td>{escape(left_name or "")}</td><td>{escape(right_name or "")}</td></tr>'
-        for left_name, right_name in zip_longest(left_libraries, right_libraries, fillvalue="")
+        (
+            f'<tr{" data-diff-row" if library_name not in left_libraries or library_name not in right_libraries else ""}>'
+            f'<td>{escape(library_name if library_name in left_libraries else "")}</td>'
+            f'<td>{escape(library_name if library_name in right_libraries else "")}</td></tr>'
+        )
+        for library_name in all_libraries
     )
     return rows or ('<tr class="empty-row" data-static-row><td colspan="99">No libraries found.</td></tr>',)
 
@@ -899,7 +993,8 @@ def _subtitle_row(left_result: AuditServerResult, right_result: AuditServerResul
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.title)}</td><td>{escape(pair.left.series_name or "")}</td>'
-        f'<td>{escape(pair.left.season_name or "")}</td><td>{"" if pair.left.episode_number is None else pair.left.episode_number}</td>'
+        f'{_table_cell(_display_season(pair.left), sort_value=_season_sort_value(pair.left))}'
+        f'{_table_cell("" if pair.left.episode_number is None else pair.left.episode_number, sort_value=_episode_sort_value(pair.left))}'
         f'{_diff_cell(left_subtitles, is_different=left_subtitles != right_subtitles)}{_diff_cell(right_subtitles, is_different=left_subtitles != right_subtitles)}</tr>'
     )
 
@@ -916,6 +1011,41 @@ def _display_locations(library: MediaLibrary | None) -> str:
     if library is None:
         return ""
     return ", ".join(str(location) for location in library.locations)
+
+
+def _display_season(item: MediaItem) -> str:
+    """Return a compact season label without the word 'Season'."""
+    if item.season_number is not None:
+        return str(item.season_number)
+    if item.season_name is None:
+        return ""
+    normalized = re.sub(r"^\s*season\s+", "", item.season_name, flags=re.IGNORECASE)
+    return normalized.strip()
+
+
+def _season_sort_value(item: MediaItem) -> str:
+    """Return a numeric-first season sort value."""
+    if item.season_number is not None:
+        return str(item.season_number)
+    season_text = _display_season(item)
+    if season_text.isdigit():
+        return season_text
+    return season_text.casefold()
+
+
+def _episode_sort_value(item: MediaItem) -> str:
+    """Return the episode number as a sortable value."""
+    if item.episode_number is None:
+        return ""
+    return str(item.episode_number)
+
+
+def _table_cell(value: object, *, sort_value: str | None = None) -> str:
+    """Return one table cell with an optional explicit sort value."""
+    sort_attribute = (
+        f' data-sort-value="{escape(sort_value)}"' if sort_value is not None else ""
+    )
+    return f"<td{sort_attribute}>{escape(str(value))}</td>"
 
 
 def _yes_no(value: bool) -> str:
