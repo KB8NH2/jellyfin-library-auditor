@@ -977,7 +977,7 @@ def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult
     left_logo = _yes_no(has_jellyfin_logo(pair.left))
     right_logo = _yes_no(has_jellyfin_logo(pair.right))
     return (
-        f'<tr class="comparison-diff-row" data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
+        f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.display_name)}</td>'
         f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
         f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'

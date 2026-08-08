@@ -7,6 +7,8 @@ findings. It operates only on application models and helper functions from
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
@@ -43,6 +45,22 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
         if finding is not None:
             findings.append(finding)
 
+    return tuple(findings)
+
+
+def audit_library_items(items: Iterable[MediaItem]) -> tuple[AuditFinding, ...]:
+    """Run library-level audits that require multiple media items.
+
+    Args:
+        items: Media items from one audited library.
+
+    Returns:
+        A tuple containing findings derived from gaps across TV episodes.
+    """
+    items_tuple = tuple(items)
+    findings: list[AuditFinding] = []
+    findings.extend(missing_tv_series_seasons(items_tuple))
+    findings.extend(missing_tv_season_episodes(items_tuple))
     return tuple(findings)
 
 
@@ -174,6 +192,138 @@ def unknown_audio_codec(item: MediaItem) -> AuditFinding | None:
     )
 
 
+def missing_tv_series_seasons(items: Iterable[MediaItem]) -> tuple[AuditFinding, ...]:
+    """Return findings for series with missing numbered seasons.
+
+    Args:
+        items: Media items from one audited library.
+
+    Returns:
+        One finding per TV series with internal season-number gaps.
+    """
+    series_items: dict[str, list[MediaItem]] = {}
+    for item in items:
+        if not item.is_episode or not item.series_name:
+            continue
+        if item.season_number is None or item.season_number <= 0:
+            continue
+        series_items.setdefault(item.series_name, []).append(item)
+
+    findings: list[AuditFinding] = []
+    for _, grouped_items in sorted(series_items.items(), key=lambda entry: entry[0].casefold()):
+        season_numbers = sorted({item.season_number for item in grouped_items if item.season_number is not None})
+        missing_numbers = _missing_sequence_numbers(season_numbers)
+        if not missing_numbers:
+            continue
+        representative = min(grouped_items, key=_episode_sort_key)
+        findings.append(
+            _finding(
+                representative,
+                category=AuditCategory.METADATA,
+                severity=AuditSeverity.WARNING,
+                check_name="missing_seasons",
+                message=f"Missing seasons: {_format_missing_numbers(missing_numbers)}.",
+            )
+        )
+    return tuple(findings)
+
+
+def missing_tv_season_episodes(items: Iterable[MediaItem]) -> tuple[AuditFinding, ...]:
+    """Return findings for seasons with missing numbered episodes.
+
+    Args:
+        items: Media items from one audited library.
+
+    Returns:
+        One finding per TV season with internal episode-number gaps.
+    """
+    season_items: dict[tuple[str, int], list[MediaItem]] = {}
+    for item in items:
+        if not item.is_episode or not item.series_name:
+            continue
+        if item.season_number is None or item.season_number <= 0:
+            continue
+        if item.episode_number is None or item.episode_number <= 0:
+            continue
+        season_items.setdefault((item.series_name, item.season_number), []).append(item)
+
+    findings: list[AuditFinding] = []
+    for _, grouped_items in sorted(
+        season_items.items(),
+        key=lambda entry: (entry[0][0].casefold(), entry[0][1]),
+    ):
+        episode_numbers = sorted(
+            {item.episode_number for item in grouped_items if item.episode_number is not None}
+        )
+        missing_numbers = _missing_sequence_numbers(episode_numbers)
+        if not missing_numbers:
+            continue
+        representative = min(grouped_items, key=_episode_sort_key)
+        findings.append(
+            _finding(
+                representative,
+                category=AuditCategory.METADATA,
+                severity=AuditSeverity.WARNING,
+                check_name="missing_episodes",
+                message=f"Missing episodes: {_format_missing_numbers(missing_numbers)}.",
+            )
+        )
+    return tuple(findings)
+
+
+def _missing_sequence_numbers(numbers: Iterable[int]) -> tuple[int, ...]:
+    """Return missing integers between the smallest and largest values."""
+    sorted_numbers = sorted(set(numbers))
+    if len(sorted_numbers) < 2:
+        return ()
+
+    missing_numbers: list[int] = []
+    for previous, current in zip(sorted_numbers, sorted_numbers[1:]):
+        if current - previous <= 1:
+            continue
+        missing_numbers.extend(range(previous + 1, current))
+    return tuple(missing_numbers)
+
+
+def _format_missing_numbers(numbers: Iterable[int]) -> str:
+    """Return a compact string for missing number sequences."""
+    sorted_numbers = sorted(set(numbers))
+    if not sorted_numbers:
+        return ""
+
+    ranges: list[str] = []
+    range_start = sorted_numbers[0]
+    range_end = sorted_numbers[0]
+
+    for number in sorted_numbers[1:]:
+        if number == range_end + 1:
+            range_end = number
+            continue
+        ranges.append(_format_number_range(range_start, range_end))
+        range_start = number
+        range_end = number
+
+    ranges.append(_format_number_range(range_start, range_end))
+    return ", ".join(ranges)
+
+
+def _format_number_range(start: int, end: int) -> str:
+    """Return one display range for missing season or episode numbers."""
+    if start == end:
+        return str(start)
+    return f"{start}-{end}"
+
+
+def _episode_sort_key(item: MediaItem) -> tuple[str, int, int, str]:
+    """Return a stable sort key for episode representative selection."""
+    return (
+        (item.series_name or "").casefold(),
+        item.season_number if item.season_number is not None else -1,
+        item.episode_number if item.episode_number is not None else -1,
+        item.title.casefold(),
+    )
+
+
 def _finding(
     item: MediaItem,
     *,
@@ -207,9 +357,12 @@ __all__ = [
     "AuditCategory",
     "AuditFinding",
     "AuditSeverity",
+    "audit_library_items",
     "audit_media_item",
     "missing_backdrop",
     "missing_english_subtitles",
+    "missing_tv_season_episodes",
+    "missing_tv_series_seasons",
     "missing_primary_image",
     "missing_poster",
     "unknown_audio_codec",

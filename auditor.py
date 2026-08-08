@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from audit import audit_library_items
 from audit import audit_media_item
 from audit_types import AuditCategory
 from audit_types import AuditFinding
@@ -333,6 +334,7 @@ def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> Libr
         items_with_local_poster += int(local_poster_exists(item))
         items_with_local_backdrop += int(local_backdrop_exists(item))
         findings.extend(audit_media_item(item))
+    findings.extend(audit_library_items(items))
 
     return LibraryAuditResult(
         library=library,

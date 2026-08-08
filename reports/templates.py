@@ -25,6 +25,8 @@ CHECK_DISPLAY_LABELS = {
     "missing_backdrop": "Missing Backdrop",
     "missing_primary_image": "Missing Primary Image",
     "missing_nfo": "Missing NFO",
+    "missing_seasons": "Missing Seasons",
+    "missing_episodes": "Missing Episodes",
     "unknown_video_codec": "Unknown Video Codec",
     "unknown_audio_codec": "Unknown Audio Codec",
     "hdr_video": "HDR Video",
@@ -35,6 +37,8 @@ CHECK_SUMMARY_LABELS = {
     "missing_backdrop": "Backdrop",
     "missing_primary_image": "Primary Image",
     "missing_nfo": "NFO",
+    "missing_seasons": "Seasons",
+    "missing_episodes": "Episodes",
     "unknown_video_codec": "Video Codec",
     "unknown_audio_codec": "Audio Codec",
 }
@@ -320,6 +324,41 @@ def episode_sort_value(item: MediaItem) -> str:
     if item.episode_number is None:
         return ""
     return str(item.episode_number)
+
+
+def check_row_sort_key(item: MediaItem) -> tuple[str, str, str, str, str]:
+    """Return the default ordering key for multi-library check tables."""
+    library_key = item.library.casefold()
+    if item.is_episode:
+        primary_key = (item.series_name or item.title).casefold()
+        season_key = _sortable_text_token(season_sort_value(item))
+        episode_key = _sortable_text_token(episode_sort_value(item))
+    else:
+        primary_key = item.title.casefold()
+        season_key = ""
+        episode_key = ""
+    title_key = item.title.casefold()
+    return (
+        library_key,
+        primary_key,
+        season_key,
+        episode_key,
+        title_key,
+    )
+
+
+def check_row_library_sort_value(item: MediaItem) -> str:
+    """Return a library-column sort value with full row tie-breakers."""
+    return "|".join(check_row_sort_key(item))
+
+
+def _sortable_text_token(value: str) -> str:
+    """Return a lexically sortable token for numeric and text values."""
+    if not value:
+        return ""
+    if value.isdigit():
+        return f"0:{int(value):08d}"
+    return f"1:{value.casefold()}"
 
 
 def render_about_section(page_title: str) -> str:
