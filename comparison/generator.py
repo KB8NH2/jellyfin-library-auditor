@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 
+from audit_types import AuditFinding
 from config import get_config
 from media import get_primary_audio_codec
 from media import get_video_codec
@@ -32,6 +33,8 @@ from results import LibraryComparisonSettings
 
 
 DEFAULT_COMPARISON_OUTPUT_DIR = Path("audit_results") / "comparison_results"
+MISSING_SEASONS_CHECK_NAME = "missing_seasons"
+MISSING_EPISODES_CHECK_NAME = "missing_episodes"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +132,22 @@ def _build_comparison(
     artwork_differences: list[MatchedPair] = []
     subtitle_differences: list[MatchedPair] = []
     metadata_differences: list[tuple[str, str, str, str, str]] = []
+    left_missing_seasons = _sequence_gap_findings(
+        left_result,
+        check_name=MISSING_SEASONS_CHECK_NAME,
+    )
+    right_missing_seasons = _sequence_gap_findings(
+        right_result,
+        check_name=MISSING_SEASONS_CHECK_NAME,
+    )
+    left_missing_episodes = _sequence_gap_findings(
+        left_result,
+        check_name=MISSING_EPISODES_CHECK_NAME,
+    )
+    right_missing_episodes = _sequence_gap_findings(
+        right_result,
+        check_name=MISSING_EPISODES_CHECK_NAME,
+    )
     server_settings: list[tuple[str, str, str]] = _server_settings_rows(
         left_result,
         right_result,
@@ -177,6 +196,10 @@ def _build_comparison(
         "artwork_differences": tuple(artwork_differences),
         "subtitle_differences": tuple(subtitle_differences),
         "metadata_differences": tuple(metadata_differences),
+        "left_missing_seasons": left_missing_seasons,
+        "right_missing_seasons": right_missing_seasons,
+        "left_missing_episodes": left_missing_episodes,
+        "right_missing_episodes": right_missing_episodes,
         "server_settings": tuple(server_settings),
         "library_settings": tuple(library_settings),
     }
@@ -507,6 +530,27 @@ def _library_settings_rows(
     )
 
 
+def _sequence_gap_findings(
+    result: AuditServerResult,
+    *,
+    check_name: str,
+) -> tuple[tuple[str, AuditFinding], ...]:
+    """Return sorted sequence-gap findings for one server result."""
+    rows: list[tuple[str, AuditFinding]] = []
+    for library_result in result.library_results:
+        for finding in library_result.findings:
+            if finding.check_name != check_name:
+                continue
+            rows.append((library_result.library.name, finding))
+
+    return tuple(
+        sorted(
+            rows,
+            key=lambda entry: _sequence_gap_sort_key(entry[0], entry[1]),
+        )
+    )
+
+
 def _index_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
     """Return comparison overview page body."""
     cards = "\n".join(
@@ -515,6 +559,8 @@ def _index_page(left_result: AuditServerResult, right_result: AuditServerResult,
             _summary_card("Right Server", right_result.server_name or right_result.server_key or "Right"),
             _summary_card("Missing Libraries", str(len(comparison["missing_left_libraries"]) + len(comparison["missing_right_libraries"]))),
             _summary_card("Missing Media", str(len(comparison["missing_left_media"]) + len(comparison["missing_right_media"]))),
+            _summary_card("Missing Seasons", str(len(comparison["left_missing_seasons"]) + len(comparison["right_missing_seasons"]))),
+            _summary_card("Missing Episodes", str(len(comparison["left_missing_episodes"]) + len(comparison["right_missing_episodes"]))),
             _summary_card("Artwork Differences", str(len(comparison["artwork_differences"]))),
             _summary_card("Subtitle Differences", str(len(comparison["subtitle_differences"]))),
         )
@@ -561,9 +607,17 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
             key=lambda entry: _missing_media_sort_key(entry[0], entry[1]),
         )
     )
+    missing_seasons_rows = _paired_missing_seasons_rows(
+        comparison["left_missing_seasons"],
+        comparison["right_missing_seasons"],
+    )
+    missing_episodes_rows = _paired_missing_episodes_rows(
+        comparison["left_missing_episodes"],
+        comparison["right_missing_episodes"],
+    )
     return _page_shell(
         "Libraries Comparison",
-        "Library lists and missing media items between both servers.",
+        "Library lists, missing media items, and missing TV seasons or episodes between both servers.",
         "\n".join(
             (
                 _simple_table_section(
@@ -584,6 +638,20 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
                     missing_right_rows,
                     scrollable=True,
                     include_hide_same=False,
+                ),
+                _simple_table_section(
+                    "Missing Seasons",
+                    ("Library", "Series", left_server_name, right_server_name),
+                    missing_seasons_rows,
+                    scrollable=True,
+                    include_hide_same=True,
+                ),
+                _simple_table_section(
+                    "Missing Episodes",
+                    ("Library", "Series", "Season", left_server_name, right_server_name),
+                    missing_episodes_rows,
+                    scrollable=True,
+                    include_hide_same=True,
                 ),
             )
         ),
@@ -931,6 +999,135 @@ def _media_missing_row(library_name: str, item) -> str:
     )
 
 
+def _paired_missing_seasons_rows(
+    left_findings: tuple[tuple[str, AuditFinding], ...],
+    right_findings: tuple[tuple[str, AuditFinding], ...],
+) -> tuple[str, ...]:
+    """Return side-by-side missing-seasons rows for both servers."""
+    paired_findings = _pair_sequence_gap_findings(
+        left_findings,
+        right_findings,
+        key_builder=_missing_seasons_key,
+    )
+    return tuple(
+        _paired_missing_seasons_row(library_name, left_finding, right_finding)
+        for _, library_name, left_finding, right_finding in paired_findings
+    )
+
+
+def _paired_missing_episodes_rows(
+    left_findings: tuple[tuple[str, AuditFinding], ...],
+    right_findings: tuple[tuple[str, AuditFinding], ...],
+) -> tuple[str, ...]:
+    """Return side-by-side missing-episodes rows for both servers."""
+    paired_findings = _pair_sequence_gap_findings(
+        left_findings,
+        right_findings,
+        key_builder=_missing_episodes_key,
+    )
+    return tuple(
+        _paired_missing_episodes_row(library_name, left_finding, right_finding)
+        for _, library_name, left_finding, right_finding in paired_findings
+    )
+
+
+def _pair_sequence_gap_findings(
+    left_findings: tuple[tuple[str, AuditFinding], ...],
+    right_findings: tuple[tuple[str, AuditFinding], ...],
+    *,
+    key_builder,
+) -> tuple[tuple[tuple, str, AuditFinding | None, AuditFinding | None], ...]:
+    """Return aligned sequence-gap findings for side-by-side comparison rows."""
+    left_by_key = {
+        key_builder(library_name, finding): (library_name, finding)
+        for library_name, finding in left_findings
+    }
+    right_by_key = {
+        key_builder(library_name, finding): (library_name, finding)
+        for library_name, finding in right_findings
+    }
+    paired_rows: list[tuple[tuple, str, AuditFinding | None, AuditFinding | None]] = []
+    for key in sorted(set(left_by_key) | set(right_by_key), key=str):
+        left_entry = left_by_key.get(key)
+        right_entry = right_by_key.get(key)
+        library_name = left_entry[0] if left_entry is not None else right_entry[0]
+        paired_rows.append(
+            (
+                key,
+                library_name,
+                None if left_entry is None else left_entry[1],
+                None if right_entry is None else right_entry[1],
+            )
+        )
+    return tuple(paired_rows)
+
+
+def _paired_missing_seasons_row(
+    library_name: str,
+    left_finding: AuditFinding | None,
+    right_finding: AuditFinding | None,
+) -> str:
+    """Return one aligned missing-seasons comparison row."""
+    item = _sequence_gap_item(left_finding, right_finding)
+    series_name = "" if item is None else (item.series_name or item.title)
+    left_message = "" if left_finding is None else left_finding.message
+    right_message = "" if right_finding is None else right_finding.message
+    is_different = left_message != right_message
+    search_text = " ".join(
+        part
+        for part in (library_name, series_name, left_message, right_message)
+        if part
+    ).lower()
+    return (
+        f'<tr{" data-diff-row" if is_different else ""} data-search-row data-search="{escape(search_text)}">'
+        f"<td>{escape(library_name)}</td>"
+        f"<td>{escape(series_name)}</td>"
+        f"{_diff_cell(left_message, is_different=is_different)}"
+        f"{_diff_cell(right_message, is_different=is_different)}"
+        "</tr>"
+    )
+
+
+def _paired_missing_episodes_row(
+    library_name: str,
+    left_finding: AuditFinding | None,
+    right_finding: AuditFinding | None,
+) -> str:
+    """Return one aligned missing-episodes comparison row."""
+    item = _sequence_gap_item(left_finding, right_finding)
+    series_name = "" if item is None else (item.series_name or item.title)
+    left_message = "" if left_finding is None else left_finding.message
+    right_message = "" if right_finding is None else right_finding.message
+    is_different = left_message != right_message
+    season_text = "" if item is None else _display_season(item)
+    search_text = " ".join(
+        part
+        for part in (library_name, series_name, season_text, left_message, right_message)
+        if part
+    ).lower()
+    return (
+        f'<tr{" data-diff-row" if is_different else ""} data-search-row data-search="{escape(search_text)}">'
+        f"<td>{escape(library_name)}</td>"
+        f"<td>{escape(series_name)}</td>"
+        f'{_table_cell(season_text, sort_value="" if item is None else _season_sort_value(item))}'
+        f"{_diff_cell(left_message, is_different=is_different)}"
+        f"{_diff_cell(right_message, is_different=is_different)}"
+        "</tr>"
+    )
+
+
+def _sequence_gap_item(
+    left_finding: AuditFinding | None,
+    right_finding: AuditFinding | None,
+) -> MediaItem | None:
+    """Return a representative media item from either finding."""
+    if left_finding is not None:
+        return left_finding.media_item
+    if right_finding is not None:
+        return right_finding.media_item
+    return None
+
+
 def _missing_media_sort_key(library_name: str, item: MediaItem) -> tuple:
     """Return a stable sort key for missing-media rows."""
     return (
@@ -939,6 +1136,49 @@ def _missing_media_sort_key(library_name: str, item: MediaItem) -> tuple:
         (item.season_name or "").casefold(),
         item.episode_number if item.episode_number is not None else -1,
         item.title.casefold(),
+    )
+
+
+def _sequence_gap_sort_key(
+    library_name: str,
+    finding: AuditFinding,
+) -> tuple[str, str, int, int, str, str]:
+    """Return a stable sort key for missing season or episode rows."""
+    item = finding.media_item
+    return (
+        library_name.casefold(),
+        (item.series_name or "").casefold(),
+        item.season_number if item.season_number is not None else -1,
+        item.episode_number if item.episode_number is not None else -1,
+        item.title.casefold(),
+        finding.message.casefold(),
+    )
+
+
+def _missing_seasons_key(library_name: str, finding: AuditFinding) -> tuple[str, str]:
+    """Return the alignment key for missing-seasons findings."""
+    item = finding.media_item
+    return (
+        library_name.casefold(),
+        _normalized_comparison_text(item.series_name or item.title),
+    )
+
+
+def _missing_episodes_key(
+    library_name: str,
+    finding: AuditFinding,
+) -> tuple[str, str, int | str]:
+    """Return the alignment key for missing-episodes findings."""
+    item = finding.media_item
+    season_value: int | str
+    if item.season_number is not None:
+        season_value = item.season_number
+    else:
+        season_value = _display_season(item).casefold()
+    return (
+        library_name.casefold(),
+        _normalized_comparison_text(item.series_name or item.title),
+        season_value,
     )
 
 
