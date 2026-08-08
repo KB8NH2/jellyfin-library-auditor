@@ -65,8 +65,8 @@ def _check_rows(findings: tuple, *, site_links: templates.SiteLinks) -> tuple[st
                     f'            <td><a href="{templates.library_page_href(item.library, site_links=site_links, relative_prefix="../")}">{templates.escape(item.library)}</a></td>',
                     f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}">{templates.escape(item.title)}</a></td>',
                     f"            <td>{templates.escape(item.series_name or '')}</td>",
-                    f"            <td>{templates.escape(item.season_name or '')}</td>",
-                    f"            <td>{'' if item.episode_number is None else item.episode_number}</td>",
+                    f'            <td data-sort-value="{templates.escape(templates.season_sort_value(item))}">{templates.escape(item.season_name or "")}</td>',
+                    f'            <td data-sort-value="{templates.escape(templates.episode_sort_value(item))}">{"" if item.episode_number is None else item.episode_number}</td>',
                     "          </tr>",
                 )
             )

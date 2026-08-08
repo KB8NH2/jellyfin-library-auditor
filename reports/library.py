@@ -66,15 +66,19 @@ def _media_rows(findings: tuple, *, site_links: templates.SiteLinks, relative_pr
         key=lambda entry: templates.media_item_from_findings(entry[1]).display_name.casefold(),
     ):
         item = templates.media_item_from_findings(media_findings)
+        local_poster = local_poster_exists(item)
+        jellyfin_logo = has_jellyfin_logo(item)
+        jellyfin_primary = has_jellyfin_primary_image(item)
+        english_subtitles = has_english_subtitles(item)
         rows.append(
             "\n".join(
                 (
                     f'          <tr id="{templates.media_anchor(item, site_links)}" data-search-row data-search="{templates.row_search_text(media_findings)}">',
                     f"            <td>{templates.escape(item.display_name)}</td>",
-                    f"            <td>{templates.render_status_label(local_poster_exists(item))}</td>",
-                    f"            <td>{templates.render_status_label(has_jellyfin_logo(item))}</td>",
-                    f"            <td>{templates.render_status_label(has_jellyfin_primary_image(item))}</td>",
-                    f"            <td>{templates.render_status_label(has_english_subtitles(item))}</td>",
+                    f'            <td data-sort-value="{templates.status_sort_value(local_poster)}">{templates.render_status_label(local_poster)}</td>',
+                    f'            <td data-sort-value="{templates.status_sort_value(jellyfin_logo)}">{templates.render_status_label(jellyfin_logo)}</td>',
+                    f'            <td data-sort-value="{templates.status_sort_value(jellyfin_primary)}">{templates.render_status_label(jellyfin_primary)}</td>',
+                    f'            <td data-sort-value="{templates.status_sort_value(english_subtitles)}">{templates.render_status_label(english_subtitles)}</td>',
                     f"            <td>{_findings_summary(media_findings, site_links=site_links, relative_prefix=relative_prefix)}</td>",
                     "          </tr>",
                 )

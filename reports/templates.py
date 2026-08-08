@@ -299,6 +299,29 @@ def render_status_label(present: bool) -> str:
     return '<span class="status-label status-present">✓ present</span>' if present else '<span class="status-label status-missing">✗ missing</span>'
 
 
+def status_sort_value(present: bool) -> str:
+    """Return a stable sort value for present/missing cells."""
+    return "1" if present else "0"
+
+
+def season_sort_value(item: MediaItem) -> str:
+    """Return a numeric-first season sort value."""
+    if item.season_number is not None:
+        return str(item.season_number)
+    if item.season_name is None:
+        return ""
+    normalized = re.sub(r"^\s*season\s+", "", item.season_name, flags=re.IGNORECASE)
+    season_text = normalized.strip()
+    return season_text if season_text.isdigit() else season_text.casefold()
+
+
+def episode_sort_value(item: MediaItem) -> str:
+    """Return the episode number as a sortable value."""
+    if item.episode_number is None:
+        return ""
+    return str(item.episode_number)
+
+
 def render_about_section(page_title: str) -> str:
     return "\n".join(
         (
