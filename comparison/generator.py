@@ -133,7 +133,7 @@ def _build_comparison(
     artwork_differences: list[MatchedPair] = []
     subtitle_differences: list[MatchedPair] = []
     metadata_differences: list[tuple[str, str, str, str, str]] = []
-    mismatched_metadata: list[tuple[str, str, str, str, str, str, str, str, str, str]] = []
+    mismatched_metadata: list[tuple[str, str, str, str, str, str, str, str, str, str, str]] = []
     left_missing_seasons = _sequence_gap_findings(
         left_result,
         check_name=MISSING_SEASONS_CHECK_NAME,
@@ -507,7 +507,7 @@ def _metadata_differences(pair: MatchedPair) -> tuple[tuple[str, str, str, str, 
 
 def _mismatched_metadata_row(
     pair: MatchedPair,
-) -> tuple[str, str, str, str, str, str, str, str, str, str] | None:
+) -> tuple[str, str, str, str, str, str, str, str, str, str, str] | None:
     """Return one mismatched-metadata row for a filename-matched pair, if it differs."""
     left_title = _metadata_title(pair.left)
     right_title = _metadata_title(pair.right)
@@ -537,6 +537,7 @@ def _mismatched_metadata_row(
         right_episode_number,
         left_episode_name,
         right_episode_name,
+        _media_relative_path_sort_key(pair.left.path),
     )
 
 
@@ -550,6 +551,17 @@ def _metadata_title(item: MediaItem) -> str:
 def _metadata_episode_name(item: MediaItem) -> str:
     """Return the episode-specific title used for the Mismatched Metadata report."""
     return item.title if item.is_episode else ""
+
+
+def _media_relative_path_sort_key(path: Path) -> str:
+    """Return a sortable path value using only the segment after the last "media" directory."""
+    segments = str(path).replace("\\", "/").split("/")
+    media_indexes = [
+        index for index, segment in enumerate(segments) if segment.casefold() == "media"
+    ]
+    if media_indexes:
+        segments = segments[media_indexes[-1] + 1 :]
+    return "/".join(segments).casefold()
 
 
 def _server_settings_rows(
@@ -734,7 +746,7 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
         _mismatched_metadata_row_html(entry)
         for entry in sorted(
             comparison["mismatched_metadata"],
-            key=lambda entry: (entry[0].casefold(), entry[1].casefold()),
+            key=lambda entry: (entry[0].casefold(), entry[10]),
         )
     )
     return _page_shell(
@@ -1140,7 +1152,7 @@ def _media_missing_row(library_name: str, item) -> str:
 
 
 def _mismatched_metadata_row_html(
-    entry: tuple[str, str, str, str, str, str, str, str, str, str],
+    entry: tuple[str, str, str, str, str, str, str, str, str, str, str],
 ) -> str:
     """Return one mismatched-metadata comparison row."""
     (
@@ -1154,6 +1166,7 @@ def _mismatched_metadata_row_html(
         right_episode_number,
         left_episode_name,
         right_episode_name,
+        path_sort_key,
     ) = entry
     search_text = " ".join(
         part
@@ -1170,7 +1183,7 @@ def _mismatched_metadata_row_html(
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}">'
         f"<td>{escape(library_name)}</td>"
-        f"<td>{escape(filename)}</td>"
+        f"{_table_cell(filename, sort_value=path_sort_key)}"
         f"{_diff_cell(left_title, is_different=left_title != right_title)}"
         f"{_diff_cell(right_title, is_different=left_title != right_title)}"
         f"{_diff_cell(left_season, is_different=left_season != right_season)}"
