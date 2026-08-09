@@ -44,6 +44,7 @@ class MatchedPair:
     left: MediaItem
     right: MediaItem
     library: str
+    matched_by_filename: bool = False
 
 
 def write_comparison_reports(
@@ -132,6 +133,7 @@ def _build_comparison(
     artwork_differences: list[MatchedPair] = []
     subtitle_differences: list[MatchedPair] = []
     metadata_differences: list[tuple[str, str, str, str, str]] = []
+    mismatched_metadata: list[tuple[str, str, str, str, str, str, str, str, str, str]] = []
     left_missing_seasons = _sequence_gap_findings(
         left_result,
         check_name=MISSING_SEASONS_CHECK_NAME,
@@ -187,6 +189,10 @@ def _build_comparison(
         if has_english_subtitles(pair.left) != has_english_subtitles(pair.right):
             subtitle_differences.append(pair)
         metadata_differences.extend(_metadata_differences(pair))
+        if pair.matched_by_filename:
+            mismatch_row = _mismatched_metadata_row(pair)
+            if mismatch_row is not None:
+                mismatched_metadata.append(mismatch_row)
 
     return {
         "missing_left_libraries": missing_left_libraries,
@@ -196,6 +202,7 @@ def _build_comparison(
         "artwork_differences": tuple(artwork_differences),
         "subtitle_differences": tuple(subtitle_differences),
         "metadata_differences": tuple(metadata_differences),
+        "mismatched_metadata": tuple(mismatched_metadata),
         "left_missing_seasons": left_missing_seasons,
         "right_missing_seasons": right_missing_seasons,
         "left_missing_episodes": left_missing_episodes,
@@ -218,12 +225,33 @@ def _pair_library_items(
     left_items: tuple,
     right_items: tuple,
 ) -> tuple[list[MatchedPair], list[tuple[str, object]], list[tuple[str, object]]]:
-    """Pair media items across two libraries."""
-    left_groups = _group_items_by_identity(left_items)
-    right_groups = _group_items_by_identity(right_items)
-    matched_pairs: list[MatchedPair] = []
+    """Pair media items across two libraries.
+
+    Items are matched primarily by their media file's base filename, since the
+    underlying file is shared or mirrored between servers even when each
+    server's metadata agent produces different titles, series names, or
+    episode numbers. Items whose filenames don't match (for example, files
+    renamed independently on each server) fall back to metadata-based
+    matching.
+    """
+    filename_matches, remaining_left, remaining_right = _pair_by_filename_identity(
+        list(left_items),
+        list(right_items),
+    )
+    matched_pairs: list[MatchedPair] = [
+        MatchedPair(
+            left=left_item,
+            right=right_item,
+            library=library_name,
+            matched_by_filename=True,
+        )
+        for left_item, right_item in filename_matches
+    ]
     unmatched_left_media: list[MediaItem] = []
     unmatched_right_media: list[MediaItem] = []
+
+    left_groups = _group_items_by_identity(remaining_left)
+    right_groups = _group_items_by_identity(remaining_right)
 
     for identity in sorted(set(left_groups) | set(right_groups), key=str):
         left_group = left_groups.get(identity, [])
@@ -257,6 +285,45 @@ def _group_items_by_identity(items: tuple) -> dict[tuple, list]:
     for item in items:
         grouped.setdefault(_comparison_identity(item), []).append(item)
     return grouped
+
+
+def _pair_by_filename_identity(
+    left_items: list[MediaItem],
+    right_items: list[MediaItem],
+) -> tuple[list[tuple[MediaItem, MediaItem]], list[MediaItem], list[MediaItem]]:
+    """Pair items whose media files share the same base filename."""
+    left_groups = _group_items_by_filename_identity(left_items)
+    right_groups = _group_items_by_filename_identity(right_items)
+
+    matched: list[tuple[MediaItem, MediaItem]] = []
+    remaining_left: list[MediaItem] = []
+    remaining_right: list[MediaItem] = []
+
+    for identity in sorted(set(left_groups) | set(right_groups)):
+        left_group = left_groups.get(identity, [])
+        right_group = right_groups.get(identity, [])
+        group_matched, group_left, group_right = _pair_item_group(left_group, right_group)
+        matched.extend(group_matched)
+        remaining_left.extend(group_left)
+        remaining_right.extend(group_right)
+
+    return matched, remaining_left, remaining_right
+
+
+def _group_items_by_filename_identity(items: list[MediaItem]) -> dict[str, list[MediaItem]]:
+    """Group items by their normalized media file base filename."""
+    grouped: dict[str, list[MediaItem]] = {}
+    for item in items:
+        identity = _filename_identity(item)
+        if not identity:
+            continue
+        grouped.setdefault(identity, []).append(item)
+    return grouped
+
+
+def _filename_identity(item: MediaItem) -> str:
+    """Return a normalized base filename used to match items across servers."""
+    return item.path.stem.strip().casefold()
 
 
 def _group_items_by_loose_identity(items: list[MediaItem]) -> dict[tuple, list[MediaItem]]:
@@ -438,6 +505,53 @@ def _metadata_differences(pair: MatchedPair) -> tuple[tuple[str, str, str, str, 
     return tuple(rows)
 
 
+def _mismatched_metadata_row(
+    pair: MatchedPair,
+) -> tuple[str, str, str, str, str, str, str, str, str, str] | None:
+    """Return one mismatched-metadata row for a filename-matched pair, if it differs."""
+    left_title = _metadata_title(pair.left)
+    right_title = _metadata_title(pair.right)
+    left_season = _display_value(pair.left.season_number)
+    right_season = _display_value(pair.right.season_number)
+    left_episode_number = _display_value(pair.left.episode_number)
+    right_episode_number = _display_value(pair.right.episode_number)
+    left_episode_name = _metadata_episode_name(pair.left)
+    right_episode_name = _metadata_episode_name(pair.right)
+
+    if (
+        left_title == right_title
+        and left_season == right_season
+        and left_episode_number == right_episode_number
+        and left_episode_name == right_episode_name
+    ):
+        return None
+
+    return (
+        pair.library,
+        pair.left.path.stem,
+        left_title,
+        right_title,
+        left_season,
+        right_season,
+        left_episode_number,
+        right_episode_number,
+        left_episode_name,
+        right_episode_name,
+    )
+
+
+def _metadata_title(item: MediaItem) -> str:
+    """Return the display title used for the Mismatched Metadata report."""
+    if item.is_episode:
+        return item.series_name or ""
+    return item.title
+
+
+def _metadata_episode_name(item: MediaItem) -> str:
+    """Return the episode-specific title used for the Mismatched Metadata report."""
+    return item.title if item.is_episode else ""
+
+
 def _server_settings_rows(
     left_result: AuditServerResult,
     right_result: AuditServerResult,
@@ -561,6 +675,7 @@ def _index_page(left_result: AuditServerResult, right_result: AuditServerResult,
             _summary_card("Missing Media", str(len(comparison["missing_left_media"]) + len(comparison["missing_right_media"]))),
             _summary_card("Missing Seasons", str(len(comparison["left_missing_seasons"]) + len(comparison["right_missing_seasons"]))),
             _summary_card("Missing Episodes", str(len(comparison["left_missing_episodes"]) + len(comparison["right_missing_episodes"]))),
+            _summary_card("Mismatched Metadata", str(len(comparison["mismatched_metadata"]))),
             _summary_card("Artwork Differences", str(len(comparison["artwork_differences"]))),
             _summary_card("Subtitle Differences", str(len(comparison["subtitle_differences"]))),
         )
@@ -615,6 +730,13 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
         comparison["left_missing_episodes"],
         comparison["right_missing_episodes"],
     )
+    mismatched_metadata_rows = tuple(
+        _mismatched_metadata_row_html(entry)
+        for entry in sorted(
+            comparison["mismatched_metadata"],
+            key=lambda entry: (entry[0].casefold(), entry[1].casefold()),
+        )
+    )
     return _page_shell(
         "Libraries Comparison",
         "Library lists, missing media items, and missing TV seasons or episodes between both servers.",
@@ -652,6 +774,24 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
                     missing_episodes_rows,
                     scrollable=True,
                     include_hide_same=True,
+                ),
+                _simple_table_section(
+                    "Mismatched Metadata",
+                    (
+                        "Library",
+                        "Base Filename",
+                        f"Title on {left_server_name}",
+                        f"Title on {right_server_name}",
+                        f"Season Number on {left_server_name}",
+                        f"Season Number on {right_server_name}",
+                        f"Episode Number on {left_server_name}",
+                        f"Episode Number on {right_server_name}",
+                        f"Episode Name on {left_server_name}",
+                        f"Episode Name on {right_server_name}",
+                    ),
+                    mismatched_metadata_rows,
+                    scrollable=True,
+                    include_hide_same=False,
                 ),
             )
         ),
@@ -996,6 +1136,50 @@ def _media_missing_row(library_name: str, item) -> str:
         f'<td>{escape(item.title)}</td><td>{escape(item.series_name or "")}</td>'
         f'{_table_cell(_display_season(item), sort_value=_season_sort_value(item))}'
         f'{_table_cell("" if item.episode_number is None else item.episode_number, sort_value=_episode_sort_value(item))}</tr>'
+    )
+
+
+def _mismatched_metadata_row_html(
+    entry: tuple[str, str, str, str, str, str, str, str, str, str],
+) -> str:
+    """Return one mismatched-metadata comparison row."""
+    (
+        library_name,
+        filename,
+        left_title,
+        right_title,
+        left_season,
+        right_season,
+        left_episode_number,
+        right_episode_number,
+        left_episode_name,
+        right_episode_name,
+    ) = entry
+    search_text = " ".join(
+        part
+        for part in (
+            library_name,
+            filename,
+            left_title,
+            right_title,
+            left_episode_name,
+            right_episode_name,
+        )
+        if part
+    ).lower()
+    return (
+        f'<tr data-diff-row data-search-row data-search="{escape(search_text)}">'
+        f"<td>{escape(library_name)}</td>"
+        f"<td>{escape(filename)}</td>"
+        f"{_diff_cell(left_title, is_different=left_title != right_title)}"
+        f"{_diff_cell(right_title, is_different=left_title != right_title)}"
+        f"{_diff_cell(left_season, is_different=left_season != right_season)}"
+        f"{_diff_cell(right_season, is_different=left_season != right_season)}"
+        f"{_diff_cell(left_episode_number, is_different=left_episode_number != right_episode_number)}"
+        f"{_diff_cell(right_episode_number, is_different=left_episode_number != right_episode_number)}"
+        f"{_diff_cell(left_episode_name, is_different=left_episode_name != right_episode_name)}"
+        f"{_diff_cell(right_episode_name, is_different=left_episode_name != right_episode_name)}"
+        "</tr>"
     )
 
 
