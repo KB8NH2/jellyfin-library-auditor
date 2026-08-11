@@ -519,10 +519,10 @@ def _mismatched_metadata_row(
     right_episode_name = _metadata_episode_name(pair.right)
 
     if (
-        left_title == right_title
-        and left_season == right_season
-        and left_episode_number == right_episode_number
-        and left_episode_name == right_episode_name
+        left_title.lower() == right_title.lower()
+        and left_season.lower() == right_season.lower()
+        and left_episode_number.lower() == right_episode_number.lower()
+        and left_episode_name.lower() == right_episode_name.lower()
     ):
         return None
 

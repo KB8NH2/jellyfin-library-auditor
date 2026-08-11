@@ -41,7 +41,7 @@ from results import AuditServerResult
 from results import LibraryAuditResult
 
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("auditor")
 AUTO_COMPARE_SENTINEL = "__auto_compare__"
 
 
@@ -314,7 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _log_library_summaries(filtered_result.library_results)
 
         for category, count in sorted(findings_by_category.items(), key=lambda entry: entry[0]):
-            LOGGER.info("Findings in %s: %d", category.value, count)
+            LOGGER.info("%s Findings in %s: %d", filtered_result.server_name, category.value, count)
 
     return 0
 
