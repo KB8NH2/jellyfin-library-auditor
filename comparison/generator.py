@@ -131,7 +131,7 @@ def _build_comparison(
     missing_right_media: list[tuple[str, object]] = []
     artwork_differences: list[MatchedPair] = []
     subtitle_differences: list[MatchedPair] = []
-    metadata_differences: list[tuple[str, str, str, str, str]] = []
+    metadata_differences: list[tuple[str, str, str, str, str, str]] = []
     mismatched_metadata: list[tuple[str, str, str, str, str, str, str, str, str, str, str]] = []
     left_missing_seasons = _sequence_gap_findings(
         left_result,
@@ -479,9 +479,9 @@ def _artwork_differs(left_item, right_item) -> bool:
     )
 
 
-def _metadata_differences(pair: MatchedPair) -> tuple[tuple[str, str, str, str, str], ...]:
+def _metadata_differences(pair: MatchedPair) -> tuple[tuple[str, str, str, str, str, str], ...]:
     """Return metadata difference rows for one matched pair."""
-    rows: list[tuple[str, str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str, str, str]] = []
     comparisons = (
         ("Year", _display_value(pair.left.year), _display_value(pair.right.year)),
         ("Resolution", _display_value(pair.left.resolution), _display_value(pair.right.resolution)),
@@ -495,6 +495,7 @@ def _metadata_differences(pair: MatchedPair) -> tuple[tuple[str, str, str, str, 
             (
                 pair.library,
                 pair.left.display_name,
+                pair.left.path.name,
                 field_name,
                 left_value,
                 right_value,
@@ -894,14 +895,14 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
             (
                 f'<tr data-diff-row data-search-row data-search="{escape((library + " " + title + " " + field_name + " " + left_value + " " + right_value).lower())}">',
                 f"  <td>{escape(library)}</td>",
-                f"  <td>{escape(title)}</td>",
+                f'  <td title="{escape(filename)}">{escape(title)}</td>',
                 f"  <td>{escape(field_name)}</td>",
                 f"  {_diff_cell(left_value, is_different=True)}",
                 f"  {_diff_cell(right_value, is_different=True)}",
                 "</tr>",
             )
         )
-        for library, title, field_name, left_value, right_value in comparison["metadata_differences"]
+        for library, title, filename, field_name, left_value, right_value in comparison["metadata_differences"]
     )
     return _page_shell(
         "Configuration Comparison",
@@ -1140,7 +1141,7 @@ def _media_missing_row(library_name: str, item) -> str:
     ).lower()
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(library_name)}</td>'
-        f'<td>{escape(item.title)}</td><td>{escape(item.series_name or "")}</td>'
+        f'<td{_filename_title_attribute(item)}>{escape(item.title)}</td><td>{escape(item.series_name or "")}</td>'
         f'{_table_cell(_display_season(item), sort_value=_season_sort_value(item))}'
         f'{_table_cell("" if item.episode_number is None else item.episode_number, sort_value=_episode_sort_value(item))}</tr>'
     )
@@ -1408,7 +1409,7 @@ def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult
     right_primary = _yes_no(has_jellyfin_primary_image(pair.right))
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
-        f'<td>{escape(pair.left.display_name)}</td>'
+        f'<td{_filename_title_attribute(pair.left)}>{escape(pair.left.display_name)}</td>'
         f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
         f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'
     )
@@ -1421,11 +1422,16 @@ def _subtitle_row(left_result: AuditServerResult, right_result: AuditServerResul
     right_subtitles = _yes_no(has_english_subtitles(pair.right))
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
-        f'<td>{escape(pair.left.title)}</td><td>{escape(pair.left.series_name or "")}</td>'
+        f'<td{_filename_title_attribute(pair.left)}>{escape(pair.left.title)}</td><td>{escape(pair.left.series_name or "")}</td>'
         f'{_table_cell(_display_season(pair.left), sort_value=_season_sort_value(pair.left))}'
         f'{_table_cell("" if pair.left.episode_number is None else pair.left.episode_number, sort_value=_episode_sort_value(pair.left))}'
         f'{_diff_cell(left_subtitles, is_different=left_subtitles != right_subtitles)}{_diff_cell(right_subtitles, is_different=left_subtitles != right_subtitles)}</tr>'
     )
+
+
+def _filename_title_attribute(item: MediaItem) -> str:
+    """Return a title="" attribute showing an item's filename as a hover tooltip."""
+    return f' title="{escape(item.path.name)}"'
 
 
 def _display_value(value: object) -> str:

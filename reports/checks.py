@@ -83,7 +83,7 @@ def _check_rows(
                 (
                     f'          <tr data-search-row data-search="{templates.row_search_text(media_findings)}">',
                     f'            <td data-sort-value="{templates.escape(templates.check_row_library_sort_value(item))}"><a href="{templates.library_page_href(item.library, site_links=site_links, relative_prefix="../")}">{templates.escape(item.library)}</a></td>',
-                    f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}">{templates.escape(item.title)}</a></td>',
+                    f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(item.title)}</a></td>',
                     f"            <td>{templates.escape(item.series_name or '')}</td>",
                     *_optional_row_cells(check_name, item),
                     f"            <td>{_finding_messages(media_findings)}</td>",

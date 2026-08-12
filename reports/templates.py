@@ -143,6 +143,11 @@ def media_key(item: MediaItem) -> tuple[str, str]:
     return (item.library, item.id)
 
 
+def filename_title_attribute(item: MediaItem) -> str:
+    """Return a title="" attribute showing an item's filename as a hover tooltip."""
+    return f' title="{escape(item.path.name)}"'
+
+
 def media_item_from_findings(findings: tuple[audit_types.AuditFinding, ...]) -> MediaItem:
     return findings[0].media_item
 

@@ -71,7 +71,7 @@ def _media_rows(findings: tuple, *, site_links: templates.SiteLinks, relative_pr
             "\n".join(
                 (
                     f'          <tr id="{templates.media_anchor(item, site_links)}" data-search-row data-search="{templates.row_search_text(media_findings)}">',
-                    f"            <td>{templates.escape(item.display_name)}</td>",
+                    f"            <td{templates.filename_title_attribute(item)}>{templates.escape(item.display_name)}</td>",
                     f'            <td data-sort-value="{templates.status_sort_value(local_poster)}">{templates.render_status_label(local_poster)}</td>',
                     f'            <td data-sort-value="{templates.status_sort_value(jellyfin_primary)}">{templates.render_status_label(jellyfin_primary)}</td>',
                     f'            <td data-sort-value="{templates.status_sort_value(english_subtitles)}">{templates.render_status_label(english_subtitles)}</td>',
