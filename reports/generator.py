@@ -287,7 +287,7 @@ def _check_cards(
     cards: list[templates.SummaryCard] = []
     for check_name, findings in sorted(
         grouped.items(),
-        key=lambda entry: (-len(entry[1]), templates.check_display_label(entry[0]).casefold()),
+        key=lambda entry: templates.check_sort_key(entry[0]),
     ):
         cards.append(
             templates.SummaryCard(

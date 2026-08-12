@@ -31,6 +31,15 @@ CHECK_DISPLAY_LABELS = {
     "unknown_audio_codec": "Unknown Audio Codec",
     "hdr_video": "HDR Video",
 }
+CHECK_DISPLAY_ORDER = (
+    "missing_primary_image",
+    "missing_poster",
+    "missing_english_subtitles",
+    "missing_seasons",
+    "missing_episodes",
+    "unknown_audio_codec",
+    "unknown_video_codec",
+)
 CHECK_SUMMARY_LABELS = {
     "missing_english_subtitles": "English Subtitles",
     "missing_poster": "Poster",
@@ -137,6 +146,13 @@ def check_display_label(check_name: str) -> str:
 
 def check_summary_label(check_name: str) -> str:
     return CHECK_SUMMARY_LABELS.get(check_name, check_display_label(check_name))
+
+
+def check_sort_key(check_name: str) -> tuple[int, str]:
+    try:
+        return (CHECK_DISPLAY_ORDER.index(check_name), "")
+    except ValueError:
+        return (len(CHECK_DISPLAY_ORDER), check_display_label(check_name).casefold())
 
 
 def media_key(item: MediaItem) -> tuple[str, str]:
@@ -367,15 +383,7 @@ def _sortable_text_token(value: str) -> str:
 
 
 def render_about_section(page_title: str) -> str:
-    return "\n".join(
-        (
-            '  <section class="about-card" id="about">',
-            "    <h2>About</h2>",
-            f"    <p>This static report page was generated for {escape(page_title)}.</p>",
-            "    <p class=\"muted-text\">Open any page directly in a modern browser. No internet connection is required.</p>",
-            "  </section>",
-        )
-    )
+    return "\n"
 
 
 def page_document(
