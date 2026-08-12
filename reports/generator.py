@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 
 from config import get_config
 from media import get_display_path
-from media import has_jellyfin_logo
 from media import has_jellyfin_primary_image
 from media import has_jellyfin_thumb
 from media import local_poster_exists
@@ -40,7 +39,6 @@ CSV_HEADER = (
     "Path",
     "Local Poster",
     "Jellyfin Primary",
-    "Jellyfin Logo",
     "Jellyfin Thumb",
     "Artwork Source",
     "Message",
@@ -219,7 +217,6 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
         item = finding.media_item
         local_poster = local_poster_exists(item)
         jellyfin_primary = has_jellyfin_primary_image(item)
-        jellyfin_logo = has_jellyfin_logo(item)
         jellyfin_thumb = has_jellyfin_thumb(item)
         rows.append(
             (
@@ -230,11 +227,10 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 get_display_path(item),
                 _yes_no(local_poster),
                 _yes_no(jellyfin_primary),
-                _yes_no(jellyfin_logo),
                 _yes_no(jellyfin_thumb),
                 _artwork_source(
                     has_local_artwork=local_poster,
-                    has_jellyfin_artwork=jellyfin_primary or jellyfin_logo or jellyfin_thumb,
+                    has_jellyfin_artwork=jellyfin_primary or jellyfin_thumb,
                 ),
                 finding.message,
             )

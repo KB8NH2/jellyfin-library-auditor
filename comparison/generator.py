@@ -15,7 +15,6 @@ from config import get_config
 from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
-from media import has_jellyfin_logo
 from media import has_jellyfin_primary_image
 from media import local_poster_exists
 from models import MediaItem
@@ -476,7 +475,6 @@ def _artwork_differs(left_item, right_item) -> bool:
         (
             local_poster_exists(left_item) != local_poster_exists(right_item),
             has_jellyfin_primary_image(left_item) != has_jellyfin_primary_image(right_item),
-            has_jellyfin_logo(left_item) != has_jellyfin_logo(right_item),
         )
     )
 
@@ -763,28 +761,24 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
                     f"Media Missing From {escape(left_server_name)}",
                     ("Library", "Title", "Series", "Season", "Episode"),
                     missing_left_rows,
-                    scrollable=True,
                     include_hide_same=False,
                 ),
                 _simple_table_section(
                     f"Media Missing From {escape(right_server_name)}",
                     ("Library", "Title", "Series", "Season", "Episode"),
                     missing_right_rows,
-                    scrollable=True,
                     include_hide_same=False,
                 ),
                 _simple_table_section(
                     "Missing Seasons",
                     ("Library", "Series", left_server_name, right_server_name),
                     missing_seasons_rows,
-                    scrollable=True,
                     include_hide_same=True,
                 ),
                 _simple_table_section(
                     "Missing Episodes",
                     ("Library", "Series", "Season", left_server_name, right_server_name),
                     missing_episodes_rows,
-                    scrollable=True,
                     include_hide_same=True,
                 ),
                 _simple_table_section(
@@ -802,7 +796,6 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
                         f"Episode Name on {right_server_name}",
                     ),
                     mismatched_metadata_rows,
-                    scrollable=True,
                     include_hide_same=False,
                 ),
             )
@@ -830,10 +823,9 @@ def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResul
                 f"{right_result.server_name or right_result.server_key or 'Right'} Poster",
                 f"{left_result.server_name or left_result.server_key or 'Left'} Primary",
                 f"{right_result.server_name or right_result.server_key or 'Right'} Primary",
-                f"{left_result.server_name or left_result.server_key or 'Left'} Logo",
-                f"{right_result.server_name or right_result.server_key or 'Right'} Logo",
             ),
             rows,
+            include_hide_same=False,
         ),
         current_nav="Artwork",
         include_search=True,
@@ -861,6 +853,7 @@ def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerRes
                 f"{right_result.server_name or right_result.server_key or 'Right'} English Subtitles",
             ),
             rows,
+            include_hide_same=False,
         ),
         current_nav="Subtitles",
         include_search=True,
@@ -923,7 +916,6 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
                         right_server_name,
                     ),
                     server_rows,
-                    scrollable=True,
                 ),
                 _simple_table_section(
                     "Library Settings",
@@ -934,7 +926,6 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
                         right_server_name,
                     ),
                     library_rows,
-                    scrollable=True,
                 ),
                 _simple_table_section(
                     "Metadata Differences",
@@ -946,7 +937,7 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
                         right_server_name,
                     ),
                     metadata_rows,
-                    scrollable=True,
+                    include_hide_same=False,
                 ),
             )
         ),
@@ -1059,7 +1050,6 @@ def _simple_table_section(
     headers: tuple[str, ...],
     rows: tuple[str, ...],
     *,
-    scrollable: bool = False,
     include_hide_same: bool = True,
 ) -> str:
     """Return one simple table section."""
@@ -1070,9 +1060,14 @@ def _simple_table_section(
     body_rows = rows or (
         '<tr class="empty-row" data-static-row><td colspan="99">No differences found.</td></tr>',
     )
-    table_shell_class = "table-shell comparison-scroll-shell" if scrollable else "table-shell"
+    table_shell_class = "table-shell table-scroll-shell"
     hide_same_button = (
         '      <button type="button" class="toolbar-button table-filter-button" onclick="toggleSameRows(this)" aria-pressed="false">Hide same</button>'
+        if include_hide_same
+        else ""
+    )
+    row_count_html = (
+        f' <span class="table-row-count" data-row-count>({len(rows)})</span>'
         if include_hide_same
         else ""
     )
@@ -1083,7 +1078,7 @@ def _simple_table_section(
         (
             '  <section class="section-card">',
             '    <div class="table-section-header">',
-            f"      <h2>{escape(title)}</h2>",
+            f"      <h2>{escape(title)}{row_count_html}</h2>",
             hide_same_button,
             "    </div>",
             f'    <div class="{table_shell_class}">',
@@ -1411,14 +1406,11 @@ def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult
     right_poster = _yes_no(local_poster_exists(pair.right))
     left_primary = _yes_no(has_jellyfin_primary_image(pair.left))
     right_primary = _yes_no(has_jellyfin_primary_image(pair.right))
-    left_logo = _yes_no(has_jellyfin_logo(pair.left))
-    right_logo = _yes_no(has_jellyfin_logo(pair.right))
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td>{escape(pair.left.display_name)}</td>'
         f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
         f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'
-        f'{_diff_cell(left_logo, is_different=left_logo != right_logo)}{_diff_cell(right_logo, is_different=left_logo != right_logo)}</tr>'
     )
 
 

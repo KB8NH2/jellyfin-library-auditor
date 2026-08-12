@@ -287,7 +287,7 @@ def render_sortable_table(headers: tuple[str, ...], rows: tuple[str, ...]) -> st
     body_rows = rows or ('<tr class="empty-row"><td colspan="99">No actionable items.</td></tr>',)
     return "\n".join(
         (
-            '    <div class="table-shell">',
+            '    <div class="table-shell table-scroll-shell">',
             '      <table class="data-table">',
             f"        <thead><tr>{header_html}</tr></thead>",
             "        <tbody>",

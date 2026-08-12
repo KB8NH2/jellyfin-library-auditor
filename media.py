@@ -35,11 +35,9 @@ GENERIC_NFO_FILENAMES = (
 )
 PRIMARY_IMAGE_TAG = "Primary"
 BACKDROP_IMAGE_TAG = "Backdrop"
-LOGO_IMAGE_TAG = "Logo"
 THUMB_IMAGE_TAG = "Thumb"
 JELLYFIN_IMAGE_TAGS = (
     BACKDROP_IMAGE_TAG,
-    LOGO_IMAGE_TAG,
     PRIMARY_IMAGE_TAG,
     THUMB_IMAGE_TAG,
 )
@@ -210,18 +208,6 @@ def has_jellyfin_backdrop(item: MediaItem) -> bool:
         ``True`` when a non-empty ``Backdrop`` image tag is present.
     """
     return _has_jellyfin_image_tag(item, BACKDROP_IMAGE_TAG)
-
-
-def has_jellyfin_logo(item: MediaItem) -> bool:
-    """Return whether Jellyfin reports a logo image tag for the item.
-
-    Args:
-        item: Media item to inspect.
-
-    Returns:
-        ``True`` when a non-empty ``Logo`` image tag is present.
-    """
-    return _has_jellyfin_image_tag(item, LOGO_IMAGE_TAG)
 
 
 def has_jellyfin_thumb(item: MediaItem) -> bool:
