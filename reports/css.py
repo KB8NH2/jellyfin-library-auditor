@@ -101,6 +101,8 @@ def _stylesheet() -> str:
             ".data-table thead th { position: sticky; top: 0; z-index: 1; background: var(--table-head); }",
             ".data-table tbody tr:nth-child(even) { background: var(--table-stripe); }",
             ".data-table tbody tr:last-child td { border-bottom: none; }",
+            ".has-grouped-header thead tr:first-child th { top: 0; text-align: center; }",
+            ".has-grouped-header thead tr:last-child th { top: 2.45em; }",
             ".comparison-table .empty-row td { white-space: normal; word-break: normal; }",
             ".table-scroll-shell { max-height: 28rem; overflow: auto; }",
             ".table-section-header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }",

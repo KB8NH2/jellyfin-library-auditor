@@ -131,8 +131,7 @@ def _build_comparison(
     missing_right_media: list[tuple[str, object]] = []
     artwork_differences: list[MatchedPair] = []
     subtitle_differences: list[MatchedPair] = []
-    metadata_differences: list[tuple[str, str, str, str, str, str]] = []
-    mismatched_metadata: list[tuple[str, str, str, str, str, str, str, str, str, str, str]] = []
+    mismatched_metadata: list[tuple[str, ...]] = []
     left_missing_seasons = _sequence_gap_findings(
         left_result,
         check_name=MISSING_SEASONS_CHECK_NAME,
@@ -187,11 +186,9 @@ def _build_comparison(
             artwork_differences.append(pair)
         if has_english_subtitles(pair.left) != has_english_subtitles(pair.right):
             subtitle_differences.append(pair)
-        metadata_differences.extend(_metadata_differences(pair))
-        if pair.matched_by_filename:
-            mismatch_row = _mismatched_metadata_row(pair)
-            if mismatch_row is not None:
-                mismatched_metadata.append(mismatch_row)
+        mismatch_row = _mismatched_metadata_row(pair)
+        if mismatch_row is not None:
+            mismatched_metadata.append(mismatch_row)
 
     return {
         "missing_left_libraries": missing_left_libraries,
@@ -200,7 +197,6 @@ def _build_comparison(
         "missing_right_media": tuple(missing_right_media),
         "artwork_differences": tuple(artwork_differences),
         "subtitle_differences": tuple(subtitle_differences),
-        "metadata_differences": tuple(metadata_differences),
         "mismatched_metadata": tuple(mismatched_metadata),
         "left_missing_seasons": left_missing_seasons,
         "right_missing_seasons": right_missing_seasons,
@@ -479,35 +475,15 @@ def _artwork_differs(left_item, right_item) -> bool:
     )
 
 
-def _metadata_differences(pair: MatchedPair) -> tuple[tuple[str, str, str, str, str, str], ...]:
-    """Return metadata difference rows for one matched pair."""
-    rows: list[tuple[str, str, str, str, str, str]] = []
-    comparisons = (
-        ("Year", _display_value(pair.left.year), _display_value(pair.right.year)),
-        ("Resolution", _display_value(pair.left.resolution), _display_value(pair.right.resolution)),
-        ("Video Codec", _display_value(get_video_codec(pair.left)), _display_value(get_video_codec(pair.right))),
-        ("Audio Codec", _display_value(get_primary_audio_codec(pair.left)), _display_value(get_primary_audio_codec(pair.right))),
-    )
-    for field_name, left_value, right_value in comparisons:
-        if left_value == right_value:
-            continue
-        rows.append(
-            (
-                pair.library,
-                pair.left.display_name,
-                pair.left.path.name,
-                field_name,
-                left_value,
-                right_value,
-            )
-        )
-    return tuple(rows)
+def _mismatched_metadata_row(pair: MatchedPair) -> tuple[str, ...] | None:
+    """Return one side-by-side metadata comparison row for a matched pair, if any field differs.
 
-
-def _mismatched_metadata_row(
-    pair: MatchedPair,
-) -> tuple[str, str, str, str, str, str, str, str, str, str, str] | None:
-    """Return one mismatched-metadata row for a filename-matched pair, if it differs."""
+    Covers TV season/episode identification (only meaningful when the pair was
+    matched by shared filename rather than normalized identity, since
+    identity-matched episodes already share the same season/episode numbers by
+    construction) as well as year, resolution, and codec fields that can
+    genuinely differ regardless of how the pair was matched.
+    """
     left_title = _metadata_title(pair.left)
     right_title = _metadata_title(pair.right)
     left_season = _display_value(pair.left.season_number)
@@ -516,12 +492,24 @@ def _mismatched_metadata_row(
     right_episode_number = _display_value(pair.right.episode_number)
     left_episode_name = _metadata_episode_name(pair.left)
     right_episode_name = _metadata_episode_name(pair.right)
+    left_year = _display_value(pair.left.year)
+    right_year = _display_value(pair.right.year)
+    left_resolution = _display_value(pair.left.resolution)
+    right_resolution = _display_value(pair.right.resolution)
+    left_video_codec = _display_value(get_video_codec(pair.left))
+    right_video_codec = _display_value(get_video_codec(pair.right))
+    left_audio_codec = _display_value(get_primary_audio_codec(pair.left))
+    right_audio_codec = _display_value(get_primary_audio_codec(pair.right))
 
     if (
-        left_title.lower() == right_title.lower()
-        and left_season.lower() == right_season.lower()
-        and left_episode_number.lower() == right_episode_number.lower()
-        and left_episode_name.lower() == right_episode_name.lower()
+        left_title.casefold() == right_title.casefold()
+        and left_season == right_season
+        and left_episode_number == right_episode_number
+        and left_episode_name.casefold() == right_episode_name.casefold()
+        and left_year == right_year
+        and left_resolution == right_resolution
+        and left_video_codec == right_video_codec
+        and left_audio_codec == right_audio_codec
     ):
         return None
 
@@ -536,6 +524,14 @@ def _mismatched_metadata_row(
         right_episode_number,
         left_episode_name,
         right_episode_name,
+        left_year,
+        right_year,
+        left_resolution,
+        right_resolution,
+        left_video_codec,
+        right_video_codec,
+        left_audio_codec,
+        right_audio_codec,
         _media_relative_path_sort_key(pair.left.path),
     )
 
@@ -745,7 +741,7 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
         _mismatched_metadata_row_html(entry)
         for entry in sorted(
             comparison["mismatched_metadata"],
-            key=lambda entry: (entry[0].casefold(), entry[10]),
+            key=lambda entry: (entry[0].casefold(), entry[-1]),
         )
     )
     return _page_shell(
@@ -782,20 +778,21 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
                     missing_episodes_rows,
                     include_hide_same=True,
                 ),
-                _simple_table_section(
+                _grouped_table_section(
                     "Mismatched Metadata",
+                    ("Library", "Base Filename"),
                     (
-                        "Library",
-                        "Base Filename",
-                        f"Title on {left_server_name}",
-                        f"Title on {right_server_name}",
-                        f"Season Number on {left_server_name}",
-                        f"Season Number on {right_server_name}",
-                        f"Episode Number on {left_server_name}",
-                        f"Episode Number on {right_server_name}",
-                        f"Episode Name on {left_server_name}",
-                        f"Episode Name on {right_server_name}",
+                        "Title",
+                        "Season Number",
+                        "Episode Number",
+                        "Episode Name",
+                        "Year",
+                        "Resolution",
+                        "Video Codec",
+                        "Audio Codec",
                     ),
+                    left_server_name,
+                    right_server_name,
                     mismatched_metadata_rows,
                     include_hide_same=False,
                 ),
@@ -808,6 +805,8 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
 
 def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
     """Return artwork comparison page body."""
+    left_server_name = left_result.server_name or left_result.server_key or "Left"
+    right_server_name = right_result.server_name or right_result.server_key or "Right"
     rows = tuple(
         _artwork_row(left_result, right_result, pair)
         for pair in comparison["artwork_differences"]
@@ -815,16 +814,12 @@ def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResul
     return _page_shell(
         "Artwork Comparison",
         "Differences in local and Jellyfin artwork presence.",
-        _simple_table_section(
+        _grouped_table_section(
             "Artwork Differences",
-            (
-                "Library",
-                "Title",
-                f"{left_result.server_name or left_result.server_key or 'Left'} Poster",
-                f"{right_result.server_name or right_result.server_key or 'Right'} Poster",
-                f"{left_result.server_name or left_result.server_key or 'Left'} Primary",
-                f"{right_result.server_name or right_result.server_key or 'Right'} Primary",
-            ),
+            ("Library", "Title"),
+            ("Poster", "Primary"),
+            left_server_name,
+            right_server_name,
             rows,
             include_hide_same=False,
         ),
@@ -835,6 +830,8 @@ def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResul
 
 def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
     """Return subtitles comparison page body."""
+    left_server_name = left_result.server_name or left_result.server_key or "Left"
+    right_server_name = right_result.server_name or right_result.server_key or "Right"
     rows = tuple(
         _subtitle_row(left_result, right_result, pair)
         for pair in comparison["subtitle_differences"]
@@ -842,17 +839,12 @@ def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerRes
     return _page_shell(
         "Subtitle Comparison",
         "Differences in English subtitle availability.",
-        _simple_table_section(
+        _grouped_table_section(
             "Subtitle Differences",
-            (
-                "Library",
-                "Title",
-                "Series",
-                "Season",
-                "Episode",
-                f"{left_result.server_name or left_result.server_key or 'Left'} English Subtitles",
-                f"{right_result.server_name or right_result.server_key or 'Right'} English Subtitles",
-            ),
+            ("Library", "Title", "Series", "Season", "Episode"),
+            ("English Subtitles",),
+            left_server_name,
+            right_server_name,
             rows,
             include_hide_same=False,
         ),
@@ -890,20 +882,6 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
         )
         for library_name, setting_name, left_value, right_value in comparison["library_settings"]
     )
-    metadata_rows = tuple(
-        "\n".join(
-            (
-                f'<tr data-diff-row data-search-row data-search="{escape((library + " " + title + " " + field_name + " " + left_value + " " + right_value).lower())}">',
-                f"  <td>{escape(library)}</td>",
-                f'  <td title="{escape(filename)}">{escape(title)}</td>',
-                f"  <td>{escape(field_name)}</td>",
-                f"  {_diff_cell(left_value, is_different=True)}",
-                f"  {_diff_cell(right_value, is_different=True)}",
-                "</tr>",
-            )
-        )
-        for library, title, filename, field_name, left_value, right_value in comparison["metadata_differences"]
-    )
     return _page_shell(
         "Configuration Comparison",
         "Side-by-side server and library settings, with differences highlighted.",
@@ -927,18 +905,6 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
                         right_server_name,
                     ),
                     library_rows,
-                ),
-                _simple_table_section(
-                    "Metadata Differences",
-                    (
-                        "Library",
-                        "Title",
-                        "Field",
-                        left_server_name,
-                        right_server_name,
-                    ),
-                    metadata_rows,
-                    include_hide_same=False,
                 ),
             )
         ),
@@ -1091,6 +1057,78 @@ def _simple_table_section(
     )
 
 
+def _grouped_table_section(
+    title: str,
+    solo_columns: tuple[str, ...],
+    paired_fields: tuple[str, ...],
+    left_server_name: str,
+    right_server_name: str,
+    rows: tuple[str, ...],
+    *,
+    include_hide_same: bool = True,
+) -> str:
+    """Return one table section with a two-row grouped header.
+
+    The header's first row shows each paired field name (e.g. "Title") once,
+    spanning both of its left/right server sub-columns; the second row shows
+    the server names themselves. This keeps narrow per-server columns (e.g. a
+    season number) from being stretched wide by a repeated "<field> on
+    <server>" label.
+    """
+    column_index = 0
+    solo_header_cells: list[str] = []
+    for label in solo_columns:
+        solo_header_cells.append(
+            f'<th rowspan="2"><button type="button" class="sort-button" data-column="{column_index}" onclick="sortReportTable(this)">{escape(label)}</button></th>'
+        )
+        column_index += 1
+
+    field_header_cells: list[str] = []
+    server_header_cells: list[str] = []
+    for field_label in paired_fields:
+        field_header_cells.append(f'<th colspan="2">{escape(field_label)}</th>')
+        for server_label in (left_server_name, right_server_name):
+            server_header_cells.append(
+                f'<th><button type="button" class="sort-button" data-column="{column_index}" onclick="sortReportTable(this)">{escape(server_label)}</button></th>'
+            )
+            column_index += 1
+
+    body_rows = rows or (
+        '<tr class="empty-row" data-static-row><td colspan="99">No differences found.</td></tr>',
+    )
+    table_shell_class = "table-shell table-scroll-shell"
+    hide_same_button = (
+        '      <button type="button" class="toolbar-button table-filter-button" onclick="toggleSameRows(this)" aria-pressed="false">Hide same</button>'
+        if include_hide_same
+        else ""
+    )
+    row_count_html = f' <span class="table-row-count" data-row-count>({len(rows)})</span>'
+    table_attributes = ' class="data-table comparison-table has-grouped-header"'
+    if include_hide_same:
+        table_attributes += ' data-hide-same="false"'
+    return "\n".join(
+        (
+            '  <section class="section-card">',
+            '    <div class="table-section-header">',
+            f"      <h2>{escape(title)}{row_count_html}</h2>",
+            hide_same_button,
+            "    </div>",
+            f'    <div class="{table_shell_class}">',
+            f"      <table{table_attributes}>",
+            "        <thead>",
+            f"          <tr>{''.join(solo_header_cells)}{''.join(field_header_cells)}</tr>",
+            f"          <tr>{''.join(server_header_cells)}</tr>",
+            "        </thead>",
+            "        <tbody>",
+            *body_rows,
+            "        </tbody>",
+            "      </table>",
+            "    </div>",
+            "  </section>",
+        )
+    )
+
+
 def _summary_card(title: str, value: str) -> str:
     """Return one comparison summary card."""
     return "\n".join(
@@ -1143,10 +1181,8 @@ def _media_missing_row(library_name: str, item) -> str:
     )
 
 
-def _mismatched_metadata_row_html(
-    entry: tuple[str, str, str, str, str, str, str, str, str, str, str],
-) -> str:
-    """Return one mismatched-metadata comparison row."""
+def _mismatched_metadata_row_html(entry: tuple[str, ...]) -> str:
+    """Return one side-by-side mismatched-metadata comparison row."""
     (
         library_name,
         filename,
@@ -1158,6 +1194,14 @@ def _mismatched_metadata_row_html(
         right_episode_number,
         left_episode_name,
         right_episode_name,
+        left_year,
+        right_year,
+        left_resolution,
+        right_resolution,
+        left_video_codec,
+        right_video_codec,
+        left_audio_codec,
+        right_audio_codec,
         path_sort_key,
     ) = entry
     search_text = " ".join(
@@ -1176,14 +1220,22 @@ def _mismatched_metadata_row_html(
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}">'
         f"<td>{escape(library_name)}</td>"
         f"{_table_cell(filename, sort_value=path_sort_key)}"
-        f"{_diff_cell(left_title, is_different=left_title != right_title)}"
-        f"{_diff_cell(right_title, is_different=left_title != right_title)}"
+        f"{_diff_cell(left_title, is_different=left_title.casefold() != right_title.casefold())}"
+        f"{_diff_cell(right_title, is_different=left_title.casefold() != right_title.casefold())}"
         f"{_diff_cell(left_season, is_different=left_season != right_season)}"
         f"{_diff_cell(right_season, is_different=left_season != right_season)}"
         f"{_diff_cell(left_episode_number, is_different=left_episode_number != right_episode_number)}"
         f"{_diff_cell(right_episode_number, is_different=left_episode_number != right_episode_number)}"
-        f"{_diff_cell(left_episode_name, is_different=left_episode_name != right_episode_name)}"
-        f"{_diff_cell(right_episode_name, is_different=left_episode_name != right_episode_name)}"
+        f"{_diff_cell(left_episode_name, is_different=left_episode_name.casefold() != right_episode_name.casefold())}"
+        f"{_diff_cell(right_episode_name, is_different=left_episode_name.casefold() != right_episode_name.casefold())}"
+        f"{_diff_cell(left_year, is_different=left_year != right_year)}"
+        f"{_diff_cell(right_year, is_different=left_year != right_year)}"
+        f"{_diff_cell(left_resolution, is_different=left_resolution != right_resolution)}"
+        f"{_diff_cell(right_resolution, is_different=left_resolution != right_resolution)}"
+        f"{_diff_cell(left_video_codec, is_different=left_video_codec != right_video_codec)}"
+        f"{_diff_cell(right_video_codec, is_different=left_video_codec != right_video_codec)}"
+        f"{_diff_cell(left_audio_codec, is_different=left_audio_codec != right_audio_codec)}"
+        f"{_diff_cell(right_audio_codec, is_different=left_audio_codec != right_audio_codec)}"
         "</tr>"
     )
 
@@ -1408,6 +1460,7 @@ def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult
         f'<td{_filename_title_attribute(pair.left)}>{escape(pair.left.display_name)}</td>'
         f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
         f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'
+        "</tr>"
     )
 
 
