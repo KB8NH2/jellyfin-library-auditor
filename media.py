@@ -8,6 +8,7 @@ rules.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from config import get_config
 from models import AudioTrack
@@ -33,6 +34,14 @@ GENERIC_NFO_FILENAMES = (
     "tvshow.nfo",
     "season.nfo",
 )
+RELEASE_TAG_PATTERN = re.compile(
+    r"(?i)\b("
+    r"2160p|1080p|720p|480p|4k|"
+    r"hdtv|web[- ]?dl|webrip|web|bluray|brrip|bdrip|dvdrip|hdrip|"
+    r"x264|x265|h264|h265|hevc|aac|ac3|dts|flac"
+    r")\b"
+)
+EPISODE_TITLE_STRIP_CHARACTERS = " -_.[]({}:"
 PRIMARY_IMAGE_TAG = "Primary"
 BACKDROP_IMAGE_TAG = "Backdrop"
 THUMB_IMAGE_TAG = "Thumb"
@@ -280,6 +289,47 @@ def local_nfo_exists(item: MediaItem) -> bool:
     basename_nfo = f"{item.path.stem}.nfo"
     filenames = (*GENERIC_NFO_FILENAMES, basename_nfo)
     return _sibling_file_exists(item, filenames)
+
+
+def expected_episode_title_from_filename(item: MediaItem) -> str | None:
+    """Return the episode title implied by the filename's Jellyfin naming.
+
+    Jellyfin's TV naming convention places the episode title after the
+    ``SxxExx`` season/episode marker, e.g. ``Show S01E02 Episode Title.mkv``.
+    Multi-episode files spanning a range, e.g. ``Show S01E02-E03 Title.mkv``,
+    are also recognized so the trailing ``-Exx`` segment is not mistaken for
+    part of the title. This locates the marker using the item's known season
+    and starting episode numbers and returns the text that follows it, with
+    common release tags (resolution, codec, source) and separators trimmed
+    away.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        The episode title segment implied by the filename, or ``None`` when
+        the filename has no recognizable ``SxxExx`` marker or no title text
+        follows it.
+    """
+    if not item.is_episode or item.season_number is None or item.episode_number is None:
+        return None
+
+    marker_pattern = re.compile(
+        rf"(?i)s0*{item.season_number}e0*{item.episode_number}(?:-?e0*\d+)*(?!\d)"
+    )
+    stem = item.path.stem
+    marker_match = marker_pattern.search(stem)
+    if marker_match is None:
+        return None
+
+    remainder = stem[marker_match.end() :].replace("_", " ").replace(".", " ")
+    tag_match = RELEASE_TAG_PATTERN.search(remainder)
+    if tag_match is not None:
+        remainder = remainder[: tag_match.start()]
+
+    remainder = remainder.strip(EPISODE_TITLE_STRIP_CHARACTERS)
+    remainder = re.sub(r"\s+", " ", remainder).strip()
+    return remainder or None
 
 
 # Video helpers

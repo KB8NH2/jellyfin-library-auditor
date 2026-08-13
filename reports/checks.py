@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from media import expected_episode_title_from_filename
+
 from . import templates
 
 
@@ -15,9 +17,16 @@ DEFAULT_TABLE_HEADERS = (
 )
 
 
-def render_check_page(check_name: str, findings: tuple, *, site_links: templates.SiteLinks) -> str:
+def render_check_page(
+    check_name: str,
+    findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+    server_display_name: str = "",
+) -> str:
     """Return one audit check page."""
     media_groups = templates.group_findings_by_media(findings)
+    check_rows = _check_rows(findings, site_links=site_links, check_name=check_name)
     cards = (
         templates.SummaryCard("Audit Check", templates.check_display_label(check_name), "check", subtitle=check_name),
         templates.SummaryCard("Media Items", str(len(media_groups)), "media"),
@@ -27,12 +36,9 @@ def render_check_page(check_name: str, findings: tuple, *, site_links: templates
         (
             templates.render_summary_cards(cards),
             '  <section class="section-card">',
-            f"    <h2>{templates.check_display_label(check_name)}</h2>",
+            f"    <h2>{templates.check_display_label(check_name)}{templates.render_row_count(len(check_rows))}</h2>",
             "    <p class=\"muted-text\">Rows represent media items requiring this exact fix.</p>",
-            templates.render_sortable_table(
-                _table_headers(check_name),
-                _check_rows(findings, site_links=site_links, check_name=check_name),
-            ),
+            templates.render_sortable_table(_table_headers(check_name), check_rows),
             "  </section>",
         )
     )
@@ -49,6 +55,7 @@ def render_check_page(check_name: str, findings: tuple, *, site_links: templates
         ),
         include_search=True,
         include_expand_controls=False,
+        server_display_name=server_display_name,
         content=content,
     )
 
@@ -59,6 +66,8 @@ def _table_headers(check_name: str) -> tuple[str, ...]:
         return ("Library", "Title", "Series", "Season", "Details")
     if check_name == "missing_seasons":
         return ("Library", "Title", "Series", "Details")
+    if check_name == "mismatched_episode_filename_title":
+        return ("Library", "Series", "Season", "Episode", "Title", "Suggested Title (Filename)")
     return DEFAULT_TABLE_HEADERS
 
 
@@ -78,6 +87,9 @@ def _check_rows(
         ),
     ):
         item = templates.media_item_from_findings(media_findings)
+        if check_name == "mismatched_episode_filename_title":
+            rows.append(_mismatched_episode_filename_title_row(item, media_findings, site_links=site_links))
+            continue
         rows.append(
             "\n".join(
                 (
@@ -92,6 +104,28 @@ def _check_rows(
             )
         )
     return tuple(rows)
+
+
+def _mismatched_episode_filename_title_row(
+    item: templates.MediaItem,
+    media_findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+) -> str:
+    """Return one table row for the mismatched episode filename title check."""
+    suggested_title = expected_episode_title_from_filename(item) or ""
+    return "\n".join(
+        (
+            f'          <tr data-search-row data-search="{templates.row_search_text(media_findings)}">',
+            f'            <td data-sort-value="{templates.escape(templates.check_row_library_sort_value(item))}"><a href="{templates.library_page_href(item.library, site_links=site_links, relative_prefix="../")}">{templates.escape(item.library)}</a></td>',
+            f"            <td>{templates.escape(item.series_name or '')}</td>",
+            f'            <td data-sort-value="{templates.escape(templates.season_sort_value(item))}">{templates.escape(item.season_name or "")}</td>',
+            f'            <td data-sort-value="{templates.escape(templates.episode_sort_value(item))}">{"" if item.episode_number is None else item.episode_number}</td>',
+            f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(item.title)}</a></td>',
+            f"            <td>{templates.escape(suggested_title)}</td>",
+            "          </tr>",
+        )
+    )
 
 
 def _optional_row_cells(check_name: str, item: templates.MediaItem) -> tuple[str, ...]:

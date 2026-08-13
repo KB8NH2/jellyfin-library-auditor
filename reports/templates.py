@@ -30,6 +30,7 @@ CHECK_DISPLAY_LABELS = {
     "unknown_video_codec": "Unknown Video Codec",
     "unknown_audio_codec": "Unknown Audio Codec",
     "hdr_video": "HDR Video",
+    "mismatched_episode_filename_title": "Mismatched Episode Filename Title",
 }
 CHECK_DISPLAY_ORDER = (
     "missing_primary_image",
@@ -194,13 +195,13 @@ def row_search_text(findings: tuple[audit_types.AuditFinding, ...]) -> str:
     return " ".join(part.strip().lower() for part in parts if part.strip())
 
 
-def render_page(*, title: str, current_nav: str, relative_prefix: str, heading: str, intro: str, content: str, breadcrumbs: tuple[Breadcrumb, ...], include_search: bool, include_expand_controls: bool) -> str:
+def render_page(*, title: str, current_nav: str, relative_prefix: str, heading: str, intro: str, content: str, breadcrumbs: tuple[Breadcrumb, ...], include_search: bool, include_expand_controls: bool, server_display_name: str = "") -> str:
     toolbar_html = render_toolbar(include_expand_controls) if include_search else ""
     return "\n".join(
         (
             f'<main class="page-shell" data-nav-current="{escape(current_nav)}">',
             '  <header class="sticky-header">',
-            render_navigation(relative_prefix),
+            render_navigation(relative_prefix, server_display_name=server_display_name),
             render_breadcrumbs(breadcrumbs),
             "    <section class=\"page-header-card\">",
             f"      <h1>{escape(heading)}</h1>",
@@ -217,14 +218,19 @@ def render_page(*, title: str, current_nav: str, relative_prefix: str, heading: 
     )
 
 
-def render_navigation(relative_prefix: str) -> str:
+def render_navigation(relative_prefix: str, *, server_display_name: str = "") -> str:
+    server_name_html = (
+        f'      <span class="nav-server-name">{escape(server_display_name)}</span>'
+        if server_display_name
+        else ""
+    )
     return "\n".join(
         (
             '    <nav class="site-nav" aria-label="Primary">',
+            *((server_name_html,) if server_name_html else ()),
             f'      <a class="nav-link" data-nav="Dashboard" href="{escape(f"{relative_prefix}index.html")}">Dashboard</a>',
             f'      <a class="nav-link" data-nav="Libraries" href="{escape(f"{relative_prefix}index.html#libraries-overview")}">Libraries</a>',
             f'      <a class="nav-link" data-nav="Checks" href="{escape(f"{relative_prefix}index.html#checks-overview")}">Audit Checks</a>',
-            '      <a class="nav-link" data-nav="About" href="#about">About</a>',
             f"      {render_theme_toggle()}",
             "    </nav>",
         )
@@ -300,12 +306,17 @@ def render_summary_card(card: SummaryCard) -> str:
     )
 
 
+def render_row_count(count: int) -> str:
+    """Return a row-count badge for placement next to a table heading."""
+    return f' <span class="table-row-count" data-row-count>({count})</span>'
+
+
 def render_sortable_table(headers: tuple[str, ...], rows: tuple[str, ...]) -> str:
     header_html = "".join(
         f'<th><button type="button" class="sort-button" data-column="{index}" onclick="sortReportTable(this)">{escape(label)}</button></th>'
         for index, label in enumerate(headers)
     )
-    body_rows = rows or ('<tr class="empty-row"><td colspan="99">No actionable items.</td></tr>',)
+    body_rows = rows or ('<tr class="empty-row" data-static-row><td colspan="99">No actionable items.</td></tr>',)
     return "\n".join(
         (
             '    <div class="table-shell table-scroll-shell">',

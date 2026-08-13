@@ -8,10 +8,12 @@ findings. It operates only on application models and helper functions from
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
+from media import expected_episode_title_from_filename
 from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
@@ -19,6 +21,13 @@ from media import has_jellyfin_primary_image
 from media import local_backdrop_exists
 from media import local_poster_exists
 from models import MediaItem
+
+
+_EPISODE_TITLE_PUNCTUATION_PATTERN = re.compile(
+    r"""[,:;!\?'"‘’“”·\-‐‑‒–—*<>|]"""
+)
+_ROMAN_NUMERAL_PAREN_PATTERN = re.compile(r"\(([IVXLCDMivxlcdm]+)\)")
+_ROMAN_NUMERAL_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
 
 
 def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
@@ -37,6 +46,7 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
         missing_primary_image,
         unknown_video_codec,
         unknown_audio_codec,
+        mismatched_episode_filename_title,
     )
     findings: list[AuditFinding] = []
 
@@ -190,6 +200,77 @@ def unknown_audio_codec(item: MediaItem) -> AuditFinding | None:
         check_name="unknown_audio_codec",
         message="No primary audio codec was found.",
     )
+
+
+def mismatched_episode_filename_title(item: MediaItem) -> AuditFinding | None:
+    """Return a finding when the filename implies a different episode title.
+
+    Args:
+        item: Media item to evaluate.
+
+    Returns:
+        A warning finding, or ``None`` when the filename has no discernible
+        episode title, or its implied title matches the metadata title.
+    """
+    expected_title = expected_episode_title_from_filename(item)
+    if expected_title is None:
+        return None
+
+    if _normalized_episode_title(expected_title) == _normalized_episode_title(item.title):
+        return None
+
+    return _finding(
+        item,
+        category=AuditCategory.METADATA,
+        severity=AuditSeverity.WARNING,
+        check_name="mismatched_episode_filename_title",
+        message=(
+            f'Filename suggests episode title "{expected_title}" but metadata '
+            f'title is "{item.title}".'
+        ),
+    )
+
+
+def _normalized_episode_title(value: str) -> str:
+    """Return a normalized episode title for filename/metadata comparison.
+
+    Periods are treated as word separators (like filename extraction does for
+    dot-delimited release names) rather than deleted outright, so abbreviated
+    titles such as "S.W.A.T." compare equal to their filename counterpart
+    instead of collapsing into a run-together "swat". Parenthesized roman
+    numerals (e.g. "(I)") are converted to their arabic-numeral equivalent
+    (e.g. "(1)") since Jellyfin metadata and filenames disagree on which form
+    to use for disambiguating same-titled entries.
+    """
+    normalized_value = _ROMAN_NUMERAL_PAREN_PATTERN.sub(_roman_numeral_paren_to_arabic, value)
+    normalized_value = normalized_value.replace(".", " ")
+    normalized_value = _EPISODE_TITLE_PUNCTUATION_PATTERN.sub("", normalized_value)
+    normalized_value = re.sub(r"\s+", " ", normalized_value)
+    return normalized_value.strip().casefold()
+
+
+def _roman_numeral_paren_to_arabic(match: re.Match[str]) -> str:
+    """Return an arabic-numeral parenthetical for a matched roman numeral."""
+    numeral_value = _roman_numeral_to_int(match.group(1))
+    if numeral_value is None:
+        return match.group(0)
+    return f"({numeral_value})"
+
+
+def _roman_numeral_to_int(numeral: str) -> int | None:
+    """Return the integer value of a roman numeral, or ``None`` when invalid."""
+    total = 0
+    previous_value = 0
+    for character in reversed(numeral.upper()):
+        value = _ROMAN_NUMERAL_VALUES.get(character)
+        if value is None:
+            return None
+        if value < previous_value:
+            total -= value
+        else:
+            total += value
+            previous_value = value
+    return total or None
 
 
 def missing_tv_series_seasons(items: Iterable[MediaItem]) -> tuple[AuditFinding, ...]:
@@ -359,6 +440,7 @@ __all__ = [
     "AuditSeverity",
     "audit_library_items",
     "audit_media_item",
+    "mismatched_episode_filename_title",
     "missing_backdrop",
     "missing_english_subtitles",
     "missing_tv_season_episodes",

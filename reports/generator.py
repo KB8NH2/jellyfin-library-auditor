@@ -102,11 +102,13 @@ def write_reports(result: AuditServerResult) -> Path:
         actionable_findings=actionable_findings,
         site_links=site_links,
         site_paths=site_paths,
+        server_display_name=server_display_name,
     )
     _write_check_pages(
         actionable_findings=actionable_findings,
         site_links=site_links,
         site_paths=site_paths,
+        server_display_name=server_display_name,
     )
     write_server_report_metadata(
         output_root,
@@ -160,6 +162,7 @@ def _write_library_pages(
     actionable_findings: tuple,
     site_links: templates.SiteLinks,
     site_paths: templates.SitePaths,
+    server_display_name: str,
 ) -> None:
     """Write one page per audited library."""
     grouped = templates.group_findings_by_library(actionable_findings)
@@ -169,6 +172,7 @@ def _write_library_pages(
             library_name,
             grouped.get(library_name, ()),
             site_links=site_links,
+            server_display_name=server_display_name,
         )
         page_path.write_text(
             templates.page_document(
@@ -186,6 +190,7 @@ def _write_check_pages(
     actionable_findings: tuple,
     site_links: templates.SiteLinks,
     site_paths: templates.SitePaths,
+    server_display_name: str,
 ) -> None:
     """Write one page per actionable audit check."""
     grouped = templates.group_findings_by_check(actionable_findings)
@@ -198,6 +203,7 @@ def _write_check_pages(
             check_name,
             findings,
             site_links=site_links,
+            server_display_name=server_display_name,
         )
         page_path.write_text(
             templates.page_document(

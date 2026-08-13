@@ -30,10 +30,11 @@ def render_dashboard_page(
         current_nav="Dashboard",
         relative_prefix="",
         heading=f"Jellyfin Library Auditor ({server_display_name})",
-        intro="Use these pages to find and fix missing artwork, subtitles, and metadata.",
+        intro="Use these pages to find missing artwork, subtitles, and metadata.",
         breadcrumbs=(templates.Breadcrumb("Dashboard"),),
         include_search=False,
         include_expand_controls=False,
+        server_display_name=server_display_name,
         content="\n".join(
             (
                 templates.render_summary_cards(summary_cards),

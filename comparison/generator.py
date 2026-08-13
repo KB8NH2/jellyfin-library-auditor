@@ -1067,11 +1067,7 @@ def _simple_table_section(
         if include_hide_same
         else ""
     )
-    row_count_html = (
-        f' <span class="table-row-count" data-row-count>({len(rows)})</span>'
-        if include_hide_same
-        else ""
-    )
+    row_count_html = f' <span class="table-row-count" data-row-count>({len(rows)})</span>'
     table_attributes = ' class="data-table comparison-table"'
     if include_hide_same:
         table_attributes += ' data-hide-same="false"'

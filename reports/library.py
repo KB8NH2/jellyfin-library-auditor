@@ -17,9 +17,16 @@ TABLE_HEADERS = (
 )
 
 
-def render_library_page(library_name: str, findings: tuple, *, site_links: templates.SiteLinks) -> str:
+def render_library_page(
+    library_name: str,
+    findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+    server_display_name: str = "",
+) -> str:
     """Return one library report page."""
     media_groups = templates.group_findings_by_media(findings)
+    media_rows = _media_rows(findings, site_links=site_links, relative_prefix="../")
     cards = (
         templates.SummaryCard("Library", library_name, "library", subtitle="Current library"),
         templates.SummaryCard("Media Items With Issues", str(len(media_groups)), "media"),
@@ -29,12 +36,9 @@ def render_library_page(library_name: str, findings: tuple, *, site_links: templ
         (
             templates.render_summary_cards(cards),
             '  <section class="section-card">',
-            f"    <h2>{library_name}</h2>",
+            f"    <h2>{templates.escape(library_name)}{templates.render_row_count(len(media_rows))}</h2>",
             "    <p class=\"muted-text\">Rows represent media items that need attention.</p>",
-            templates.render_sortable_table(
-                TABLE_HEADERS,
-                _media_rows(findings, site_links=site_links, relative_prefix="../"),
-            ),
+            templates.render_sortable_table(TABLE_HEADERS, media_rows),
             "  </section>",
         )
     )
@@ -51,6 +55,7 @@ def render_library_page(library_name: str, findings: tuple, *, site_links: templ
         ),
         include_search=True,
         include_expand_controls=False,
+        server_display_name=server_display_name,
         content=content,
     )
 
