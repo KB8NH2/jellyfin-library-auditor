@@ -16,12 +16,17 @@ The current implementation checks:
 - Missing primary audio codecs
 - Missing numbered TV seasons within a series
 - Missing numbered TV episodes within a season
+- TV episode metadata titles that don't match the title implied by the filename's `SxxExx` naming (including `SxxEyy-Ezz` multi-episode ranges)
+
+The filename-title check tolerates cosmetic differences that don't represent a real mismatch: dot-delimited release names (`Show.S01E02.Episode.Title.mkv`), straight vs. curly quotes and dashes, and roman vs. arabic numerals in a parenthetical suffix (`(I)` vs. `(1)`).
 
 ## Features
 
 - Audits enabled movie and TV libraries from Jellyfin
 - Produces CSV output for spreadsheet-style review
 - Produces a static HTML dashboard with library and check drill-down pages
+- Report tables show a live row count next to each heading that updates as you search, and columns auto-size to their content
+- Report navigation shows the audited server's name
 - Supports filtering by library, finding category, and severity
 - Supports auditing one server, all configured servers, or comparing two servers
 - Uses normalized data models to keep audit logic separate from API and report code
@@ -152,10 +157,13 @@ By default, reports are written under `audit_results\`.
 - `config.py` - application and server configuration
 - `jellyfin.py` - Jellyfin API client
 - `models.py` - normalized data models
-- `media.py` - media and filesystem helpers
+- `media.py` - media and filesystem helpers, including filename-based episode title parsing
 - `audit.py` / `audit_types.py` - audit rules and finding types
 - `reports\` - CSV and static HTML report generation
 - `comparison\` - cross-server comparison report generation
+- `output_layout.py` - shared output directory and site-index layout helpers
+- `report_filters.py` - shared category/severity filtering for report output
+- `report_theme.py` - shared dark/light theme toggle markup and script
 - `tests\` - unit tests
 
 ## Development
