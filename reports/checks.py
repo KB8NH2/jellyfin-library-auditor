@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from media import expected_episode_title_from_filename
+from media import expected_movie_title_from_filename
 
 from . import templates
 
@@ -68,6 +69,8 @@ def _table_headers(check_name: str) -> tuple[str, ...]:
         return ("Library", "Title", "Series", "Details")
     if check_name == "mismatched_episode_filename_title":
         return ("Library", "Series", "Season", "Episode", "Title", "Suggested Title (Filename)")
+    if check_name == "mismatched_movie_filename_title":
+        return ("Library", "Title", "Suggested Title (Filename)")
     return DEFAULT_TABLE_HEADERS
 
 
@@ -89,6 +92,9 @@ def _check_rows(
         item = templates.media_item_from_findings(media_findings)
         if check_name == "mismatched_episode_filename_title":
             rows.append(_mismatched_episode_filename_title_row(item, media_findings, site_links=site_links))
+            continue
+        if check_name == "mismatched_movie_filename_title":
+            rows.append(_mismatched_movie_filename_title_row(item, media_findings, site_links=site_links))
             continue
         rows.append(
             "\n".join(
@@ -121,6 +127,25 @@ def _mismatched_episode_filename_title_row(
             f"            <td>{templates.escape(item.series_name or '')}</td>",
             f'            <td data-sort-value="{templates.escape(templates.season_sort_value(item))}">{templates.escape(item.season_name or "")}</td>',
             f'            <td data-sort-value="{templates.escape(templates.episode_sort_value(item))}">{"" if item.episode_number is None else item.episode_number}</td>',
+            f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(item.title)}</a></td>',
+            f"            <td>{templates.escape(suggested_title)}</td>",
+            "          </tr>",
+        )
+    )
+
+
+def _mismatched_movie_filename_title_row(
+    item: templates.MediaItem,
+    media_findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+) -> str:
+    """Return one table row for the mismatched movie filename title check."""
+    suggested_title = expected_movie_title_from_filename(item) or ""
+    return "\n".join(
+        (
+            f'          <tr data-search-row data-search="{templates.row_search_text(media_findings)}">',
+            f'            <td data-sort-value="{templates.escape(templates.check_row_library_sort_value(item))}"><a href="{templates.library_page_href(item.library, site_links=site_links, relative_prefix="../")}">{templates.escape(item.library)}</a></td>',
             f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(item.title)}</a></td>',
             f"            <td>{templates.escape(suggested_title)}</td>",
             "          </tr>",

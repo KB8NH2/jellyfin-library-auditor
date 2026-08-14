@@ -41,7 +41,7 @@ RELEASE_TAG_PATTERN = re.compile(
     r"x264|x265|h264|h265|hevc|aac|ac3|dts|flac"
     r")\b"
 )
-EPISODE_TITLE_STRIP_CHARACTERS = " -_.[]({}:"
+TITLE_STRIP_CHARACTERS = " -_.[]({}:"
 PRIMARY_IMAGE_TAG = "Primary"
 BACKDROP_IMAGE_TAG = "Backdrop"
 THUMB_IMAGE_TAG = "Thumb"
@@ -327,9 +327,47 @@ def expected_episode_title_from_filename(item: MediaItem) -> str | None:
     if tag_match is not None:
         remainder = remainder[: tag_match.start()]
 
-    remainder = remainder.strip(EPISODE_TITLE_STRIP_CHARACTERS)
+    remainder = remainder.strip(TITLE_STRIP_CHARACTERS)
     remainder = re.sub(r"\s+", " ", remainder).strip()
     return remainder or None
+
+
+def expected_movie_title_from_filename(item: MediaItem) -> str | None:
+    """Return the movie title implied by the filename's Jellyfin naming.
+
+    Jellyfin's movie naming convention is ``Movie Name (Year)``, optionally
+    followed by an edition, extra, or release-tag suffix, e.g.
+    ``Movie Name (Year) - Director's Cut.mkv``. Dot-delimited release names
+    that omit the parentheses (e.g. ``Movie.Name.Year.1080p.mkv``) are also
+    recognized. Jellyfin strips the year (and anything after it) out of the
+    title itself, so this locates the year using the item's known release
+    year and returns the text that precedes it, with separators trimmed away.
+    A parenthesized year is preferred over a bare one so titles that happen to
+    contain a number matching the release year (e.g. "Fantasia 2000 (2000)")
+    aren't truncated at the in-title occurrence.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        The movie title segment implied by the filename, or ``None`` when the
+        filename has no recognizable year marker or no title text precedes
+        it.
+    """
+    if not item.is_movie or item.year is None:
+        return None
+
+    stem = item.path.stem
+    strict_year_pattern = re.compile(rf"\(\s*{item.year}\s*\)")
+    loose_year_pattern = re.compile(rf"(?<!\d){item.year}(?!\d)")
+    year_match = strict_year_pattern.search(stem) or loose_year_pattern.search(stem)
+    if year_match is None:
+        return None
+
+    base = stem[: year_match.start()].replace("_", " ").replace(".", " ")
+    base = base.strip(TITLE_STRIP_CHARACTERS)
+    base = re.sub(r"\s+", " ", base).strip()
+    return base or None
 
 
 # Video helpers

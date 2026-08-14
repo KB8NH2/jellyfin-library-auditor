@@ -31,6 +31,7 @@ CHECK_DISPLAY_LABELS = {
     "unknown_audio_codec": "Unknown Audio Codec",
     "hdr_video": "HDR Video",
     "mismatched_episode_filename_title": "Mismatched Episode Filename Title",
+    "mismatched_movie_filename_title": "Mismatched Movie Filename Title",
 }
 CHECK_DISPLAY_ORDER = (
     "missing_primary_image",
