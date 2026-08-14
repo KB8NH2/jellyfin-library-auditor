@@ -271,9 +271,13 @@ def _normalized_title(value: str) -> str:
     instead of collapsing into a run-together "swat". Parenthesized roman
     numerals (e.g. "(I)") are converted to their arabic-numeral equivalent
     (e.g. "(1)") since Jellyfin metadata and filenames disagree on which form
-    to use for disambiguating same-titled entries.
+    to use for disambiguating same-titled entries. "&" is treated the same as
+    "and", and "+" the same as "/", since Jellyfin sometimes converts between
+    these when deriving filenames from metadata.
     """
     normalized_value = _ROMAN_NUMERAL_PAREN_PATTERN.sub(_roman_numeral_paren_to_arabic, value)
+    normalized_value = normalized_value.replace("&", " and ")
+    normalized_value = normalized_value.replace("+", "/")
     normalized_value = normalized_value.replace(".", " ")
     normalized_value = _EPISODE_TITLE_PUNCTUATION_PATTERN.sub("", normalized_value)
     normalized_value = re.sub(r"\s+", " ", normalized_value)
