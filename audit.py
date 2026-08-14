@@ -273,9 +273,12 @@ def _normalized_title(value: str) -> str:
     (e.g. "(1)") since Jellyfin metadata and filenames disagree on which form
     to use for disambiguating same-titled entries. "&" is treated the same as
     "and", and "+" the same as "/", since Jellyfin sometimes converts between
-    these when deriving filenames from metadata.
+    these when deriving filenames from metadata. The single-character
+    ellipsis ("…") is treated the same as three literal periods ("..."),
+    since Jellyfin metadata and filenames disagree on which form to use.
     """
     normalized_value = _ROMAN_NUMERAL_PAREN_PATTERN.sub(_roman_numeral_paren_to_arabic, value)
+    normalized_value = normalized_value.replace("…", "...")
     normalized_value = normalized_value.replace("&", " and ")
     normalized_value = normalized_value.replace("+", "/")
     normalized_value = normalized_value.replace(".", " ")

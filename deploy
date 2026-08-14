@@ -1,7 +1,7 @@
 #!/bin/bash
-rsync -ax *.py servers.toml jellyfin1:auditor/
-rsync -ax reports/*.py jellyfin1:auditor/reports/
-rsync -ax comparison/*.py jellyfin1:auditor/comparison/
-rsync -ax *.py servers.toml mediaserver:auditor/
-rsync -ax reports/*.py mediaserver:auditor/reports/
-rsync -ax comparison/*.py mediaserver:auditor/comparison/
+rsync -axv *.py servers.toml jellyfin1:auditor/
+rsync -axv reports/*.py jellyfin1:auditor/reports/
+rsync -axv comparison/*.py jellyfin1:auditor/comparison/
+rsync -axv *.py servers.toml mediaserver:auditor/
+rsync -axv reports/*.py mediaserver:auditor/reports/
+rsync -axv comparison/*.py mediaserver:auditor/comparison/

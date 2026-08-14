@@ -34,14 +34,14 @@ GENERIC_NFO_FILENAMES = (
     "tvshow.nfo",
     "season.nfo",
 )
-RELEASE_TAG_PATTERN = re.compile(
-    r"(?i)\b("
+RELEASE_TAG_TOKEN_PATTERN = re.compile(
+    r"(?i)^("
     r"2160p|1080p|720p|480p|4k|"
     r"hdtv|web[- ]?dl|webrip|web|bluray|brrip|bdrip|dvdrip|hdrip|"
     r"x264|x265|h264|h265|hevc|aac|ac3|dts|flac"
-    r")\b"
+    r")(-\S+)?$"
 )
-TITLE_STRIP_CHARACTERS = " -_.[]({}:"
+TITLE_STRIP_CHARACTERS = " -_.[]{}:"
 PRIMARY_IMAGE_TAG = "Primary"
 BACKDROP_IMAGE_TAG = "Backdrop"
 THUMB_IMAGE_TAG = "Thumb"
@@ -323,13 +323,54 @@ def expected_episode_title_from_filename(item: MediaItem) -> str | None:
         return None
 
     remainder = stem[marker_match.end() :].replace("_", " ").replace(".", " ")
-    tag_match = RELEASE_TAG_PATTERN.search(remainder)
-    if tag_match is not None:
-        remainder = remainder[: tag_match.start()]
+    remainder = _strip_trailing_release_tags(remainder)
 
     remainder = remainder.strip(TITLE_STRIP_CHARACTERS)
     remainder = re.sub(r"\s+", " ", remainder).strip()
     return remainder or None
+
+
+def _strip_trailing_release_tags(remainder: str) -> str:
+    """Return ``remainder`` with a genuine trailing release-tag run removed.
+
+    A release tag word (e.g. "WEB", "1080p") is also a plausible word
+    anywhere in an actual episode title (e.g. "Spider in the Web", or
+    "Curious George, Web Master + The Big Sleepy"), so this only strips tag
+    words that form a contiguous run at the very end of the remainder - real
+    release info always sits immediately before the file extension, never
+    buried mid-title. Words are matched whole (optionally with a
+    "-GROUPNAME" release-group suffix chained onto the last tag, e.g.
+    "x264-GROUP") rather than as a substring search, so a title word that
+    merely contains a tag-like substring is never mistaken for one.
+
+    A trailing run consisting of just one bare tag word (no attached
+    release-group suffix) is still left alone even though it matches,
+    since that single word is equally plausible as the last word of a real
+    title (e.g. "Spider in the Web", "The Web (1)" - the latter's "(1)"
+    copy marker doesn't itself look like a tag, so the run there is empty
+    and nothing is stripped at all). A run of two or more tag words, or a
+    single tag word with a release-group suffix attached, is unambiguous
+    release info and gets stripped.
+    """
+    words = remainder.split()
+
+    trailing_tag_count = 0
+    trailing_has_group_suffix = False
+    for word in reversed(words):
+        match = RELEASE_TAG_TOKEN_PATTERN.match(word)
+        if match is None:
+            break
+        trailing_tag_count += 1
+        if match.group(2):
+            trailing_has_group_suffix = True
+
+    if trailing_tag_count == 0:
+        return remainder
+    if trailing_tag_count == 1 and not trailing_has_group_suffix:
+        return remainder
+
+    kept_words = words[: len(words) - trailing_tag_count]
+    return " ".join(kept_words)
 
 
 def expected_movie_title_from_filename(item: MediaItem) -> str | None:
