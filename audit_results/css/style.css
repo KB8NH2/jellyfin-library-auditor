@@ -104,5 +104,6 @@ a:hover { text-decoration: underline; }
 .status-label { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
 .status-present { color: var(--success); }
 .status-missing { color: var(--danger); }
+.status-planned { color: var(--accent); }
 .empty-row td { color: var(--muted); }
 @media (max-width: 900px) { .page-shell { padding: 16px; } .page-header-card, .toolbar-card, .section-card, .about-card { padding: 14px; } .theme-toggle { margin-left: 0; width: 100%; justify-content: space-between; } }

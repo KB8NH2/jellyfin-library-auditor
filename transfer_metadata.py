@@ -10,9 +10,12 @@ pointed at.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from datetime import datetime
 import logging
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from config import ConfigError
@@ -22,6 +25,12 @@ from jellyfin import JellyfinError
 
 
 LOGGER = logging.getLogger("transfer_metadata")
+
+# Written alongside the console output for every transfer attempt, so a
+# nightly/unattended --yes run (which nobody is watching a terminal for)
+# still leaves a persistent record of what changed and what didn't. Appended
+# to, never truncated, so history accumulates across runs.
+METADATA_TRANSFER_LOG_FILE = Path("metadata_transfer.log")
 
 TRANSFERABLE_METADATA_FIELDS = (
     "Name",
@@ -85,6 +94,26 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def _log_line(message: str, *, error: bool = False) -> None:
+    """Emit one line of transfer output to the console and to the log file.
+
+    Console output stays exactly as before (``print`` for normal lines,
+    the logger for errors, matching whatever handler ``configure_logging``
+    set up) - this only adds a persistent, append-only copy in
+    ``METADATA_TRANSFER_LOG_FILE`` so the same information survives an
+    unattended run nobody watched the console for.
+    """
+    if error:
+        LOGGER.error(message)
+    else:
+        print(message)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    level = "ERROR" if error else "INFO"
+    with METADATA_TRANSFER_LOG_FILE.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"{timestamp} {level} transfer_metadata: {message}\n")
 
 
 def build_merged_item_dto(
@@ -156,6 +185,90 @@ def _skipped_null_source_fields(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class TransferPlan:
+    """A computed, not-yet-applied metadata transfer for one item pair.
+
+    Separating planning (read both items, compute the merge, decide whether
+    it's safe) from applying (the actual write) lets callers preview a
+    transfer - or many transfers - before committing to any of them.
+    """
+
+    from_item_id: str
+    to_item_id: str
+    source_name: str
+    destination_name: str
+    merged_dto: dict[str, Any]
+    changes: tuple[tuple[str, Any, Any], ...]
+    skipped_fields: tuple[str, ...]
+    rejected_reason: str | None
+
+    @property
+    def has_changes(self) -> bool:
+        """Return whether applying this plan would change anything."""
+        return bool(self.changes)
+
+    @property
+    def is_rejected(self) -> bool:
+        """Return whether this plan failed the pre-write safety check."""
+        return self.rejected_reason is not None
+
+
+def plan_transfer(
+    from_client: JellyfinClient,
+    to_client: JellyfinClient,
+    from_item_id: str,
+    to_item_id: str,
+) -> TransferPlan:
+    """Fetch both items and compute their merge, without writing anything.
+
+    Args:
+        from_client: Client for the source server.
+        to_client: Client for the destination server.
+        from_item_id: Jellyfin item identifier on the source server.
+        to_item_id: Jellyfin item identifier on the destination server.
+
+    Returns:
+        A plan describing what would change and whether it's safe to apply.
+    """
+    source_dto = from_client.get_item(from_item_id)
+    destination_dto = to_client.get_item(to_item_id)
+    merged_dto = build_merged_item_dto(source_dto, destination_dto)
+
+    missing_required_fields = tuple(
+        field for field in REQUIRED_NON_EMPTY_FIELDS if not merged_dto.get(field)
+    )
+    rejected_reason = (
+        "the destination item is missing required field(s) "
+        f"{', '.join(missing_required_fields)}. Sending this update would clear "
+        "them on the server instead of leaving them alone. This usually means "
+        "Jellyfin's response for this item didn't include those fields."
+        if missing_required_fields
+        else None
+    )
+
+    return TransferPlan(
+        from_item_id=from_item_id,
+        to_item_id=to_item_id,
+        source_name=str(source_dto.get("Name", from_item_id)),
+        destination_name=str(destination_dto.get("Name", to_item_id)),
+        merged_dto=merged_dto,
+        changes=_changed_fields(destination_dto, merged_dto),
+        skipped_fields=_skipped_null_source_fields(source_dto, destination_dto),
+        rejected_reason=rejected_reason,
+    )
+
+
+def apply_transfer(to_client: JellyfinClient, plan: TransferPlan) -> None:
+    """Write a previously computed, accepted plan to the destination server.
+
+    Args:
+        to_client: Client for the destination server.
+        plan: A plan from :func:`plan_transfer` that is not rejected.
+    """
+    to_client.update_item(plan.to_item_id, plan.merged_dto)
+
+
 def transfer_metadata(
     *,
     from_server_key: str,
@@ -182,63 +295,49 @@ def transfer_metadata(
         from_server = config.servers.get(from_server_key)
         to_server = config.servers.get(to_server_key)
     except ConfigError as error:
-        LOGGER.error("%s", error)
+        _log_line(str(error), error=True)
         return 2
 
     try:
         with JellyfinClient(from_server) as from_client, JellyfinClient(to_server) as to_client:
-            source_dto = from_client.get_item(from_item_id)
-            destination_dto = to_client.get_item(to_item_id)
-            merged_dto = build_merged_item_dto(source_dto, destination_dto)
-            missing_required_fields = tuple(
-                field for field in REQUIRED_NON_EMPTY_FIELDS if not merged_dto.get(field)
-            )
-            if missing_required_fields:
-                LOGGER.error(
-                    "Refusing to update %s: the destination item is missing required "
-                    "field(s) %s. Sending this update would clear them on the server "
-                    "instead of leaving them alone. This usually means Jellyfin's "
-                    "response for this item didn't include those fields.",
-                    to_item_id,
-                    ", ".join(missing_required_fields),
-                )
+            plan = plan_transfer(from_client, to_client, from_item_id, to_item_id)
+
+            _log_line(f"Transfer metadata: {from_server.name} -> {to_server.name}")
+            _log_line(f"  Source item:      {plan.source_name!r} ({from_item_id})")
+            _log_line(f"  Destination item: {plan.destination_name!r} ({to_item_id})")
+
+            if plan.is_rejected:
+                _log_line(f"Refusing to update {to_item_id}: {plan.rejected_reason}", error=True)
                 return 1
 
-            changes = _changed_fields(destination_dto, merged_dto)
-            skipped_fields = _skipped_null_source_fields(source_dto, destination_dto)
-
-            print(f"Transfer metadata: {from_server.name} -> {to_server.name}")
-            print(f"  Source item:      {source_dto.get('Name', from_item_id)!r} ({from_item_id})")
-            print(f"  Destination item: {destination_dto.get('Name', to_item_id)!r} ({to_item_id})")
-
-            if not changes:
-                print("No transferable fields differ. Nothing to do.")
-                if skipped_fields:
-                    print(
+            if not plan.has_changes:
+                _log_line("No transferable fields differ. Nothing to do.")
+                if plan.skipped_fields:
+                    _log_line(
                         "  Note: the source server has no value for these fields, so "
-                        f"the destination's existing value was kept: {', '.join(skipped_fields)}"
+                        f"the destination's existing value was kept: {', '.join(plan.skipped_fields)}"
                     )
                 return 0
 
-            print("  Fields that will change:")
-            for field, old_value, new_value in changes:
-                print(f"    {field}: {old_value!r} -> {new_value!r}")
-            if skipped_fields:
-                print(
+            _log_line("  Fields that will change:")
+            for field, old_value, new_value in plan.changes:
+                _log_line(f"    {field}: {old_value!r} -> {new_value!r}")
+            if plan.skipped_fields:
+                _log_line(
                     "  Note: the source server has no value for these fields, so "
-                    f"the destination's existing value was kept: {', '.join(skipped_fields)}"
+                    f"the destination's existing value was kept: {', '.join(plan.skipped_fields)}"
                 )
 
             if not assume_yes:
                 response = input("Proceed with metadata transfer? [y/N] ").strip().lower()
                 if response not in {"y", "yes"}:
-                    print("Aborted.")
+                    _log_line("Aborted.")
                     return 1
 
-            to_client.update_item(to_item_id, merged_dto)
-            print("Metadata transfer complete.")
+            apply_transfer(to_client, plan)
+            _log_line("Metadata transfer complete.")
     except JellyfinError as error:
-        LOGGER.error("%s", error)
+        _log_line(str(error), error=True)
         return 1
 
     return 0

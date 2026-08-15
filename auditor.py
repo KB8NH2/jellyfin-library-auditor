@@ -19,6 +19,8 @@ from audit import audit_media_item
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
+from comparison import MetadataTransferResult
+from comparison import mismatched_metadata_transfer_targets
 from comparison import write_comparison_reports
 from config import ConfigError
 from config import ProcessingConfig
@@ -39,6 +41,7 @@ from report_filters import filter_report_output
 from reports import write_csv_report, write_html_report
 from results import AuditServerResult
 from results import LibraryAuditResult
+import transfer_metadata
 
 
 LOGGER = logging.getLogger("auditor")
@@ -61,6 +64,9 @@ class AuditRunOptions:
     library_names: tuple[str, ...]
     categories: frozenset[AuditCategory] | None
     severities: frozenset[AuditSeverity] | None
+    transfer_metadata: bool
+    transfer_metadata_dry_run: bool
+    transfer_metadata_yes: bool
 
 
 def configure_logging() -> None:
@@ -69,6 +75,22 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def _enable_metadata_transfer_file_logging() -> None:
+    """Persist this run's log output to the shared metadata-transfer log file.
+
+    Only attached for --transfer-metadata runs, not every audit, so the log
+    file only ever contains transfer-relevant history rather than routine
+    audit noise. Uses the same file transfer_metadata.py's own CLI writes to,
+    so a nightly --compare --transfer-metadata run and a manual one-off
+    transfer via the report's copy-command button share one audit trail.
+    """
+    file_handler = logging.FileHandler(
+        transfer_metadata.METADATA_TRANSFER_LOG_FILE, encoding="utf-8"
+    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    LOGGER.addHandler(file_handler)
 
 
 def audit_library(client: JellyfinClient, library: MediaLibrary) -> tuple[AuditFinding, ...]:
@@ -199,6 +221,13 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
     except argparse.ArgumentError as error:
         raise CommandLineUsageError(str(error)) from error
 
+    if args.transfer_metadata and args.compare is None:
+        raise CommandLineUsageError("--transfer-metadata requires --compare.")
+    if args.dry_run and not args.transfer_metadata:
+        raise CommandLineUsageError("--dry-run requires --transfer-metadata.")
+    if args.yes and not args.transfer_metadata:
+        raise CommandLineUsageError("--yes requires --transfer-metadata.")
+
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
         server_key=_normalize_optional_server_key(args.server),
@@ -209,6 +238,9 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         library_names=_normalize_requested_library_names(args.library),
         categories=_parse_categories(args.category),
         severities=_parse_severities(args.severity),
+        transfer_metadata=bool(args.transfer_metadata),
+        transfer_metadata_dry_run=bool(args.dry_run),
+        transfer_metadata_yes=bool(args.yes),
     )
 
 
@@ -244,6 +276,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         options = parse_args(argv)
+        if options.transfer_metadata:
+            _enable_metadata_transfer_file_logging()
         selected_server_keys, compare_server_key = _resolve_run_targets(options)
         include_configuration_snapshot = compare_server_key is not None
         results = tuple(
@@ -282,8 +316,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if should_write_html_site:
             for filtered_result in filtered_results:
                 write_html_report(filtered_result)
+        transfer_exit_code = 0
+        transfer_results: tuple[MetadataTransferResult, ...] | None = None
+        if compare_result is not None and options.transfer_metadata:
+            transfer_exit_code, transfer_results = _run_bulk_metadata_transfer(
+                results[0],
+                compare_result,
+                dry_run=options.transfer_metadata_dry_run,
+                assume_yes=options.transfer_metadata_yes,
+            )
         if compare_result is not None:
-            _write_comparison_site(results[0], compare_result)
+            _write_comparison_site(results[0], compare_result, transfer_results=transfer_results)
         if should_write_html_site:
             if output_root is None:
                 raise RuntimeError("Audit output root was not initialized.")
@@ -316,7 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for category, count in sorted(findings_by_category.items(), key=lambda entry: entry[0]):
             LOGGER.info("%s Findings in %s: %d", filtered_result.server_name, category.value, count)
 
-    return 0
+    return transfer_exit_code
 
 
 def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> LibraryAuditResult:
@@ -479,6 +522,26 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         metavar="SEVERITY",
         help="Filter findings by severity. Repeat the option for multiple severities.",
     )
+    parser.add_argument(
+        "--transfer-metadata",
+        action="store_true",
+        help=(
+            "Transfer metadata (title, overview, genres, provider IDs, etc.) for "
+            "every item with mismatched metadata from the base --server to the "
+            "--compare server. Requires --compare. Prompts once for confirmation "
+            "before writing anything, unless --yes is given."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --transfer-metadata, preview planned transfers without writing anything.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="With --transfer-metadata, skip the batch confirmation prompt.",
+    )
     return parser
 
 
@@ -534,12 +597,185 @@ def _select_server(config, server_key: str | None) -> ServerConfig:
 def _write_comparison_site(
     left_result: AuditServerResult,
     right_result: AuditServerResult,
+    *,
+    transfer_results: tuple[MetadataTransferResult, ...] | None = None,
 ) -> None:
     """Write comparison reports for two audited servers."""
     if left_result.server_key == right_result.server_key:
         raise CommandLineUsageError("--compare must target a different server.")
 
-    write_comparison_reports(left_result, right_result)
+    write_comparison_reports(left_result, right_result, transfer_results=transfer_results)
+
+
+def _run_bulk_metadata_transfer(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+    *,
+    dry_run: bool,
+    assume_yes: bool,
+) -> tuple[int, tuple[MetadataTransferResult, ...]]:
+    """Transfer metadata for every mismatched-metadata item pair between two servers.
+
+    Reuses the same source/destination pairing the comparison report shows,
+    so this only ever acts on items the "Mismatched Metadata" table would
+    also flag. Continues past a single item's failure or rejection rather
+    than aborting the whole batch, logging a summary at the end.
+
+    Args:
+        left_result: Completed audit results for the source server.
+        right_result: Completed audit results for the destination server.
+        dry_run: Preview planned transfers without writing anything.
+        assume_yes: Skip the batch confirmation prompt.
+
+    Returns:
+        A tuple of (exit code, per-item results). Exit code is ``0`` when
+        every attempted transfer succeeded (or nothing needed transferring),
+        ``1`` if any item was rejected or failed.
+    """
+    targets = mismatched_metadata_transfer_targets(left_result, right_result)
+    left_label = left_result.server_name or left_result.server_key or "left"
+    right_label = right_result.server_name or right_result.server_key or "right"
+
+    if not targets:
+        LOGGER.info("No mismatched metadata found between %s and %s.", left_label, right_label)
+        return 0, ()
+
+    LOGGER.info(
+        "%s metadata for %d item(s) from %s to %s.",
+        "Would transfer" if dry_run else "About to transfer",
+        len(targets),
+        left_label,
+        right_label,
+    )
+    if not dry_run and not assume_yes:
+        response = input(f"Transfer metadata for {len(targets)} item(s)? [y/N] ").strip().lower()
+        if response not in {"y", "yes"}:
+            LOGGER.info("Aborted.")
+            return 1, ()
+
+    config = get_config()
+    server_clients: dict[str, JellyfinClient] = {}
+    results: list[MetadataTransferResult] = []
+    transferred = 0
+    unchanged = 0
+    rejected = 0
+    failed = 0
+
+    try:
+        for target in targets:
+            try:
+                from_client = _cached_jellyfin_client(server_clients, config, target.left_server_key)
+                to_client = _cached_jellyfin_client(server_clients, config, target.right_server_key)
+                plan = transfer_metadata.plan_transfer(
+                    from_client, to_client, target.left_item_id, target.right_item_id
+                )
+            except (ConfigError, JellyfinError) as error:
+                failed += 1
+                LOGGER.error(
+                    "[%s] %s: failed to prepare transfer: %s",
+                    target.library, target.display_name, error,
+                )
+                results.append(
+                    MetadataTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="failed",
+                        detail=str(error),
+                    )
+                )
+                continue
+
+            if plan.is_rejected:
+                rejected += 1
+                LOGGER.error(
+                    "[%s] %s: refusing to update - %s",
+                    target.library, target.display_name, plan.rejected_reason,
+                )
+                results.append(
+                    MetadataTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="rejected",
+                        detail=plan.rejected_reason or "",
+                    )
+                )
+                continue
+
+            if not plan.has_changes:
+                unchanged += 1
+                LOGGER.info("[%s] %s: no transferable fields differ.", target.library, target.display_name)
+                results.append(
+                    MetadataTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="unchanged",
+                    )
+                )
+                continue
+
+            changed_fields = tuple(field for field, _, _ in plan.changes)
+            change_summary = ", ".join(changed_fields)
+            if dry_run:
+                transferred += 1
+                LOGGER.info("[%s] %s: would change %s", target.library, target.display_name, change_summary)
+                results.append(
+                    MetadataTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="would_transfer",
+                        changed_fields=changed_fields,
+                    )
+                )
+                continue
+
+            try:
+                transfer_metadata.apply_transfer(to_client, plan)
+            except JellyfinError as error:
+                failed += 1
+                LOGGER.error("[%s] %s: update failed: %s", target.library, target.display_name, error)
+                results.append(
+                    MetadataTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="failed",
+                        detail=str(error),
+                    )
+                )
+                continue
+
+            transferred += 1
+            LOGGER.info("[%s] %s: transferred %s", target.library, target.display_name, change_summary)
+            results.append(
+                MetadataTransferResult(
+                    library=target.library,
+                    display_name=target.display_name,
+                    status="transferred",
+                    changed_fields=changed_fields,
+                )
+            )
+    finally:
+        for client in server_clients.values():
+            client.close()
+
+    LOGGER.info(
+        "Metadata transfer summary: %d transferred, %d unchanged, %d rejected, %d failed (of %d total).",
+        transferred, unchanged, rejected, failed, len(targets),
+    )
+    exit_code = 1 if (rejected or failed) else 0
+    return exit_code, tuple(results)
+
+
+def _cached_jellyfin_client(
+    server_clients: dict[str, JellyfinClient],
+    config,
+    server_key: str,
+) -> JellyfinClient:
+    """Return a cached Jellyfin client for a server key, creating one if needed."""
+    client = server_clients.get(server_key)
+    if client is None:
+        client = JellyfinClient(config.servers.get(server_key))
+        server_clients[server_key] = client
+    return client
 
 
 def _resolve_run_targets(options: AuditRunOptions) -> tuple[tuple[str | None, ...], str | None]:

@@ -46,12 +46,94 @@ class MatchedPair:
     matched_by_filename: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class MetadataTransferTarget:
+    """One item pair whose metadata can be transferred from left to right."""
+
+    library: str
+    display_name: str
+    left_server_key: str
+    left_item_id: str
+    right_server_key: str
+    right_item_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataTransferResult:
+    """Outcome of one item's metadata transfer attempt in a --transfer-metadata run.
+
+    Attributes:
+        library: Library the item belongs to.
+        display_name: Filename or title shown for the item.
+        status: One of ``"transferred"``, ``"would_transfer"`` (--dry-run),
+            ``"unchanged"``, ``"rejected"``, or ``"failed"``.
+        changed_fields: Field names that changed or would change.
+        detail: Human-readable reason for a rejection or failure, empty otherwise.
+    """
+
+    library: str
+    display_name: str
+    status: str
+    changed_fields: tuple[str, ...] = ()
+    detail: str = ""
+
+
+def mismatched_metadata_transfer_targets(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+) -> tuple[MetadataTransferTarget, ...]:
+    """Return one transfer target for every item with mismatched metadata.
+
+    Reuses the same comparison used to build the "Mismatched Metadata" report
+    table, so this always matches what that report shows. Pairs missing a
+    configured server key (only possible when a caller builds
+    ``AuditServerResult`` without one, e.g. in ad hoc scripting) are skipped
+    since a transfer command can't be built without one.
+
+    Args:
+        left_result: Completed audit results for the source server.
+        right_result: Completed audit results for the destination server.
+
+    Returns:
+        One target per mismatched-metadata item pair, in the same order the
+        report displays them.
+    """
+    comparison = _build_comparison(left_result, right_result)
+    targets: list[MetadataTransferTarget] = []
+    for entry in comparison["mismatched_metadata"]:
+        library_name, filename, left_item_id, right_item_id, left_server_key, right_server_key = entry[:6]
+        if not left_server_key or not right_server_key:
+            continue
+        targets.append(
+            MetadataTransferTarget(
+                library=library_name,
+                display_name=filename,
+                left_server_key=left_server_key,
+                left_item_id=left_item_id,
+                right_server_key=right_server_key,
+                right_item_id=right_item_id,
+            )
+        )
+    return tuple(targets)
+
+
 def write_comparison_reports(
     left_result: AuditServerResult,
     right_result: AuditServerResult,
     output_dir: Path | None = None,
+    *,
+    transfer_results: tuple[MetadataTransferResult, ...] | None = None,
 ) -> Path:
-    """Write a static comparison site for two completed audit results."""
+    """Write a static comparison site for two completed audit results.
+
+    Args:
+        left_result: Completed audit results for the source server.
+        right_result: Completed audit results for the destination server.
+        output_dir: Optional output directory override.
+        transfer_results: Per-item outcomes from a --transfer-metadata run to
+            include as a "Transfer Results" table on the libraries page.
+            ``None`` omits the table entirely (the flag wasn't used).
+    """
     root_dir = _default_output_dir() if output_dir is None else output_dir
     output_root = root_dir.parent
     if root_dir.exists():
@@ -73,7 +155,7 @@ def write_comparison_reports(
     (root_dir / "libraries.html").write_text(
         _page_document(
             title="Library Comparison",
-            body=_libraries_page(left_result, right_result, comparison),
+            body=_libraries_page(left_result, right_result, comparison, transfer_results=transfer_results),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -723,7 +805,13 @@ def _index_page(left_result: AuditServerResult, right_result: AuditServerResult,
     )
 
 
-def _libraries_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
+def _libraries_page(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+    comparison: dict[str, object],
+    *,
+    transfer_results: tuple[MetadataTransferResult, ...] | None = None,
+) -> str:
     """Return libraries comparison page body."""
     left_server_name = left_result.server_name or left_result.server_key or "Left"
     right_server_name = right_result.server_name or right_result.server_key or "Right"
@@ -756,61 +844,63 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
             key=lambda entry: (entry[0].casefold(), entry[-1]),
         )
     )
+    sections = [
+        _simple_table_section(
+            "Libraries By Server",
+            (left_server_name, right_server_name),
+            _library_list_rows(left_result, right_result),
+        ),
+        _simple_table_section(
+            f"Media Missing From {escape(left_server_name)}",
+            ("Library", "Title", "Series", "Season", "Episode"),
+            missing_left_rows,
+            include_hide_same=False,
+        ),
+        _simple_table_section(
+            f"Media Missing From {escape(right_server_name)}",
+            ("Library", "Title", "Series", "Season", "Episode"),
+            missing_right_rows,
+            include_hide_same=False,
+        ),
+        _simple_table_section(
+            "Missing Seasons",
+            ("Library", "Series", left_server_name, right_server_name),
+            missing_seasons_rows,
+            include_hide_same=True,
+        ),
+        _simple_table_section(
+            "Missing Episodes",
+            ("Library", "Series", "Season", left_server_name, right_server_name),
+            missing_episodes_rows,
+            include_hide_same=True,
+        ),
+        _grouped_table_section(
+            "Mismatched Metadata",
+            ("Library", "Base Filename"),
+            (
+                "Title",
+                "Season Number",
+                "Episode Number",
+                "Episode Name",
+                "Year",
+                "Resolution",
+                "Video Codec",
+                "Audio Codec",
+            ),
+            left_server_name,
+            right_server_name,
+            mismatched_metadata_rows,
+            include_hide_same=False,
+            split_field="Episode Name",
+        ),
+    ]
+    if transfer_results is not None:
+        sections.append(_transfer_results_section(transfer_results))
+
     return _page_shell(
         "Libraries Comparison",
         "Library lists, missing media items, and missing TV seasons or episodes between both servers.",
-        "\n".join(
-            (
-                _simple_table_section(
-                    "Libraries By Server",
-                    (left_server_name, right_server_name),
-                    _library_list_rows(left_result, right_result),
-                ),
-                _simple_table_section(
-                    f"Media Missing From {escape(left_server_name)}",
-                    ("Library", "Title", "Series", "Season", "Episode"),
-                    missing_left_rows,
-                    include_hide_same=False,
-                ),
-                _simple_table_section(
-                    f"Media Missing From {escape(right_server_name)}",
-                    ("Library", "Title", "Series", "Season", "Episode"),
-                    missing_right_rows,
-                    include_hide_same=False,
-                ),
-                _simple_table_section(
-                    "Missing Seasons",
-                    ("Library", "Series", left_server_name, right_server_name),
-                    missing_seasons_rows,
-                    include_hide_same=True,
-                ),
-                _simple_table_section(
-                    "Missing Episodes",
-                    ("Library", "Series", "Season", left_server_name, right_server_name),
-                    missing_episodes_rows,
-                    include_hide_same=True,
-                ),
-                _grouped_table_section(
-                    "Mismatched Metadata",
-                    ("Library", "Base Filename"),
-                    (
-                        "Title",
-                        "Season Number",
-                        "Episode Number",
-                        "Episode Name",
-                        "Year",
-                        "Resolution",
-                        "Video Codec",
-                        "Audio Codec",
-                    ),
-                    left_server_name,
-                    right_server_name,
-                    mismatched_metadata_rows,
-                    include_hide_same=False,
-                    split_field="Episode Name",
-                ),
-            )
-        ),
+        "\n".join(sections),
         current_nav="Libraries",
         include_search=True,
     )
@@ -1067,6 +1157,46 @@ def _simple_table_section(
             "    </div>",
             "  </section>",
         )
+    )
+
+
+_TRANSFER_STATUS_LABELS = {
+    "transferred": '<span class="status-label status-present">&#10003; transferred</span>',
+    "would_transfer": '<span class="status-label status-planned">&#8594; would transfer</span>',
+    "unchanged": '<span class="status-label muted-text">unchanged</span>',
+    "rejected": '<span class="status-label status-missing">&#10007; rejected</span>',
+    "failed": '<span class="status-label status-missing">&#10007; failed</span>',
+}
+
+
+def _transfer_result_row(result: MetadataTransferResult) -> str:
+    """Return one row for the Transfer Results table."""
+    status_html = _TRANSFER_STATUS_LABELS.get(result.status, escape(result.status))
+    changed_fields_text = ", ".join(result.changed_fields)
+    search_text = " ".join(
+        part
+        for part in (result.library, result.display_name, result.status, result.detail)
+        if part
+    ).lower()
+    return (
+        f'<tr data-search-row data-search="{escape(search_text)}">'
+        f"<td>{escape(result.library)}</td>"
+        f"<td>{escape(result.display_name)}</td>"
+        f"<td>{status_html}</td>"
+        f"<td>{escape(changed_fields_text)}</td>"
+        f"<td>{escape(result.detail)}</td>"
+        "</tr>"
+    )
+
+
+def _transfer_results_section(results: tuple[MetadataTransferResult, ...]) -> str:
+    """Return the Transfer Results table section for a --transfer-metadata run."""
+    rows = tuple(_transfer_result_row(result) for result in results)
+    return _simple_table_section(
+        "Transfer Results",
+        ("Library", "Item", "Status", "Changed Fields", "Detail"),
+        rows,
+        include_hide_same=False,
     )
 
 

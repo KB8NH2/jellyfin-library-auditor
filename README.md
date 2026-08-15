@@ -17,8 +17,9 @@ The current implementation checks:
 - Missing numbered TV seasons within a series
 - Missing numbered TV episodes within a season
 - TV episode metadata titles that don't match the title implied by the filename's `SxxExx` naming (including `SxxEyy-Ezz` multi-episode ranges)
+- Movie metadata titles that don't match the title implied by the filename's `(Year)` naming
 
-The filename-title check tolerates cosmetic differences that don't represent a real mismatch: dot-delimited release names (`Show.S01E02.Episode.Title.mkv`), straight vs. curly quotes and dashes, and roman vs. arabic numerals in a parenthetical suffix (`(I)` vs. `(1)`).
+The filename-title checks tolerate cosmetic differences that don't represent a real mismatch: dot-delimited release names (`Show.S01E02.Episode.Title.mkv`), straight vs. curly quotes and dashes, roman vs. arabic numerals in a parenthetical suffix (`(I)` vs. `(1)`), `&` vs. `and`, `+` vs. `/`, a Unicode ellipsis (`…`) vs. three literal periods (`...`), and leading parenthetical text that's actually part of the title (e.g. `(Dis)Members Only`). Release-quality tags in a filename (`1080p`, `WEB-DL`, `x264`, etc.) are stripped only when they form a genuine trailing run of tags, so an ordinary title word that happens to look like one - an episode called "Spider in the Web," for example - isn't mistaken for one.
 
 ## Features
 
@@ -29,13 +30,14 @@ The filename-title check tolerates cosmetic differences that don't represent a r
 - Report navigation shows the audited server's name
 - Supports filtering by library, finding category, and severity
 - Supports auditing one server, all configured servers, or comparing two servers
+- Can transfer mismatched metadata (title, overview, genres, cast, provider IDs, ratings, etc. - never images) from one server to another, either one item at a time from the comparison report or in bulk across a whole comparison run
 - Uses normalized data models to keep audit logic separate from API and report code
 
 ## Requirements
 
 - Python 3.12+
 - A reachable Jellyfin server
-- A Jellyfin API key for each server you want to audit
+- A Jellyfin API key for each server you want to audit - an administrator key if you plan to use metadata transfer, since that writes to the destination server
 
 Install dependencies:
 
@@ -129,6 +131,13 @@ Audit every configured server:
 python auditor.py --all
 ```
 
+Transfer every mismatched metadata item found by `--compare` from the base server to the compared server, previewing first and then committing:
+
+```powershell
+python auditor.py --server main --compare backup --transfer-metadata --dry-run
+python auditor.py --server main --compare backup --transfer-metadata
+```
+
 ### CLI options
 
 | Option | Description |
@@ -141,6 +150,37 @@ python auditor.py --all
 | `--library NAME` | Limit auditing to a library name; repeatable |
 | `--category CATEGORY` | Filter by category: `subtitles`, `artwork`, `metadata`, `video`, `audio`, `filesystem` |
 | `--severity SEVERITY` | Filter by severity: `info`, `warning`, `error` |
+| `--transfer-metadata` | Transfer metadata for every mismatched item from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing metadata between servers](#synchronizing-metadata-between-servers)) |
+| `--dry-run` | With `--transfer-metadata`, preview planned transfers without writing anything |
+| `--yes` | With `--transfer-metadata`, skip the batch confirmation prompt |
+
+## Synchronizing metadata between servers
+
+When `--compare` finds items whose metadata differs between the two servers (the "Mismatched Metadata" table), that metadata can be copied from the base server to the compared server - one item at a time from the report, or in bulk for the whole comparison.
+
+**What transfers:** title, original title, overview, genres, tags, studios, cast/crew, provider IDs (IMDb/TVDB/etc.), community rating, official rating, release date, year, and episode/season number. **What never transfers:** artwork/images, file path, and any other server-managed or read-only data.
+
+Every transfer - one-off or bulk - reads the full item from both servers, computes what would change, and refuses to write anything if the destination item's identity fields (`Id`, `Path`) would come back empty, since Jellyfin's update endpoint replaces an item's metadata wholesale rather than merging it.
+
+### One item at a time
+
+Each row in the comparison report's "Mismatched Metadata" table has a → button between the two servers' episode name columns. Clicking it copies a ready-made command to your clipboard:
+
+```powershell
+python transfer_metadata.py --from-server main --from-item <id> --to-server backup --to-item <id>
+```
+
+Paste and run it in a terminal. It prints the item names and a field-by-field diff, then asks for confirmation before writing (skip the prompt with `--yes`).
+
+### In bulk, across a whole comparison
+
+`auditor.py --transfer-metadata` walks every item in the "Mismatched Metadata" table and transfers each one, continuing past a single item's failure or rejection rather than aborting the whole batch. It asks for one confirmation covering the whole batch (skip it with `--yes` for unattended/scheduled runs), and `--dry-run` previews every planned change without writing anything.
+
+The comparison report gains a "Transfer Results" table (Libraries page) whenever `--transfer-metadata` was used, showing each item's outcome - transferred, would transfer (`--dry-run`), unchanged, rejected, or failed - along with which fields changed.
+
+Both the one-off command and the bulk flag append a record of every transfer to `metadata_transfer.log` in the working directory, so a scheduled/unattended run leaves an audit trail even if nobody was watching the console.
+
+**Given this writes to a live Jellyfin server, run `--dry-run` first and review the diff before trusting it on a real library, especially unattended.**
 
 ## Output
 
@@ -150,17 +190,19 @@ By default, reports are written under `audit_results\`.
 - `audit_results\<server>\index.html` - per-server HTML dashboard
 - `audit_results\<server>\audit_report.csv` - per-server CSV findings
 - `audit_results\comparison_results\index.html` - comparison dashboard when `--compare` is used
+- `metadata_transfer.log` - append-only record of every metadata transfer, written next to wherever `auditor.py --transfer-metadata` or `transfer_metadata.py` was run
 
 ## Project layout
 
-- `auditor.py` - CLI entry point and orchestration
+- `auditor.py` - CLI entry point and orchestration, including the bulk `--transfer-metadata` run
+- `transfer_metadata.py` - standalone CLI to transfer one item's metadata between two servers; also provides the plan/apply functions the bulk run uses
 - `config.py` - application and server configuration
-- `jellyfin.py` - Jellyfin API client
+- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata read/update calls transfers use)
 - `models.py` - normalized data models
 - `media.py` - media and filesystem helpers, including filename-based episode title parsing
 - `audit.py` / `audit_types.py` - audit rules and finding types
 - `reports\` - CSV and static HTML report generation
-- `comparison\` - cross-server comparison report generation
+- `comparison\` - cross-server comparison report generation, including the transfer button and Transfer Results table
 - `output_layout.py` - shared output directory and site-index layout helpers
 - `report_filters.py` - shared category/severity filtering for report output
 - `report_theme.py` - shared dark/light theme toggle markup and script
