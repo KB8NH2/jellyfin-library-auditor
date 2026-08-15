@@ -40,6 +40,13 @@ TRANSFERABLE_METADATA_FIELDS = (
     "ParentIndexNumber",
 )
 
+# Fields whose absence from the outgoing payload previously caused Jellyfin
+# to clear them on the server - including Path, which turned a real,
+# file-backed episode into a pathless "virtual" placeholder that Jellyfin's
+# library scanner then deleted outright. transfer_metadata() refuses to send
+# an update if any of these come back empty, rather than risk repeating that.
+REQUIRED_NON_EMPTY_FIELDS = ("Id", "Path")
+
 # Jellyfin's item-update endpoint replaces an item's metadata wholesale: any
 # field omitted from the request body gets cleared server-side, not left
 # alone. That makes an allowlist of "editable" fields dangerous - a field
@@ -128,6 +135,27 @@ def _changed_fields(
     )
 
 
+def _skipped_null_source_fields(
+    source_dto: Mapping[str, Any],
+    destination_dto: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return transferable fields the source has no value for.
+
+    Jellyfin returns an explicit ``null`` (or omits the key) for a field an
+    item doesn't have set. ``build_merged_item_dto`` treats that as "nothing
+    to copy" and keeps the destination's existing value rather than
+    clobbering it - which is safe, but silent. This surfaces those cases so
+    a field that looks like it "didn't transfer" can be told apart from one
+    that already matched: if it shows up here, the source server itself has
+    no value for that field on this item.
+    """
+    return tuple(
+        field
+        for field in TRANSFERABLE_METADATA_FIELDS
+        if source_dto.get(field) is None and destination_dto.get(field) is not None
+    )
+
+
 def transfer_metadata(
     *,
     from_server_key: str,
@@ -162,7 +190,22 @@ def transfer_metadata(
             source_dto = from_client.get_item(from_item_id)
             destination_dto = to_client.get_item(to_item_id)
             merged_dto = build_merged_item_dto(source_dto, destination_dto)
+            missing_required_fields = tuple(
+                field for field in REQUIRED_NON_EMPTY_FIELDS if not merged_dto.get(field)
+            )
+            if missing_required_fields:
+                LOGGER.error(
+                    "Refusing to update %s: the destination item is missing required "
+                    "field(s) %s. Sending this update would clear them on the server "
+                    "instead of leaving them alone. This usually means Jellyfin's "
+                    "response for this item didn't include those fields.",
+                    to_item_id,
+                    ", ".join(missing_required_fields),
+                )
+                return 1
+
             changes = _changed_fields(destination_dto, merged_dto)
+            skipped_fields = _skipped_null_source_fields(source_dto, destination_dto)
 
             print(f"Transfer metadata: {from_server.name} -> {to_server.name}")
             print(f"  Source item:      {source_dto.get('Name', from_item_id)!r} ({from_item_id})")
@@ -170,11 +213,21 @@ def transfer_metadata(
 
             if not changes:
                 print("No transferable fields differ. Nothing to do.")
+                if skipped_fields:
+                    print(
+                        "  Note: the source server has no value for these fields, so "
+                        f"the destination's existing value was kept: {', '.join(skipped_fields)}"
+                    )
                 return 0
 
             print("  Fields that will change:")
             for field, old_value, new_value in changes:
                 print(f"    {field}: {old_value!r} -> {new_value!r}")
+            if skipped_fields:
+                print(
+                    "  Note: the source server has no value for these fields, so "
+                    f"the destination's existing value was kept: {', '.join(skipped_fields)}"
+                )
 
             if not assume_yes:
                 response = input("Proceed with metadata transfer? [y/N] ").strip().lower()

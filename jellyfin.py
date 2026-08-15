@@ -45,6 +45,16 @@ ITEM_FIELDS = ",".join(
 )
 ITEM_DETAIL_FIELDS = ",".join(
     [
+        # Path and ProductionYear are gated behind an explicit Fields
+        # request in Jellyfin's API too (see ITEM_FIELDS above) - omitting
+        # them here previously meant get_item() silently returned a document
+        # missing those keys entirely, which then let a caller's "replace
+        # the whole item" update wipe them out on the server.
+        "Path",
+        "ProductionYear",
+        "RunTimeTicks",
+        "ImageTags",
+        "MediaStreams",
         "Overview",
         "Genres",
         "Tags",
