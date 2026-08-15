@@ -27,6 +27,9 @@ from results import LibraryComparisonSettings
 
 LIBRARIES_ENDPOINT = "/Library/MediaFolders"
 ITEMS_ENDPOINT = "/Items"
+ITEM_ENDPOINT_TEMPLATE = "/Items/{item_id}"
+USER_ITEM_ENDPOINT_TEMPLATE = "/Users/{user_id}/Items/{item_id}"
+USERS_ENDPOINT = "/Users"
 PING_ENDPOINT = "/System/Info/Public"
 SYSTEM_CONFIGURATION_ENDPOINT = "/System/Configuration"
 VIRTUAL_FOLDERS_ENDPOINT = "/Library/VirtualFolders"
@@ -38,6 +41,16 @@ ITEM_FIELDS = ",".join(
         "RunTimeTicks",
         "ImageTags",
         "MediaStreams",
+    ]
+)
+ITEM_DETAIL_FIELDS = ",".join(
+    [
+        "Overview",
+        "Genres",
+        "Tags",
+        "Studios",
+        "People",
+        "ProviderIds",
     ]
 )
 ITEM_TYPES = "Movie,Episode"
@@ -263,6 +276,7 @@ class JellyfinClient:
         self._server_url = server.url.rstrip("/")
         self._timeout = timeout_seconds
         self._page_size = page_size
+        self._cached_user_id: str | None = None
 
         self._session.headers.update(
             {
@@ -332,6 +346,73 @@ class JellyfinClient:
         """
         library = self._get_library_by_id(library_id)
         return self._get_library_items_for_library(library)
+
+    def get_item(self, item_id: str) -> dict[str, Any]:
+        """Return the full Jellyfin metadata document for one item.
+
+        Jellyfin's single-item lookup is scoped to a user (``/Users/{userId}/
+        Items/{itemId}``); the userId-less ``/Items/{itemId}`` route rejects
+        the request with a 400. This resolves and caches an administrator
+        user from the server to satisfy that requirement.
+
+        Args:
+            item_id: Jellyfin item identifier.
+
+        Returns:
+            The raw item JSON document as Jellyfin returns it, suitable for
+            round-tripping back through :meth:`update_item`.
+        """
+        user_id = self._resolve_admin_user_id()
+        return self._request(
+            USER_ITEM_ENDPOINT_TEMPLATE.format(user_id=user_id, item_id=item_id),
+            params={"Fields": ITEM_DETAIL_FIELDS},
+        )
+
+    def _resolve_admin_user_id(self) -> str:
+        """Return an administrator user id, resolving and caching it once."""
+        if self._cached_user_id is not None:
+            return self._cached_user_id
+
+        payload = self._request_payload("GET", USERS_ENDPOINT)
+        if not isinstance(payload, list) or not payload:
+            raise JellyfinResponseError(
+                "Jellyfin returned no users; cannot resolve a user context for item lookups."
+            )
+
+        selected_user: Mapping[str, Any] | None = None
+        for raw_user in payload:
+            if not isinstance(raw_user, Mapping):
+                continue
+            policy = raw_user.get("Policy")
+            if isinstance(policy, Mapping) and policy.get("IsAdministrator"):
+                selected_user = raw_user
+                break
+
+        if selected_user is None:
+            first_user = payload[0]
+            if not isinstance(first_user, Mapping):
+                raise JellyfinResponseError("Jellyfin returned an unexpected user entry.")
+            selected_user = first_user
+
+        user_id = self._get_required_str(selected_user, "Id", "user object")
+        self._cached_user_id = user_id
+        return user_id
+
+    def update_item(self, item_id: str, item_dto: Mapping[str, Any]) -> None:
+        """Replace one Jellyfin item's metadata with a full item document.
+
+        Args:
+            item_id: Jellyfin item identifier to update.
+            item_dto: Full item document, typically :meth:`get_item` output
+                with selected fields overwritten. Jellyfin's update endpoint
+                replaces the item's editable metadata wholesale rather than
+                merging a partial payload.
+        """
+        self._request_payload(
+            "POST",
+            ITEM_ENDPOINT_TEMPLATE.format(item_id=item_id),
+            json_body=item_dto,
+        )
 
     def get_server_user_experience_settings(self) -> tuple[ComparisonSetting, ...]:
         """Return selected server settings that can affect user-visible behavior."""
@@ -517,6 +598,7 @@ class JellyfinClient:
         path: str,
         *,
         params: Mapping[str, RequestParamValue] | None = None,
+        json_body: Any = None,
     ) -> Any:
         """Perform a Jellyfin REST request and decode any JSON response body."""
         url = self._build_url(path)
@@ -526,18 +608,24 @@ class JellyfinClient:
                 method=method,
                 url=url,
                 params=params,
+                json=json_body,
                 timeout=self._timeout,
             )
             response.raise_for_status()
         except requests.HTTPError as error:
             status_code = error.response.status_code if error.response is not None else "?"
+            error_detail = self._error_response_detail(error.response)
+            detail_suffix = f": {error_detail}" if error_detail else ""
             raise JellyfinRequestError(
-                f"Jellyfin request failed with status {status_code}: {method} {url}"
+                f"Jellyfin request failed with status {status_code}: {method} {url}{detail_suffix}"
             ) from error
         except requests.RequestException as error:
             raise JellyfinRequestError(
                 f"Jellyfin request failed: {method} {url}: {error}"
             ) from error
+
+        if not response.content:
+            return None
 
         try:
             return response.json()
@@ -545,6 +633,22 @@ class JellyfinClient:
             raise JellyfinResponseError(
                 f"Jellyfin returned invalid JSON for {method} {url}."
             ) from error
+
+    @staticmethod
+    def _error_response_detail(response: requests.Response | None) -> str:
+        """Return a truncated, single-line error body for a failed response."""
+        if response is None or not response.content:
+            return ""
+
+        text = response.text.strip()
+        if not text:
+            return ""
+
+        single_line = " ".join(text.split())
+        max_length = 500
+        if len(single_line) > max_length:
+            single_line = f"{single_line[:max_length]}..."
+        return single_line
 
     def _build_url(self, path: str) -> str:
         """Build an absolute Jellyfin API URL.

@@ -186,7 +186,11 @@ def _build_comparison(
             artwork_differences.append(pair)
         if has_english_subtitles(pair.left) != has_english_subtitles(pair.right):
             subtitle_differences.append(pair)
-        mismatch_row = _mismatched_metadata_row(pair)
+        mismatch_row = _mismatched_metadata_row(
+            pair,
+            left_result.server_key,
+            right_result.server_key,
+        )
         if mismatch_row is not None:
             mismatched_metadata.append(mismatch_row)
 
@@ -475,7 +479,11 @@ def _artwork_differs(left_item, right_item) -> bool:
     )
 
 
-def _mismatched_metadata_row(pair: MatchedPair) -> tuple[str, ...] | None:
+def _mismatched_metadata_row(
+    pair: MatchedPair,
+    left_server_key: str | None,
+    right_server_key: str | None,
+) -> tuple[str, ...] | None:
     """Return one side-by-side metadata comparison row for a matched pair, if any field differs.
 
     Covers TV season/episode identification (only meaningful when the pair was
@@ -516,6 +524,10 @@ def _mismatched_metadata_row(pair: MatchedPair) -> tuple[str, ...] | None:
     return (
         pair.library,
         pair.left.path.stem,
+        pair.left.id,
+        pair.right.id,
+        left_server_key or "",
+        right_server_key or "",
         left_title,
         right_title,
         left_season,
@@ -795,6 +807,7 @@ def _libraries_page(left_result: AuditServerResult, right_result: AuditServerRes
                     right_server_name,
                     mismatched_metadata_rows,
                     include_hide_same=False,
+                    split_field="Episode Name",
                 ),
             )
         ),
@@ -1066,6 +1079,8 @@ def _grouped_table_section(
     rows: tuple[str, ...],
     *,
     include_hide_same: bool = True,
+    split_field: str | None = None,
+    split_column_header: str = "",
 ) -> str:
     """Return one table section with a two-row grouped header.
 
@@ -1074,6 +1089,12 @@ def _grouped_table_section(
     the server names themselves. This keeps narrow per-server columns (e.g. a
     season number) from being stretched wide by a repeated "<field> on
     <server>" label.
+
+    When ``split_field`` matches one of ``paired_fields``, that field's header
+    spans a third column inserted between its left and right sub-columns,
+    labeled with ``split_column_header``. This is meant for a single action
+    column (e.g. a per-row transfer button) that belongs visually between two
+    compared values rather than being its own left/right pair.
     """
     column_index = 0
     solo_header_cells: list[str] = []
@@ -1086,12 +1107,22 @@ def _grouped_table_section(
     field_header_cells: list[str] = []
     server_header_cells: list[str] = []
     for field_label in paired_fields:
-        field_header_cells.append(f'<th colspan="2">{escape(field_label)}</th>')
-        for server_label in (left_server_name, right_server_name):
+        is_split = field_label == split_field
+        colspan = 3 if is_split else 2
+        field_header_cells.append(f'<th colspan="{colspan}">{escape(field_label)}</th>')
+        server_header_cells.append(
+            f'<th><button type="button" class="sort-button" data-column="{column_index}" onclick="sortReportTable(this)">{escape(left_server_name)}</button></th>'
+        )
+        column_index += 1
+        if is_split:
             server_header_cells.append(
-                f'<th><button type="button" class="sort-button" data-column="{column_index}" onclick="sortReportTable(this)">{escape(server_label)}</button></th>'
+                f'<th class="transfer-column-header">{escape(split_column_header)}</th>'
             )
             column_index += 1
+        server_header_cells.append(
+            f'<th><button type="button" class="sort-button" data-column="{column_index}" onclick="sortReportTable(this)">{escape(right_server_name)}</button></th>'
+        )
+        column_index += 1
 
     body_rows = rows or (
         '<tr class="empty-row" data-static-row><td colspan="99">No differences found.</td></tr>',
@@ -1186,6 +1217,10 @@ def _mismatched_metadata_row_html(entry: tuple[str, ...]) -> str:
     (
         library_name,
         filename,
+        left_item_id,
+        right_item_id,
+        left_server_key,
+        right_server_key,
         left_title,
         right_title,
         left_season,
@@ -1227,6 +1262,7 @@ def _mismatched_metadata_row_html(entry: tuple[str, ...]) -> str:
         f"{_diff_cell(left_episode_number, is_different=left_episode_number != right_episode_number)}"
         f"{_diff_cell(right_episode_number, is_different=left_episode_number != right_episode_number)}"
         f"{_diff_cell(left_episode_name, is_different=left_episode_name.casefold() != right_episode_name.casefold())}"
+        f"{_transfer_cell(left_server_key, left_item_id, right_server_key, right_item_id)}"
         f"{_diff_cell(right_episode_name, is_different=left_episode_name.casefold() != right_episode_name.casefold())}"
         f"{_diff_cell(left_year, is_different=left_year != right_year)}"
         f"{_diff_cell(right_year, is_different=left_year != right_year)}"
@@ -1237,6 +1273,38 @@ def _mismatched_metadata_row_html(entry: tuple[str, ...]) -> str:
         f"{_diff_cell(left_audio_codec, is_different=left_audio_codec != right_audio_codec)}"
         f"{_diff_cell(right_audio_codec, is_different=left_audio_codec != right_audio_codec)}"
         "</tr>"
+    )
+
+
+def _transfer_cell(
+    left_server_key: str,
+    left_item_id: str,
+    right_server_key: str,
+    right_item_id: str,
+) -> str:
+    """Return the transfer-metadata button cell for one mismatched-metadata row.
+
+    The button copies a ready-made ``transfer_metadata.py`` command to the
+    clipboard rather than performing the transfer itself, since the static
+    report has no live backend to call into. Running the copied command
+    performs the actual read/merge/write against both Jellyfin servers and
+    prompts for confirmation before overwriting anything.
+    """
+    if not left_server_key or not right_server_key:
+        return '<td class="transfer-cell"></td>'
+
+    command = (
+        "python transfer_metadata.py"
+        f' --from-server "{left_server_key}" --from-item "{left_item_id}"'
+        f' --to-server "{right_server_key}" --to-item "{right_item_id}"'
+    )
+    return (
+        '<td class="transfer-cell">'
+        '<button type="button" class="transfer-button" '
+        f'data-command="{escape(command)}" '
+        'title="Copy command to transfer metadata from the left server to the right server" '
+        'onclick="copyTransferCommand(this)">&#8594;</button>'
+        "</td>"
     )
 
 

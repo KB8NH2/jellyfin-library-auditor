@@ -1,0 +1,9 @@
+{
+  "audited_at_text": "2026-08-14 22:40:58 EDT",
+  "findings_count": 23410,
+  "libraries_audited": 4,
+  "media_items_processed": 15327,
+  "server_directory": "jellyfin",
+  "server_display_name": "Jellyfin",
+  "server_key": "jellyfin"
+}
