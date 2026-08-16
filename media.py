@@ -63,6 +63,25 @@ def _item_directory(item: MediaItem) -> Path:
     return item.path.parent
 
 
+def _existing_sibling_files(item: MediaItem, filenames: tuple[str, ...]) -> tuple[str, ...]:
+    """Return every named sibling file that actually exists, in ``filenames`` order.
+
+    Args:
+        item: Media item whose directory should be searched.
+        filenames: Candidate filenames to look for.
+
+    Returns:
+        The subset of ``filenames`` present in the item's directory.
+    """
+    item_directory = _item_directory(item)
+    if not item_directory.is_dir():
+        return ()
+
+    return tuple(
+        filename for filename in filenames if (item_directory / filename).is_file()
+    )
+
+
 def _sibling_file_exists(item: MediaItem, filenames: tuple[str, ...]) -> bool:
     """Return whether any of the named sibling files exists.
 
@@ -73,11 +92,7 @@ def _sibling_file_exists(item: MediaItem, filenames: tuple[str, ...]) -> bool:
     Returns:
         ``True`` when any matching file exists.
     """
-    item_directory = _item_directory(item)
-    if not item_directory.is_dir():
-        return False
-
-    return any((item_directory / filename).is_file() for filename in filenames)
+    return bool(_existing_sibling_files(item, filenames))
 
 
 def _normalize_for_prefix_match(value: str) -> str:
@@ -260,6 +275,23 @@ def local_poster_exists(item: MediaItem) -> bool:
         ``True`` when a common poster filename exists.
     """
     return _sibling_file_exists(item, POSTER_FILENAMES)
+
+
+def local_poster_files(item: MediaItem) -> tuple[str, ...]:
+    """Return every local poster-candidate filename present beside the item.
+
+    More than one of these existing at once is ambiguous: Jellyfin only
+    displays one of them, and which one it picks isn't a documented,
+    guaranteed priority order (observed to vary - e.g. preferring a
+    ``.png`` over a same-named ``.jpg``).
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        The subset of ``POSTER_FILENAMES`` present in the item's directory.
+    """
+    return _existing_sibling_files(item, POSTER_FILENAMES)
 
 
 def local_backdrop_exists(item: MediaItem) -> bool:

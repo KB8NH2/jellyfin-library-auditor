@@ -35,6 +35,7 @@ def render_dashboard_page(
         include_search=False,
         include_expand_controls=False,
         server_display_name=server_display_name,
+        generated_at_text=generated_at_text,
         content="\n".join(
             (
                 templates.render_summary_cards(summary_cards),

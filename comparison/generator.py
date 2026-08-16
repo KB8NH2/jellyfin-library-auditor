@@ -144,10 +144,11 @@ def write_comparison_reports(
     write_javascript(shared_js_path(output_root))
 
     comparison = _build_comparison(left_result, right_result)
+    generated_at_text = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     (root_dir / "index.html").write_text(
         _page_document(
             title="Server Comparison",
-            body=_index_page(left_result, right_result, comparison),
+            body=_index_page(left_result, right_result, comparison, generated_at_text=generated_at_text),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -155,7 +156,13 @@ def write_comparison_reports(
     (root_dir / "libraries.html").write_text(
         _page_document(
             title="Library Comparison",
-            body=_libraries_page(left_result, right_result, comparison, transfer_results=transfer_results),
+            body=_libraries_page(
+                left_result,
+                right_result,
+                comparison,
+                transfer_results=transfer_results,
+                generated_at_text=generated_at_text,
+            ),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -163,7 +170,7 @@ def write_comparison_reports(
     (root_dir / "artwork.html").write_text(
         _page_document(
             title="Artwork Comparison",
-            body=_artwork_page(left_result, right_result, comparison),
+            body=_artwork_page(left_result, right_result, comparison, generated_at_text=generated_at_text),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -171,7 +178,7 @@ def write_comparison_reports(
     (root_dir / "subtitles.html").write_text(
         _page_document(
             title="Subtitle Comparison",
-            body=_subtitles_page(left_result, right_result, comparison),
+            body=_subtitles_page(left_result, right_result, comparison, generated_at_text=generated_at_text),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -179,7 +186,7 @@ def write_comparison_reports(
     (root_dir / "configuration.html").write_text(
         _page_document(
             title="Configuration Comparison",
-            body=_configuration_page(left_result, right_result, comparison),
+            body=_configuration_page(left_result, right_result, comparison, generated_at_text=generated_at_text),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -766,7 +773,7 @@ def _sequence_gap_findings(
     )
 
 
-def _index_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
+def _index_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object], *, generated_at_text: str = "") -> str:
     """Return comparison overview page body."""
     cards = "\n".join(
         (
@@ -802,6 +809,7 @@ def _index_page(left_result: AuditServerResult, right_result: AuditServerResult,
             )
         ),
         current_nav="Overview",
+        generated_at_text=generated_at_text,
     )
 
 
@@ -811,6 +819,7 @@ def _libraries_page(
     comparison: dict[str, object],
     *,
     transfer_results: tuple[MetadataTransferResult, ...] | None = None,
+    generated_at_text: str = "",
 ) -> str:
     """Return libraries comparison page body."""
     left_server_name = left_result.server_name or left_result.server_key or "Left"
@@ -903,10 +912,11 @@ def _libraries_page(
         "\n".join(sections),
         current_nav="Libraries",
         include_search=True,
+        generated_at_text=generated_at_text,
     )
 
 
-def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
+def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object], *, generated_at_text: str = "") -> str:
     """Return artwork comparison page body."""
     left_server_name = left_result.server_name or left_result.server_key or "Left"
     right_server_name = right_result.server_name or right_result.server_key or "Right"
@@ -928,10 +938,11 @@ def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResul
         ),
         current_nav="Artwork",
         include_search=True,
+        generated_at_text=generated_at_text,
     )
 
 
-def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
+def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object], *, generated_at_text: str = "") -> str:
     """Return subtitles comparison page body."""
     left_server_name = left_result.server_name or left_result.server_key or "Left"
     right_server_name = right_result.server_name or right_result.server_key or "Right"
@@ -953,10 +964,11 @@ def _subtitles_page(left_result: AuditServerResult, right_result: AuditServerRes
         ),
         current_nav="Subtitles",
         include_search=True,
+        generated_at_text=generated_at_text,
     )
 
 
-def _configuration_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object]) -> str:
+def _configuration_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object], *, generated_at_text: str = "") -> str:
     """Return configuration and metadata comparison page body."""
     left_server_name = left_result.server_name or left_result.server_key or "Left"
     right_server_name = right_result.server_name or right_result.server_key or "Right"
@@ -1013,6 +1025,7 @@ def _configuration_page(left_result: AuditServerResult, right_result: AuditServe
         ),
         current_nav="Configuration",
         include_search=True,
+        generated_at_text=generated_at_text,
     )
 
 
@@ -1051,8 +1064,14 @@ def _page_shell(
     *,
     current_nav: str,
     include_search: bool = False,
+    generated_at_text: str = "",
 ) -> str:
     """Return one comparison page body."""
+    generated_at_html = (
+        f'    <p class="page-generated-at">Generated {escape(generated_at_text)}</p>'
+        if generated_at_text
+        else ""
+    )
     return "\n".join(
         (
             f'<main class="page-shell" data-nav-current="{escape(current_nav)}">',
@@ -1060,6 +1079,7 @@ def _page_shell(
             '  <section class="page-header-card">',
             f"    <h1>{escape(heading)}</h1>",
             f'    <p class="page-intro">{escape(intro)}</p>',
+            generated_at_html,
             "  </section>",
             _search_toolbar() if include_search else "",
             '  <section class="page-content">',

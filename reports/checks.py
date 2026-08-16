@@ -24,6 +24,7 @@ def render_check_page(
     *,
     site_links: templates.SiteLinks,
     server_display_name: str = "",
+    generated_at_text: str = "",
 ) -> str:
     """Return one audit check page."""
     media_groups = templates.group_findings_by_media(findings)
@@ -57,6 +58,7 @@ def render_check_page(
         include_search=True,
         include_expand_controls=False,
         server_display_name=server_display_name,
+        generated_at_text=generated_at_text,
         content=content,
     )
 

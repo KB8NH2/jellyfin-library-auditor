@@ -22,6 +22,7 @@ SEVERITY_SORT_ORDER = {
 CHECK_DISPLAY_LABELS = {
     "missing_english_subtitles": "Missing English Subtitles",
     "missing_poster": "Missing Poster",
+    "conflicting_poster_files": "Conflicting Poster Files",
     "missing_backdrop": "Missing Backdrop",
     "missing_primary_image": "Missing Primary Image",
     "missing_nfo": "Missing NFO",
@@ -196,8 +197,13 @@ def row_search_text(findings: tuple[audit_types.AuditFinding, ...]) -> str:
     return " ".join(part.strip().lower() for part in parts if part.strip())
 
 
-def render_page(*, title: str, current_nav: str, relative_prefix: str, heading: str, intro: str, content: str, breadcrumbs: tuple[Breadcrumb, ...], include_search: bool, include_expand_controls: bool, server_display_name: str = "") -> str:
+def render_page(*, title: str, current_nav: str, relative_prefix: str, heading: str, intro: str, content: str, breadcrumbs: tuple[Breadcrumb, ...], include_search: bool, include_expand_controls: bool, server_display_name: str = "", generated_at_text: str = "") -> str:
     toolbar_html = render_toolbar(include_expand_controls) if include_search else ""
+    generated_at_html = (
+        f'      <p class="page-generated-at">Generated {escape(generated_at_text)}</p>'
+        if generated_at_text
+        else ""
+    )
     return "\n".join(
         (
             f'<main class="page-shell" data-nav-current="{escape(current_nav)}">',
@@ -207,6 +213,7 @@ def render_page(*, title: str, current_nav: str, relative_prefix: str, heading: 
             "    <section class=\"page-header-card\">",
             f"      <h1>{escape(heading)}</h1>",
             f"      <p class=\"page-intro\">{escape(intro)}</p>",
+            generated_at_html,
             "    </section>",
             toolbar_html,
             "  </header>",

@@ -21,6 +21,7 @@ from media import has_english_subtitles
 from media import has_jellyfin_primary_image
 from media import local_backdrop_exists
 from media import local_poster_exists
+from media import local_poster_files
 from models import MediaItem
 
 
@@ -43,6 +44,7 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
     audits = (
         missing_english_subtitles,
         missing_poster,
+        conflicting_poster_files,
         missing_backdrop,
         missing_primary_image,
         unknown_video_codec,
@@ -115,6 +117,36 @@ def missing_poster(item: MediaItem) -> AuditFinding | None:
         severity=AuditSeverity.INFO,
         check_name="missing_poster",
         message="No local poster file was found.",
+    )
+
+
+def conflicting_poster_files(item: MediaItem) -> AuditFinding | None:
+    """Return a finding when more than one local poster candidate exists.
+
+    Jellyfin only displays one local poster file when several are present
+    beside an item (e.g. both ``folder.jpg`` and ``folder.png``); which one
+    it picks isn't a documented, guaranteed order, so having more than one
+    leaves the effective image ambiguous.
+
+    Args:
+        item: Media item to evaluate.
+
+    Returns:
+        A warning finding, or ``None`` when at most one candidate exists.
+    """
+    files = local_poster_files(item)
+    if len(files) <= 1:
+        return None
+
+    return _finding(
+        item,
+        category=AuditCategory.ARTWORK,
+        severity=AuditSeverity.WARNING,
+        check_name="conflicting_poster_files",
+        message=(
+            "Multiple local poster files were found "
+            f"({', '.join(files)}); only one is used by Jellyfin."
+        ),
     )
 
 

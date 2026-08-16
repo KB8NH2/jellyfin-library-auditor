@@ -77,6 +77,7 @@ def _stylesheet() -> str:
             ".page-header-actions { display: flex; justify-content: flex-end; margin-bottom: 12px; }",
             ".page-header-card h1 { margin: 0 0 8px; font-size: 2rem; }",
             ".page-intro, .muted-text, .summary-card-subtitle { color: var(--muted); }",
+            ".page-generated-at { margin: 4px 0 0; font-size: 0.85rem; color: var(--muted); }",
             ".toolbar-card { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; justify-content: space-between; }",
             ".toolbar-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }",
             ".search-field { display: flex; flex-direction: column; gap: 6px; min-width: 280px; font-weight: 600; }",
