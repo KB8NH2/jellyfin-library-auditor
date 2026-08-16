@@ -11,6 +11,7 @@ venv/
 env/
 
 # Generated reports
+audit_results/
 *.csv
 *.html
 
