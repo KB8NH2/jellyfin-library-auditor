@@ -67,6 +67,18 @@ REQUIRED_NON_EMPTY_FIELDS = ("Id", "Path")
 # fields that reflect server-managed state rather than editable metadata.
 # Trickplay is confirmed via a live 500 crash; the rest are the same
 # category of computed/per-user data and are excluded on the same basis.
+#
+# Image-tag fields (ImageTags, BackdropImageTags, ScreenshotImageTags,
+# ImageBlurHashes) are deliberately NOT in this set, even though they are
+# also computed/server-managed: omitting them from the payload doesn't just
+# fail to deserialize, it reads as "this item now has no custom image",
+# which caused Jellyfin to discard the destination's own extracted image
+# and fall back to whatever was previously cached (observed reverting a
+# freshly re-extracted folder.jpg back to the source server's image after a
+# transfer). Since TRANSFERABLE_METADATA_FIELDS never overwrites them with
+# the source's values, leaving them out of this set means
+# build_merged_item_dto round-trips the destination's own current values
+# unchanged instead - carrying them over rather than dropping them.
 NON_EDITABLE_ITEM_FIELDS = frozenset(
     {
         "Trickplay",
@@ -76,10 +88,6 @@ NON_EDITABLE_ITEM_FIELDS = frozenset(
         "RemoteTrailers",
         "Chapters",
         "ExternalUrls",
-        "ImageTags",
-        "BackdropImageTags",
-        "ScreenshotImageTags",
-        "ImageBlurHashes",
     }
 )
 
