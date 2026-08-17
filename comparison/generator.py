@@ -59,6 +59,41 @@ class MetadataTransferTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageTransferTarget:
+    """One item pair whose images can be transferred from left to right."""
+
+    library: str
+    display_name: str
+    left_title: str
+    left_server_key: str
+    left_item_id: str
+    right_server_key: str
+    right_item_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageTransferResult:
+    """Outcome of one (item, image type) transfer attempt in a --transfer-images run.
+
+    Attributes:
+        library: Library the item belongs to.
+        display_name: Filename or title shown for the item.
+        image_type: Jellyfin image type this result covers (e.g. ``"Primary"``).
+        status: One of ``"transferred"``, ``"would_transfer"`` (--dry-run),
+            ``"unavailable"`` (the source has no image of this type),
+            ``"already_present"`` (the destination already has one, so it
+            was left alone), or ``"failed"``.
+        detail: Human-readable reason for a failure, empty otherwise.
+    """
+
+    library: str
+    display_name: str
+    image_type: str
+    status: str
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class MetadataTransferResult:
     """Outcome of one item's metadata transfer attempt in a --transfer-metadata run.
 
@@ -117,12 +152,52 @@ def mismatched_metadata_transfer_targets(
     return tuple(targets)
 
 
+def missing_image_transfer_targets(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+) -> tuple[ImageTransferTarget, ...]:
+    """Return one transfer target for every item pair with an artwork difference.
+
+    Reuses the same comparison used to build the "Artwork Differences" report
+    table, so this always matches what that report shows. Returns nothing
+    when either server is missing a configured server key, since a transfer
+    can't be built without one.
+
+    Args:
+        left_result: Completed audit results for the source server.
+        right_result: Completed audit results for the destination server.
+
+    Returns:
+        One target per artwork-differing item pair, in the same order the
+        report displays them.
+    """
+    left_server_key = left_result.server_key
+    right_server_key = right_result.server_key
+    if not left_server_key or not right_server_key:
+        return ()
+
+    comparison = _build_comparison(left_result, right_result)
+    return tuple(
+        ImageTransferTarget(
+            library=pair.library,
+            display_name=pair.left.display_name,
+            left_title=pair.left.title,
+            left_server_key=left_server_key,
+            left_item_id=pair.left.id,
+            right_server_key=right_server_key,
+            right_item_id=pair.right.id,
+        )
+        for pair in comparison["artwork_differences"]
+    )
+
+
 def write_comparison_reports(
     left_result: AuditServerResult,
     right_result: AuditServerResult,
     output_dir: Path | None = None,
     *,
     transfer_results: tuple[MetadataTransferResult, ...] | None = None,
+    image_transfer_results: tuple[ImageTransferResult, ...] | None = None,
 ) -> Path:
     """Write a static comparison site for two completed audit results.
 
@@ -133,6 +208,9 @@ def write_comparison_reports(
         transfer_results: Per-item outcomes from a --transfer-metadata run to
             include as a "Transfer Results" table on the libraries page.
             ``None`` omits the table entirely (the flag wasn't used).
+        image_transfer_results: Per-(item, image type) outcomes from a
+            --transfer-images run to include as an "Image Transfer Results"
+            table on the artwork page. ``None`` omits the table entirely.
     """
     root_dir = _default_output_dir() if output_dir is None else output_dir
     output_root = root_dir.parent
@@ -170,7 +248,13 @@ def write_comparison_reports(
     (root_dir / "artwork.html").write_text(
         _page_document(
             title="Artwork Comparison",
-            body=_artwork_page(left_result, right_result, comparison, generated_at_text=generated_at_text),
+            body=_artwork_page(
+                left_result,
+                right_result,
+                comparison,
+                image_transfer_results=image_transfer_results,
+                generated_at_text=generated_at_text,
+            ),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -916,7 +1000,14 @@ def _libraries_page(
     )
 
 
-def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object], *, generated_at_text: str = "") -> str:
+def _artwork_page(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+    comparison: dict[str, object],
+    *,
+    image_transfer_results: tuple[ImageTransferResult, ...] | None = None,
+    generated_at_text: str = "",
+) -> str:
     """Return artwork comparison page body."""
     left_server_name = left_result.server_name or left_result.server_key or "Left"
     right_server_name = right_result.server_name or right_result.server_key or "Right"
@@ -924,9 +1015,7 @@ def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResul
         _artwork_row(left_result, right_result, pair)
         for pair in comparison["artwork_differences"]
     )
-    return _page_shell(
-        "Artwork Comparison",
-        "Differences in local and Jellyfin artwork presence.",
+    sections = [
         _grouped_table_section(
             "Artwork Differences",
             ("Library", "Title"),
@@ -936,6 +1025,13 @@ def _artwork_page(left_result: AuditServerResult, right_result: AuditServerResul
             rows,
             include_hide_same=False,
         ),
+    ]
+    if image_transfer_results is not None:
+        sections.append(_image_transfer_results_section(image_transfer_results))
+    return _page_shell(
+        "Artwork Comparison",
+        "Differences in local and Jellyfin artwork presence.",
+        "\n".join(sections),
         current_nav="Artwork",
         include_search=True,
         generated_at_text=generated_at_text,
@@ -1184,6 +1280,8 @@ _TRANSFER_STATUS_LABELS = {
     "transferred": '<span class="status-label status-present">&#10003; transferred</span>',
     "would_transfer": '<span class="status-label status-planned">&#8594; would transfer</span>',
     "unchanged": '<span class="status-label muted-text">unchanged</span>',
+    "unavailable": '<span class="status-label muted-text">no source image</span>',
+    "already_present": '<span class="status-label muted-text">already present</span>',
     "rejected": '<span class="status-label status-missing">&#10007; rejected</span>',
     "failed": '<span class="status-label status-missing">&#10007; failed</span>',
 }
@@ -1215,6 +1313,36 @@ def _transfer_results_section(results: tuple[MetadataTransferResult, ...]) -> st
     return _simple_table_section(
         "Transfer Results",
         ("Library", "Item", "Status", "Changed Fields", "Detail"),
+        rows,
+        include_hide_same=False,
+    )
+
+
+def _image_transfer_result_row(result: ImageTransferResult) -> str:
+    """Return one row for the Image Transfer Results table."""
+    status_html = _TRANSFER_STATUS_LABELS.get(result.status, escape(result.status))
+    search_text = " ".join(
+        part
+        for part in (result.library, result.display_name, result.image_type, result.status, result.detail)
+        if part
+    ).lower()
+    return (
+        f'<tr data-search-row data-search="{escape(search_text)}">'
+        f"<td>{escape(result.library)}</td>"
+        f"<td>{escape(result.display_name)}</td>"
+        f"<td>{escape(result.image_type)}</td>"
+        f"<td>{status_html}</td>"
+        f"<td>{escape(result.detail)}</td>"
+        "</tr>"
+    )
+
+
+def _image_transfer_results_section(results: tuple[ImageTransferResult, ...]) -> str:
+    """Return the Image Transfer Results table section for a --transfer-images run."""
+    rows = tuple(_image_transfer_result_row(result) for result in results)
+    return _simple_table_section(
+        "Image Transfer Results",
+        ("Library", "Item", "Image Type", "Status", "Detail"),
         rows,
         include_hide_same=False,
     )

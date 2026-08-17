@@ -19,8 +19,10 @@ from audit import audit_media_item
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
+from comparison import ImageTransferResult
 from comparison import MetadataTransferResult
 from comparison import mismatched_metadata_transfer_targets
+from comparison import missing_image_transfer_targets
 from comparison import write_comparison_reports
 from config import ConfigError
 from config import ProcessingConfig
@@ -41,11 +43,20 @@ from report_filters import filter_report_output
 from reports import write_csv_report, write_html_report
 from results import AuditServerResult
 from results import LibraryAuditResult
+import transfer_images
 import transfer_metadata
 
 
 LOGGER = logging.getLogger("auditor")
 AUTO_COMPARE_SENTINEL = "__auto_compare__"
+
+# The bulk --transfer-images run only attempts Primary: Backdrop and Thumb
+# are rarely populated on these libraries' source servers in practice, so
+# attempting them on every candidate item was pure wasted work (an API call
+# per item for a type that's essentially always "no source image"). The
+# standalone transfer_images.py CLI still offers all of transfer_images.
+# IMAGE_TYPES for one-off testing.
+BULK_IMAGE_TYPES = ("Primary",)
 
 
 class CommandLineUsageError(ValueError):
@@ -67,6 +78,8 @@ class AuditRunOptions:
     transfer_metadata: bool
     transfer_metadata_dry_run: bool
     transfer_metadata_yes: bool
+    transfer_images: bool
+    transfer_limit: int | None
 
 
 def configure_logging() -> None:
@@ -88,6 +101,21 @@ def _enable_metadata_transfer_file_logging() -> None:
     """
     file_handler = logging.FileHandler(
         transfer_metadata.METADATA_TRANSFER_LOG_FILE, encoding="utf-8"
+    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    LOGGER.addHandler(file_handler)
+
+
+def _enable_image_transfer_file_logging() -> None:
+    """Persist this run's log output to the shared image-transfer log file.
+
+    Mirrors _enable_metadata_transfer_file_logging(): only attached for
+    --transfer-images runs, writing to the same file transfer_images.py's own
+    CLI writes to, so a bulk --compare --transfer-images run and a manual
+    one-off transfer share one audit trail.
+    """
+    file_handler = logging.FileHandler(
+        transfer_images.IMAGE_TRANSFER_LOG_FILE, encoding="utf-8"
     )
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     LOGGER.addHandler(file_handler)
@@ -223,10 +251,16 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
 
     if args.transfer_metadata and args.compare is None:
         raise CommandLineUsageError("--transfer-metadata requires --compare.")
-    if args.dry_run and not args.transfer_metadata:
-        raise CommandLineUsageError("--dry-run requires --transfer-metadata.")
-    if args.yes and not args.transfer_metadata:
-        raise CommandLineUsageError("--yes requires --transfer-metadata.")
+    if args.transfer_images and args.compare is None:
+        raise CommandLineUsageError("--transfer-images requires --compare.")
+    if args.dry_run and not (args.transfer_metadata or args.transfer_images):
+        raise CommandLineUsageError("--dry-run requires --transfer-metadata or --transfer-images.")
+    if args.yes and not (args.transfer_metadata or args.transfer_images):
+        raise CommandLineUsageError("--yes requires --transfer-metadata or --transfer-images.")
+    if args.limit is not None and not (args.transfer_metadata or args.transfer_images):
+        raise CommandLineUsageError("--limit requires --transfer-metadata or --transfer-images.")
+    if args.limit is not None and args.limit < 1:
+        raise CommandLineUsageError("--limit must be a positive integer.")
 
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
@@ -241,6 +275,8 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         transfer_metadata=bool(args.transfer_metadata),
         transfer_metadata_dry_run=bool(args.dry_run),
         transfer_metadata_yes=bool(args.yes),
+        transfer_images=bool(args.transfer_images),
+        transfer_limit=args.limit,
     )
 
 
@@ -278,6 +314,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         options = parse_args(argv)
         if options.transfer_metadata:
             _enable_metadata_transfer_file_logging()
+        if options.transfer_images:
+            _enable_image_transfer_file_logging()
         selected_server_keys, compare_server_key = _resolve_run_targets(options)
         include_configuration_snapshot = compare_server_key is not None
         results = tuple(
@@ -324,9 +362,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 compare_result,
                 dry_run=options.transfer_metadata_dry_run,
                 assume_yes=options.transfer_metadata_yes,
+                limit=options.transfer_limit,
             )
+        image_transfer_exit_code = 0
+        image_transfer_results: tuple[ImageTransferResult, ...] | None = None
+        if compare_result is not None and options.transfer_images:
+            image_transfer_exit_code, image_transfer_results = _run_bulk_image_transfer(
+                results[0],
+                compare_result,
+                dry_run=options.transfer_metadata_dry_run,
+                assume_yes=options.transfer_metadata_yes,
+                limit=options.transfer_limit,
+            )
+        transfer_exit_code = max(transfer_exit_code, image_transfer_exit_code)
         if compare_result is not None:
-            _write_comparison_site(results[0], compare_result, transfer_results=transfer_results)
+            _write_comparison_site(
+                results[0],
+                compare_result,
+                transfer_results=transfer_results,
+                image_transfer_results=image_transfer_results,
+            )
         if should_write_html_site:
             if output_root is None:
                 raise RuntimeError("Audit output root was not initialized.")
@@ -533,14 +588,34 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--transfer-images",
+        action="store_true",
+        help=(
+            "Transfer cached Jellyfin images (Primary, Backdrop, Thumb) for every "
+            "item with an artwork difference from the base --server to the "
+            "--compare server. Requires --compare. Prompts once for confirmation "
+            "before writing anything, unless --yes is given."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="With --transfer-metadata, preview planned transfers without writing anything.",
+        help="With --transfer-metadata/--transfer-images, preview planned transfers without writing anything.",
     )
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="With --transfer-metadata, skip the batch confirmation prompt.",
+        help="With --transfer-metadata/--transfer-images, skip the batch confirmation prompt.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help=(
+            "With --transfer-metadata/--transfer-images, only attempt the first N "
+            "items found, regardless of outcome. Useful for quickly testing code "
+            "changes in bulk mode without waiting for a full run."
+        ),
     )
     return parser
 
@@ -599,12 +674,18 @@ def _write_comparison_site(
     right_result: AuditServerResult,
     *,
     transfer_results: tuple[MetadataTransferResult, ...] | None = None,
+    image_transfer_results: tuple[ImageTransferResult, ...] | None = None,
 ) -> None:
     """Write comparison reports for two audited servers."""
     if left_result.server_key == right_result.server_key:
         raise CommandLineUsageError("--compare must target a different server.")
 
-    write_comparison_reports(left_result, right_result, transfer_results=transfer_results)
+    write_comparison_reports(
+        left_result,
+        right_result,
+        transfer_results=transfer_results,
+        image_transfer_results=image_transfer_results,
+    )
 
 
 def _run_bulk_metadata_transfer(
@@ -613,6 +694,7 @@ def _run_bulk_metadata_transfer(
     *,
     dry_run: bool,
     assume_yes: bool,
+    limit: int | None = None,
 ) -> tuple[int, tuple[MetadataTransferResult, ...]]:
     """Transfer metadata for every mismatched-metadata item pair between two servers.
 
@@ -626,6 +708,8 @@ def _run_bulk_metadata_transfer(
         right_result: Completed audit results for the destination server.
         dry_run: Preview planned transfers without writing anything.
         assume_yes: Skip the batch confirmation prompt.
+        limit: When given, only attempt the first N items found, regardless
+            of outcome - for quickly testing bulk-mode changes.
 
     Returns:
         A tuple of (exit code, per-item results). Exit code is ``0`` when
@@ -633,6 +717,8 @@ def _run_bulk_metadata_transfer(
         ``1`` if any item was rejected or failed.
     """
     targets = mismatched_metadata_transfer_targets(left_result, right_result)
+    if limit is not None:
+        targets = targets[:limit]
     left_label = left_result.server_name or left_result.server_key or "left"
     right_label = right_result.server_name or right_result.server_key or "right"
 
@@ -763,6 +849,250 @@ def _run_bulk_metadata_transfer(
     )
     exit_code = 1 if (rejected or failed) else 0
     return exit_code, tuple(results)
+
+
+def _run_bulk_image_transfer(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+    *,
+    dry_run: bool,
+    assume_yes: bool,
+    limit: int | None = None,
+) -> tuple[int, tuple[ImageTransferResult, ...]]:
+    """Transfer cached images for every artwork-differing item pair between two servers.
+
+    Reuses the same source/destination pairing the comparison report shows,
+    so this only ever acts on items the "Artwork Differences" table would
+    also flag - that table includes a pair when Poster OR Primary differs,
+    so a pair can appear there for e.g. a Poster difference alone while
+    already having a matching Primary image on both sides. Only fills in
+    image types the destination is actually missing: each image type in
+    BULK_IMAGE_TYPES is skipped with an "already_present" result (not
+    attempted, not overwritten) when the destination already has one, and
+    recorded "unavailable" (not a failure) when the source has none to give.
+    Continues past a single item's failure rather than aborting the whole
+    batch, logging a summary at the end.
+
+    Args:
+        left_result: Completed audit results for the source server.
+        right_result: Completed audit results for the destination server.
+        dry_run: Preview planned transfers without writing anything.
+        assume_yes: Skip the batch confirmation prompt.
+        limit: When given, only attempt the first N items found, regardless
+            of outcome - for quickly testing bulk-mode changes.
+
+    Returns:
+        A tuple of (exit code, per-(item, image type) results). Exit code is
+        ``0`` when every attempted transfer succeeded (or nothing needed
+        transferring), ``1`` if any transfer failed.
+    """
+    targets = missing_image_transfer_targets(left_result, right_result)
+    if limit is not None:
+        targets = targets[:limit]
+    left_label = left_result.server_name or left_result.server_key or "left"
+    right_label = right_result.server_name or right_result.server_key or "right"
+
+    if not targets:
+        LOGGER.info("No artwork differences found between %s and %s.", left_label, right_label)
+        return 0, ()
+
+    LOGGER.info(
+        "%s images for %d item(s) from %s to %s.",
+        "Would transfer" if dry_run else "About to transfer",
+        len(targets),
+        left_label,
+        right_label,
+    )
+    if not dry_run and not assume_yes:
+        response = input(f"Transfer images for {len(targets)} item(s)? [y/N] ").strip().lower()
+        if response not in {"y", "yes"}:
+            LOGGER.info("Aborted.")
+            return 1, ()
+
+    config = get_config()
+    server_clients: dict[str, JellyfinClient] = {}
+    results: list[ImageTransferResult] = []
+    transferred = 0
+    unavailable = 0
+    already_present = 0
+    failed = 0
+
+    try:
+        for target in targets:
+            try:
+                from_client = _cached_jellyfin_client(server_clients, config, target.left_server_key)
+                to_client = _cached_jellyfin_client(server_clients, config, target.right_server_key)
+            except ConfigError as error:
+                failed += len(BULK_IMAGE_TYPES)
+                LOGGER.error(
+                    "[%s] %s: failed to prepare transfer: %s",
+                    target.library, target.display_name, error,
+                )
+                results.extend(
+                    ImageTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        image_type=image_type,
+                        status="failed",
+                        detail=str(error),
+                    )
+                    for image_type in BULK_IMAGE_TYPES
+                )
+                continue
+
+            try:
+                destination_item = to_client.get_item(target.right_item_id)
+            except JellyfinError as error:
+                failed += len(BULK_IMAGE_TYPES)
+                LOGGER.error(
+                    "[%s] %s: failed to read destination item %s: %s",
+                    target.library, target.display_name, target.right_item_id, error,
+                )
+                results.extend(
+                    ImageTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        image_type=image_type,
+                        status="failed",
+                        detail=str(error),
+                    )
+                    for image_type in BULK_IMAGE_TYPES
+                )
+                continue
+
+            destination_name = str(destination_item.get("Name", target.right_item_id))
+            if destination_name.casefold() != target.left_title.casefold():
+                # Not necessarily wrong - mismatched_metadata already tracks
+                # legitimate title differences between paired items - but
+                # surfaced loudly since a bulk run has no other way to catch
+                # a genuine pairing/item-id mistake before it writes. Compared
+                # against left_title (the bare title, matching Jellyfin's own
+                # "Name" field), not display_name, which is a composed label
+                # ("Series - Season - S04E13 - Title") that would never match
+                # Jellyfin's Name for an episode even when correctly paired.
+                LOGGER.warning(
+                    "[%s] %s: destination item %s is named %r, not %r - verify this "
+                    "pairing is correct before trusting this transfer.",
+                    target.library, target.display_name, target.right_item_id,
+                    destination_name, target.left_title,
+                )
+
+            for image_type in BULK_IMAGE_TYPES:
+                if _has_image_of_type(destination_item, image_type):
+                    already_present += 1
+                    results.append(
+                        ImageTransferResult(
+                            library=target.library,
+                            display_name=target.display_name,
+                            image_type=image_type,
+                            status="already_present",
+                        )
+                    )
+                    continue
+
+                try:
+                    plan = transfer_images.plan_image_transfer(
+                        from_client, to_client, target.left_item_id, target.right_item_id, image_type
+                    )
+                except JellyfinError as error:
+                    failed += 1
+                    LOGGER.error(
+                        "[%s] %s: failed to read %s image: %s",
+                        target.library, target.display_name, image_type, error,
+                    )
+                    results.append(
+                        ImageTransferResult(
+                            library=target.library,
+                            display_name=target.display_name,
+                            image_type=image_type,
+                            status="failed",
+                            detail=str(error),
+                        )
+                    )
+                    continue
+
+                if not plan.has_image:
+                    unavailable += 1
+                    results.append(
+                        ImageTransferResult(
+                            library=target.library,
+                            display_name=target.display_name,
+                            image_type=image_type,
+                            status="unavailable",
+                        )
+                    )
+                    continue
+
+                if dry_run:
+                    transferred += 1
+                    LOGGER.info(
+                        "[%s] %s: would transfer %s image", target.library, target.display_name, image_type
+                    )
+                    results.append(
+                        ImageTransferResult(
+                            library=target.library,
+                            display_name=target.display_name,
+                            image_type=image_type,
+                            status="would_transfer",
+                        )
+                    )
+                    continue
+
+                try:
+                    transfer_images.apply_image_transfer(to_client, plan)
+                except JellyfinError as error:
+                    failed += 1
+                    LOGGER.error(
+                        "[%s] %s: %s image upload failed: %s",
+                        target.library, target.display_name, image_type, error,
+                    )
+                    results.append(
+                        ImageTransferResult(
+                            library=target.library,
+                            display_name=target.display_name,
+                            image_type=image_type,
+                            status="failed",
+                            detail=str(error),
+                        )
+                    )
+                    continue
+
+                transferred += 1
+                LOGGER.info("[%s] %s: transferred %s image", target.library, target.display_name, image_type)
+                results.append(
+                    ImageTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        image_type=image_type,
+                        status="transferred",
+                    )
+                )
+    finally:
+        for client in server_clients.values():
+            client.close()
+
+    LOGGER.info(
+        "Image transfer summary: %d transferred, %d already present, %d unavailable, "
+        "%d failed (of %d item(s), %d image(s) attempted).",
+        transferred, already_present, unavailable, failed, len(targets), len(results),
+    )
+    exit_code = 1 if failed else 0
+    return exit_code, tuple(results)
+
+
+def _has_image_of_type(item_dto: dict, image_type: str) -> bool:
+    """Return whether a Jellyfin item document already has an image of this type.
+
+    Most image types are keyed by a single tag in the ``ImageTags`` dict, but
+    ``Backdrop`` supports multiple images and is reported as a separate
+    ``BackdropImageTags`` list instead - checked here too so a destination
+    item that already has a backdrop isn't mistaken for one that doesn't.
+    """
+    image_tags = item_dto.get("ImageTags")
+    if isinstance(image_tags, dict) and image_tags.get(image_type):
+        return True
+    plural_tags = item_dto.get(f"{image_type}ImageTags")
+    return isinstance(plural_tags, list) and bool(plural_tags)
 
 
 def _cached_jellyfin_client(

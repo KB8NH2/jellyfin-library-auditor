@@ -7,6 +7,7 @@ reporting, or any assumptions about how media data will be evaluated.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterable
 from collections.abc import Mapping
 from pathlib import Path
@@ -28,6 +29,7 @@ from results import LibraryComparisonSettings
 LIBRARIES_ENDPOINT = "/Library/MediaFolders"
 ITEMS_ENDPOINT = "/Items"
 ITEM_ENDPOINT_TEMPLATE = "/Items/{item_id}"
+ITEM_IMAGE_ENDPOINT_TEMPLATE = "/Items/{item_id}/Images/{image_type}"
 USER_ITEM_ENDPOINT_TEMPLATE = "/Users/{user_id}/Items/{item_id}"
 USERS_ENDPOINT = "/Users"
 PING_ENDPOINT = "/System/Info/Public"
@@ -54,6 +56,7 @@ ITEM_DETAIL_FIELDS = ",".join(
         "ProductionYear",
         "RunTimeTicks",
         "ImageTags",
+        "BackdropImageTags",
         "MediaStreams",
         "Overview",
         "Genres",
@@ -424,6 +427,68 @@ class JellyfinClient:
             json_body=item_dto,
         )
 
+    def get_item_image(self, item_id: str, image_type: str) -> tuple[bytes, str] | None:
+        """Return the raw bytes and content type of one item's cached image.
+
+        Args:
+            item_id: Jellyfin item identifier.
+            image_type: Jellyfin image type (e.g. ``"Primary"``,
+                ``"Backdrop"``, ``"Thumb"``).
+
+        Returns:
+            A ``(image_bytes, content_type)`` tuple, or ``None`` when the item
+            has no cached image of that type.
+        """
+        url = self._build_url(
+            ITEM_IMAGE_ENDPOINT_TEMPLATE.format(item_id=item_id, image_type=image_type)
+        )
+        try:
+            response = self._session.request(
+                "GET", url, headers={"Accept": "*/*"}, timeout=self._timeout
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise self._wrap_request_error("GET", url, error) from error
+
+        content_type = response.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        return response.content, content_type
+
+    def upload_item_image(
+        self,
+        item_id: str,
+        image_type: str,
+        image_bytes: bytes,
+        content_type: str,
+    ) -> None:
+        """Upload one item's cached image, replacing any existing one of that type.
+
+        Jellyfin's image-upload endpoint expects the image bytes
+        base64-encoded in the request body, with ``Content-Type`` set to the
+        image's real MIME type rather than the encoding used on the wire.
+
+        Args:
+            item_id: Jellyfin item identifier to update.
+            image_type: Jellyfin image type (e.g. ``"Primary"``).
+            image_bytes: Raw, non-encoded image bytes.
+            content_type: MIME type of ``image_bytes`` (e.g. ``"image/jpeg"``).
+        """
+        url = self._build_url(
+            ITEM_IMAGE_ENDPOINT_TEMPLATE.format(item_id=item_id, image_type=image_type)
+        )
+        try:
+            response = self._session.request(
+                "POST",
+                url,
+                data=base64.b64encode(image_bytes),
+                headers={"Content-Type": content_type},
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise self._wrap_request_error("POST", url, error) from error
+
     def get_server_user_experience_settings(self) -> tuple[ComparisonSetting, ...]:
         """Return selected server settings that can affect user-visible behavior."""
         payload = self._request(SYSTEM_CONFIGURATION_ENDPOINT)
@@ -622,17 +687,8 @@ class JellyfinClient:
                 timeout=self._timeout,
             )
             response.raise_for_status()
-        except requests.HTTPError as error:
-            status_code = error.response.status_code if error.response is not None else "?"
-            error_detail = self._error_response_detail(error.response)
-            detail_suffix = f": {error_detail}" if error_detail else ""
-            raise JellyfinRequestError(
-                f"Jellyfin request failed with status {status_code}: {method} {url}{detail_suffix}"
-            ) from error
         except requests.RequestException as error:
-            raise JellyfinRequestError(
-                f"Jellyfin request failed: {method} {url}: {error}"
-            ) from error
+            raise self._wrap_request_error(method, url, error) from error
 
         if not response.content:
             return None
@@ -643,6 +699,20 @@ class JellyfinClient:
             raise JellyfinResponseError(
                 f"Jellyfin returned invalid JSON for {method} {url}."
             ) from error
+
+    @classmethod
+    def _wrap_request_error(
+        cls, method: str, url: str, error: requests.RequestException
+    ) -> JellyfinRequestError:
+        """Return a JellyfinRequestError describing a failed HTTP request."""
+        if isinstance(error, requests.HTTPError):
+            status_code = error.response.status_code if error.response is not None else "?"
+            error_detail = cls._error_response_detail(error.response)
+            detail_suffix = f": {error_detail}" if error_detail else ""
+            return JellyfinRequestError(
+                f"Jellyfin request failed with status {status_code}: {method} {url}{detail_suffix}"
+            )
+        return JellyfinRequestError(f"Jellyfin request failed: {method} {url}: {error}")
 
     @staticmethod
     def _error_response_detail(response: requests.Response | None) -> str:
