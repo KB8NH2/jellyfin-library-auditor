@@ -47,7 +47,7 @@ import transfer_images
 import transfer_metadata
 
 
-LOGGER = logging.getLogger("auditor")
+LOGGER = logging.getLogger("")
 AUTO_COMPARE_SENTINEL = "__auto_compare__"
 
 # The bulk --transfer-images run only attempts Primary: Backdrop and Thumb
