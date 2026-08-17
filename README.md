@@ -9,7 +9,6 @@ It is designed to highlight library gaps that are easy to miss in day-to-day use
 The current implementation checks:
 
 - Missing configured English subtitles
-- Missing local poster files
 - Missing local backdrop files
 - Missing Jellyfin primary images
 - Missing or unknown primary video codecs
@@ -74,7 +73,7 @@ Optional environment variables:
 | `REPORT_MEDIA_PATH_PREFIX` | Removes a path prefix from report display paths | empty |
 | `MOVIES_CSV_FILENAME` | Movie CSV filename | `movies_report.csv` |
 | `TV_CSV_FILENAME` | TV CSV filename | `tv_report.csv` |
-| `AUDIT_CSV_FILENAME` | Per-server audit CSV filename | `audit_report.csv` |
+| `AUDIT_CSV_FILENAME` | Per-server audit CSV filename suffix (prefixed with the server name, e.g. `MyServer_audit.csv`) | `audit.csv` |
 | `AUDIT_HTML_FILENAME` | Root HTML output directory name | `audit_results` |
 | `ENABLE_MOVIES` | Enable movie library auditing | `true` |
 | `ENABLE_TV` | Enable TV library auditing | `true` |
@@ -195,7 +194,7 @@ python auditor.py --server main --compare backup --transfer-images --dry-run
 python auditor.py --server main --compare backup --transfer-images
 ```
 
-A pair lands in "Artwork Differences" when Poster *or* Primary differs, so a pair can show up there over a Poster-only difference while already having a matching Primary image on both sides. The bulk run only attempts `Primary` (not `Backdrop`/`Thumb`, which in practice are essentially never populated on the source server for these libraries and would just be wasted API calls); `transfer_images.py`'s standalone CLI still supports all three via `--image-type` for one-off testing. It only fills in what the destination is actually missing: an item that already has a Primary image is left alone ("already present"), one the base server has no cached image for is recorded as "no source image" rather than a failure, and one item failing doesn't stop the rest of the batch. As with `--transfer-metadata`, it asks for one confirmation covering the whole batch (skip it with `--yes`), and `--dry-run` previews without writing anything.
+A pair lands in "Artwork Differences" when Primary differs between the two servers. The bulk run only attempts `Primary` (not `Backdrop`/`Thumb`, which in practice are essentially never populated on the source server for these libraries and would just be wasted API calls); `transfer_images.py`'s standalone CLI still supports all three via `--image-type` for one-off testing. It only fills in what the destination is actually missing: an item that already has a Primary image is left alone ("already present"), one the base server has no cached image for is recorded as "no source image" rather than a failure, and one item failing doesn't stop the rest of the batch. As with `--transfer-metadata`, it asks for one confirmation covering the whole batch (skip it with `--yes`), and `--dry-run` previews without writing anything.
 
 The comparison report gains an "Image Transfer Results" table (Artwork page) whenever `--transfer-images` was used, showing each item/image-type outcome - transferred, would transfer (`--dry-run`), already present, no source image, or failed.
 
@@ -219,7 +218,7 @@ By default, reports are written under `audit_results\`.
 
 - `audit_results\index.html` - top-level report index
 - `audit_results\<server>\index.html` - per-server HTML dashboard
-- `audit_results\<server>\audit_report.csv` - per-server CSV findings
+- `audit_results\<server>\<ServerName>_audit.csv` - per-server CSV findings, one row per audited media item (columns: Library, Path, Title, Season, Episode, Missing Subtitles, Missing Primary, Mismatched Filename Title, Unknown Audio Codec, Unknown Video Codec), named with the server so CSVs from different servers don't collide when downloaded to the same folder
 - `audit_results\comparison_results\index.html` - comparison dashboard when `--compare` is used
 - `metadata_transfer.log` - append-only record of every metadata transfer, written next to wherever `auditor.py --transfer-metadata` or `transfer_metadata.py` was run
 - `image_transfer.log` - append-only record of every image transfer, written next to wherever `auditor.py --transfer-images` or `transfer_images.py` was run

@@ -49,7 +49,25 @@ def server_csv_path(
     configured_csv_path: Path,
 ) -> Path:
     """Return the CSV output path for one server result."""
-    return server_output_dir(root_dir, result) / configured_csv_path.name
+    return server_output_dir(root_dir, result) / server_csv_filename(
+        result, configured_csv_path
+    )
+
+
+def server_csv_filename(result: AuditServerResult, configured_csv_path: Path) -> str:
+    """Return the server-prefixed CSV filename, e.g. ``MyServer_audit.csv``.
+
+    Prefixing with the server name keeps CSVs from multiple servers from
+    colliding when downloaded from a browser to the same folder.
+    """
+    return f"{_server_filename_label(result)}_{configured_csv_path.name}"
+
+
+def _server_filename_label(result: AuditServerResult) -> str:
+    """Return a filesystem-safe, human-readable server label for filenames."""
+    label = _server_display_label(result)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", label.strip())
+    return normalized.strip("_") or "server"
 
 
 def comparison_output_dir(root_dir: Path) -> Path:

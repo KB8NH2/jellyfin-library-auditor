@@ -21,8 +21,6 @@ SEVERITY_SORT_ORDER = {
 }
 CHECK_DISPLAY_LABELS = {
     "missing_english_subtitles": "Missing English Subtitles",
-    "missing_poster": "Missing Poster",
-    "conflicting_poster_files": "Conflicting Poster Files",
     "missing_backdrop": "Missing Backdrop",
     "missing_primary_image": "Missing Primary Image",
     "missing_nfo": "Missing NFO",
@@ -36,7 +34,6 @@ CHECK_DISPLAY_LABELS = {
 }
 CHECK_DISPLAY_ORDER = (
     "missing_primary_image",
-    "missing_poster",
     "missing_english_subtitles",
     "missing_seasons",
     "missing_episodes",
@@ -45,7 +42,6 @@ CHECK_DISPLAY_ORDER = (
 )
 CHECK_SUMMARY_LABELS = {
     "missing_english_subtitles": "English Subtitles",
-    "missing_poster": "Poster",
     "missing_backdrop": "Backdrop",
     "missing_primary_image": "Primary Image",
     "missing_nfo": "NFO",

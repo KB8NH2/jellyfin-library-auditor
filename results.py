@@ -32,7 +32,6 @@ class LibraryAuditResult:
         items_with_english_subtitles: Number of items with configured English
             subtitles.
         items_with_local_nfo: Number of items with a local NFO file.
-        items_with_local_poster: Number of items with a local poster file.
         items_with_local_backdrop: Number of items with a local backdrop file.
         findings: Findings produced while auditing the library.
     """
@@ -42,7 +41,6 @@ class LibraryAuditResult:
     audited_items: tuple[MediaItem, ...]
     items_with_english_subtitles: int
     items_with_local_nfo: int
-    items_with_local_poster: int
     items_with_local_backdrop: int
     findings: tuple[AuditFinding, ...]
 
@@ -57,10 +55,6 @@ class LibraryAuditResult:
     @property
     def local_nfo_percentage(self) -> float:
         return _percentage(self.items_with_local_nfo, self.media_items_processed)
-
-    @property
-    def local_poster_percentage(self) -> float:
-        return _percentage(self.items_with_local_poster, self.media_items_processed)
 
     @property
     def local_backdrop_percentage(self) -> float:

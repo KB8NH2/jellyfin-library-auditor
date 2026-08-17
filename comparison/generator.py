@@ -16,7 +16,6 @@ from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
 from media import has_jellyfin_primary_image
-from media import local_poster_exists
 from models import MediaItem
 from models import MediaLibrary
 from output_layout import audit_results_root
@@ -644,12 +643,7 @@ def _version_signature(item: MediaItem) -> tuple[str, str, str]:
 
 def _artwork_differs(left_item, right_item) -> bool:
     """Return whether artwork presence differs between two matched items."""
-    return any(
-        (
-            local_poster_exists(left_item) != local_poster_exists(right_item),
-            has_jellyfin_primary_image(left_item) != has_jellyfin_primary_image(right_item),
-        )
-    )
+    return has_jellyfin_primary_image(left_item) != has_jellyfin_primary_image(right_item)
 
 
 def _mismatched_metadata_row(
@@ -1019,7 +1013,7 @@ def _artwork_page(
         _grouped_table_section(
             "Artwork Differences",
             ("Library", "Title"),
-            ("Poster", "Primary"),
+            ("Primary",),
             left_server_name,
             right_server_name,
             rows,
@@ -1030,7 +1024,7 @@ def _artwork_page(
         sections.append(_image_transfer_results_section(image_transfer_results))
     return _page_shell(
         "Artwork Comparison",
-        "Differences in local and Jellyfin artwork presence.",
+        "Differences in Jellyfin primary image presence.",
         "\n".join(sections),
         current_nav="Artwork",
         include_search=True,
@@ -1797,14 +1791,11 @@ def _library_list_rows(
 def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult, pair: MatchedPair) -> str:
     """Return one artwork difference row."""
     search_text = f"{pair.library} {pair.left.display_name}".lower()
-    left_poster = _yes_no(local_poster_exists(pair.left))
-    right_poster = _yes_no(local_poster_exists(pair.right))
     left_primary = _yes_no(has_jellyfin_primary_image(pair.left))
     right_primary = _yes_no(has_jellyfin_primary_image(pair.right))
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td{_filename_title_attribute(pair.left)}>{escape(pair.left.display_name)}</td>'
-        f'{_diff_cell(left_poster, is_different=left_poster != right_poster)}{_diff_cell(right_poster, is_different=left_poster != right_poster)}'
         f'{_diff_cell(left_primary, is_different=left_primary != right_primary)}{_diff_cell(right_primary, is_different=left_primary != right_primary)}'
         "</tr>"
     )

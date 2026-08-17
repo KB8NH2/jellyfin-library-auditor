@@ -46,7 +46,6 @@ def _filter_library_result(library_result: LibraryAuditResult) -> LibraryAuditRe
         audited_items=library_result.audited_items,
         items_with_english_subtitles=library_result.items_with_english_subtitles,
         items_with_local_nfo=library_result.items_with_local_nfo,
-        items_with_local_poster=library_result.items_with_local_poster,
         items_with_local_backdrop=library_result.items_with_local_backdrop,
         findings=findings,
     )

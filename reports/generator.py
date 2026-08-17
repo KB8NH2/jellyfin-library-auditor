@@ -10,11 +10,9 @@ from urllib.parse import urlsplit
 
 from config import get_config
 from media import get_display_path
-from media import has_jellyfin_primary_image
-from media import has_jellyfin_thumb
-from media import local_poster_exists
 from output_layout import audit_results_root
 from output_layout import comparison_output_dir
+from output_layout import server_csv_filename
 from output_layout import server_csv_path
 from output_layout import server_output_dir
 from output_layout import shared_css_path
@@ -32,22 +30,25 @@ from results import AuditServerResult
 
 
 CSV_HEADER = (
-    "Category",
-    "Severity",
-    "Check",
-    "Title",
+    "Library",
     "Path",
-    "Local Poster",
-    "Jellyfin Primary",
-    "Jellyfin Thumb",
-    "Artwork Source",
-    "Message",
+    "Title",
+    "Season",
+    "Episode",
+    "Missing Subtitles",
+    "Missing Primary",
+    "Mismatched Filename Title",
+    "Unknown Audio Codec",
+    "Unknown Video Codec",
+)
+MISMATCHED_FILENAME_TITLE_CHECKS = frozenset(
+    {"mismatched_episode_filename_title", "mismatched_movie_filename_title"}
 )
 NON_ACTIONABLE_CHECKS = frozenset({"hdr_video", "missing_nfo", "missing_backdrop"})
 
 
 def write_csv_report(result: AuditServerResult) -> Path:
-    """Write a CSV report containing one row per finding."""
+    """Write a CSV report containing one row per audited media item."""
     result = filter_report_output(result)
     config = get_config()
     output_root = audit_results_root(config.reporting.output.audit_html)
@@ -140,7 +141,7 @@ def _write_dashboard(
     body = render_dashboard_page(
         server_display_name=server_display_name,
         generated_at_text=generated_at_text,
-        csv_report_href=get_config().reporting.output.audit_csv.name,
+        csv_report_href=server_csv_filename(result, get_config().reporting.output.audit_csv),
         libraries_audited=result.libraries_audited,
         media_items_processed=result.media_items_processed,
         actionable_findings_count=len(actionable_findings),
@@ -223,31 +224,36 @@ def _write_check_pages(
 
 
 def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
-    """Return CSV rows for the supplied audit results."""
+    """Return one CSV row per audited media item."""
+    checks_by_item = _check_names_by_item(result.findings)
     rows = []
-    for finding in templates.sort_findings(result.findings):
-        item = finding.media_item
-        local_poster = local_poster_exists(item)
-        jellyfin_primary = has_jellyfin_primary_image(item)
-        jellyfin_thumb = has_jellyfin_thumb(item)
+    for item in sorted(result.audited_items, key=templates.check_row_sort_key):
+        check_names = checks_by_item.get(item.id, frozenset())
         rows.append(
             (
-                finding.category.value.title(),
-                finding.severity.value.title(),
-                finding.check_name,
-                item.display_name,
+                item.library,
                 get_display_path(item),
-                _yes_no(local_poster),
-                _yes_no(jellyfin_primary),
-                _yes_no(jellyfin_thumb),
-                _artwork_source(
-                    has_local_artwork=local_poster,
-                    has_jellyfin_artwork=jellyfin_primary or jellyfin_thumb,
-                ),
-                finding.message,
+                item.title,
+                str(item.season_number) if item.is_episode and item.season_number is not None else "",
+                str(item.episode_number) if item.is_episode and item.episode_number is not None else "",
+                _yes_no("missing_english_subtitles" in check_names),
+                _yes_no("missing_primary_image" in check_names),
+                _yes_no(bool(MISMATCHED_FILENAME_TITLE_CHECKS & check_names)),
+                _yes_no("unknown_audio_codec" in check_names),
+                _yes_no("unknown_video_codec" in check_names),
             )
         )
     return tuple(rows)
+
+
+def _check_names_by_item(
+    findings: tuple,
+) -> dict[str, frozenset[str]]:
+    """Return the set of check names that fired for each media item id."""
+    check_names: dict[str, set[str]] = {}
+    for finding in findings:
+        check_names.setdefault(finding.media_item.id, set()).add(finding.check_name)
+    return {item_id: frozenset(names) for item_id, names in check_names.items()}
 
 
 def _actionable_findings(findings: tuple) -> tuple:
@@ -402,14 +408,3 @@ def _server_display_name(server_url: str) -> str:
 def _yes_no(value: bool) -> str:
     """Return Yes or No for CSV fields."""
     return "Yes" if value else "No"
-
-
-def _artwork_source(has_local_artwork: bool, has_jellyfin_artwork: bool) -> str:
-    """Return the compact artwork source label for CSV output."""
-    if has_local_artwork and has_jellyfin_artwork:
-        return "Local + Jellyfin"
-    if has_local_artwork:
-        return "Local only"
-    if has_jellyfin_artwork:
-        return "Jellyfin metadata"
-    return "Missing"

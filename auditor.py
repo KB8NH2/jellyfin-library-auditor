@@ -34,7 +34,6 @@ from jellyfin import JellyfinRequestError
 from media import has_english_subtitles
 from media import local_backdrop_exists
 from media import local_nfo_exists
-from media import local_poster_exists
 from models import MediaLibrary
 from output_layout import audit_results_root
 from output_layout import reset_audit_results_root
@@ -423,13 +422,11 @@ def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> Libr
     findings: list[AuditFinding] = []
     items_with_english_subtitles = 0
     items_with_local_nfo = 0
-    items_with_local_poster = 0
     items_with_local_backdrop = 0
 
     for item in items:
         items_with_english_subtitles += int(has_english_subtitles(item))
         items_with_local_nfo += int(local_nfo_exists(item))
-        items_with_local_poster += int(local_poster_exists(item))
         items_with_local_backdrop += int(local_backdrop_exists(item))
         findings.extend(audit_media_item(item))
     findings.extend(audit_library_items(items))
@@ -440,7 +437,6 @@ def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> Libr
         audited_items=tuple(items),
         items_with_english_subtitles=items_with_english_subtitles,
         items_with_local_nfo=items_with_local_nfo,
-        items_with_local_poster=items_with_local_poster,
         items_with_local_backdrop=items_with_local_backdrop,
         findings=tuple(findings),
     )
@@ -450,17 +446,11 @@ def _log_library_summaries(library_results: Iterable[LibraryAuditResult]) -> Non
     """Log per-library content coverage summaries."""
     for library_result in library_results:
         LOGGER.info(
-            (
-                "Library summary for %s: English subtitles %s, posters %s"
-            ),
+            "Library summary for %s: English subtitles %s",
             library_result.library.name,
             _format_percentage(
                 library_result.items_with_english_subtitles,
                 library_result.media_items_processed,
-            ),
-            _format_percentage(
-            library_result.items_with_local_poster,
-            library_result.media_items_processed,
             ),
         )
 
@@ -863,10 +853,8 @@ def _run_bulk_image_transfer(
 
     Reuses the same source/destination pairing the comparison report shows,
     so this only ever acts on items the "Artwork Differences" table would
-    also flag - that table includes a pair when Poster OR Primary differs,
-    so a pair can appear there for e.g. a Poster difference alone while
-    already having a matching Primary image on both sides. Only fills in
-    image types the destination is actually missing: each image type in
+    also flag - that table includes a pair when Primary differs. Only fills
+    in image types the destination is actually missing: each image type in
     BULK_IMAGE_TYPES is skipped with an "already_present" result (not
     attempted, not overwritten) when the destination already has one, and
     recorded "unavailable" (not a failure) when the source has none to give.

@@ -17,12 +17,6 @@ from models import SubtitleTrack
 from models import VideoTrack
 
 
-POSTER_FILENAMES = (
-    "poster.jpg",
-    "poster.png",
-    "folder.jpg",
-    "folder.png",
-)
 BACKDROP_FILENAMES = (
     "backdrop.jpg",
     "backdrop.png",
@@ -263,35 +257,6 @@ def jellyfin_image_types(item: MediaItem) -> tuple[str, ...]:
             if _has_jellyfin_image_tag(item, tag_name)
         )
     )
-
-
-def local_poster_exists(item: MediaItem) -> bool:
-    """Return whether a common local poster file exists beside the media item.
-
-    Args:
-        item: Media item to inspect.
-
-    Returns:
-        ``True`` when a common poster filename exists.
-    """
-    return _sibling_file_exists(item, POSTER_FILENAMES)
-
-
-def local_poster_files(item: MediaItem) -> tuple[str, ...]:
-    """Return every local poster-candidate filename present beside the item.
-
-    More than one of these existing at once is ambiguous: Jellyfin only
-    displays one of them, and which one it picks isn't a documented,
-    guaranteed priority order (observed to vary - e.g. preferring a
-    ``.png`` over a same-named ``.jpg``).
-
-    Args:
-        item: Media item to inspect.
-
-    Returns:
-        The subset of ``POSTER_FILENAMES`` present in the item's directory.
-    """
-    return _existing_sibling_files(item, POSTER_FILENAMES)
 
 
 def local_backdrop_exists(item: MediaItem) -> bool:
