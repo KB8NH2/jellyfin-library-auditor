@@ -155,6 +155,7 @@ python auditor.py --server main --compare backup --transfer-metadata
 | `--dry-run` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, preview planned transfers without writing anything |
 | `--yes` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, skip the batch confirmation prompt |
 | `--limit N` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, only attempt the first N items found, regardless of outcome - useful for quickly testing bulk-mode changes without waiting for a full run |
+| `--verify` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, re-audit the `--compare` server once transfers finish and write the comparison report from that post-transfer state instead of the pre-transfer snapshot; ignored with `--dry-run` |
 
 ## Synchronizing metadata between servers
 
@@ -199,7 +200,7 @@ A pair lands in "Artwork Differences" when Primary differs between the two serve
 
 The comparison report gains an "Image Transfer Results" table (Artwork page) whenever `--transfer-images` was used, showing each item/image-type outcome - transferred, would transfer (`--dry-run`), already present, no source image, or failed.
 
-`--transfer-metadata` and `--transfer-images` are independent and can be combined in the same run; both share `--dry-run`/`--yes`/`--limit`.
+`--transfer-metadata` and `--transfer-images` are independent and can be combined in the same run; both share `--dry-run`/`--yes`/`--limit`/`--verify`.
 
 **Given this writes to a live Jellyfin server, run `--dry-run` first before trusting it on a real library, especially unattended.**
 
@@ -228,9 +229,19 @@ Only text-based subtitle tracks (SRT, ASS/SSA, VTT, etc.) can be transferred thi
 
 The comparison report gains a "Subtitle Transfer Results" table (Subtitles page) whenever `--transfer-subtitles` was used, showing each item's outcome - transferred, would transfer (`--dry-run`), already present, no source subtitle, or failed.
 
-`--transfer-metadata`, `--transfer-images`, and `--transfer-subtitles` are independent and can be combined in the same run; all three share `--dry-run`/`--yes`/`--limit`.
+`--transfer-metadata`, `--transfer-images`, and `--transfer-subtitles` are independent and can be combined in the same run; all three share `--dry-run`/`--yes`/`--limit`/`--verify`.
 
 **Given this writes to a live Jellyfin server, run `--dry-run` first before trusting it on a real library, especially unattended.**
+
+### Verifying a transfer
+
+By default, the comparison report written at the end of a `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles` run still reflects the `--compare` server's state from *before* those writes happened - the "Mismatched Metadata"/"Artwork Differences"/"Subtitle Differences" tables show what was different going in, with a "Transfer Results" table appended showing what was attempted. Add `--verify` to close the loop instead: once every requested transfer finishes, it re-audits the `--compare` server and rebuilds the comparison report from that fresh state, so the diff tables show what's *actually still different* after the transfer, not what was different before it ran.
+
+```powershell
+python auditor.py --server main --compare backup --transfer-metadata --transfer-images --transfer-subtitles --yes --verify
+```
+
+It also logs a one-line summary of what remains (missing media, mismatched metadata, artwork differences, subtitle differences, etc.) right after the re-audit finishes. `--verify` is ignored with `--dry-run`, since a dry run doesn't write anything for a re-audit to pick up.
 
 ### One item at a time
 
@@ -253,6 +264,7 @@ By default, reports are written under `audit_results\`.
 - `metadata_transfer.log` - append-only record of every metadata transfer, written next to wherever `auditor.py --transfer-metadata` or `transfer_metadata.py` was run
 - `image_transfer.log` - append-only record of every image transfer, written next to wherever `auditor.py --transfer-images` or `transfer_images.py` was run
 - `subtitle_transfer.log` - append-only record of every subtitle transfer, written next to wherever `auditor.py --transfer-subtitles` or `transfer_subtitles.py` was run
+- `audit.log` - append-only record of everything else logged during an `auditor.py` run that used at least one `--transfer-*` flag (audit progress, comparison writing, `--verify` output, errors) - the transfer-type log files above only ever contain their own transfer's history, never this. Combine multiple `--transfer-*` flags in one run and each still only writes to its own log file; nothing gets duplicated across them.
 
 ## Project layout
 

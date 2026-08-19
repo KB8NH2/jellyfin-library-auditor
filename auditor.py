@@ -13,6 +13,7 @@ import logging
 from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from audit import audit_library_items
 from audit import audit_media_item
@@ -22,6 +23,7 @@ from audit_types import AuditSeverity
 from comparison import ImageTransferResult
 from comparison import MetadataTransferResult
 from comparison import SubtitleTransferResult
+from comparison import comparison_summary_counts
 from comparison import mismatched_metadata_transfer_targets
 from comparison import missing_image_transfer_targets
 from comparison import missing_subtitle_transfer_targets
@@ -50,8 +52,15 @@ import transfer_metadata
 import transfer_subtitles
 
 
-LOGGER = logging.getLogger("")
+LOGGER = logging.getLogger("auditor")
 AUTO_COMPARE_SENTINEL = "__auto_compare__"
+
+# Written alongside the per-transfer-type log files whenever at least one
+# --transfer-metadata/--transfer-images/--transfer-subtitles flag is used, so
+# audit progress, comparison writing, and --verify output land in their own
+# file instead of being mixed into a log meant to be a clean per-transfer-type
+# record.
+AUDIT_LOG_FILE = Path("audit.log")
 
 # The bulk --transfer-images run only attempts Primary: Backdrop and Thumb
 # are rarely populated on these libraries' source servers in practice, so
@@ -84,6 +93,7 @@ class AuditRunOptions:
     transfer_images: bool
     transfer_subtitles: bool
     transfer_limit: int | None
+    verify: bool
 
 
 def configure_logging() -> None:
@@ -94,51 +104,63 @@ def configure_logging() -> None:
     )
 
 
-def _enable_metadata_transfer_file_logging() -> None:
-    """Persist this run's log output to the shared metadata-transfer log file.
-
-    Only attached for --transfer-metadata runs, not every audit, so the log
-    file only ever contains transfer-relevant history rather than routine
-    audit noise. Uses the same file transfer_metadata.py's own CLI writes to,
-    so a nightly --compare --transfer-metadata run and a manual one-off
-    transfer via the report's copy-command button share one audit trail.
-    """
-    file_handler = logging.FileHandler(
-        transfer_metadata.METADATA_TRANSFER_LOG_FILE, encoding="utf-8"
-    )
+def _add_file_handler(logger: logging.Logger, log_file: Path) -> None:
+    """Attach a timestamped file handler to a logger."""
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    LOGGER.addHandler(file_handler)
+    logger.addHandler(file_handler)
+
+
+def _enable_general_file_logging() -> None:
+    """Persist this run's non-transfer log output to the shared audit log file.
+
+    Only attached when at least one --transfer-metadata/--transfer-images/
+    --transfer-subtitles flag is used, matching the other
+    _enable_*_file_logging() helpers below, so a plain audit run still only
+    logs to the console. Attached to LOGGER specifically (not the per-type
+    transfer loggers those helpers use), so this file only ever contains
+    audit progress, comparison writing, and --verify output - not the
+    per-transfer-type history each of those already gets its own file for.
+    """
+    _add_file_handler(LOGGER, AUDIT_LOG_FILE)
+
+
+def _enable_metadata_transfer_file_logging() -> None:
+    """Persist this run's metadata-transfer log output to its own log file.
+
+    Only attached for --transfer-metadata runs, and only to
+    transfer_metadata.LOGGER (not LOGGER), so the log file only ever contains
+    metadata-transfer history rather than routine audit noise or another
+    transfer type's output. Uses the same file transfer_metadata.py's own CLI
+    writes to, so a nightly --compare --transfer-metadata run and a manual
+    one-off transfer via the report's copy-command button share one audit
+    trail.
+    """
+    _add_file_handler(transfer_metadata.LOGGER, transfer_metadata.METADATA_TRANSFER_LOG_FILE)
 
 
 def _enable_image_transfer_file_logging() -> None:
-    """Persist this run's log output to the shared image-transfer log file.
+    """Persist this run's image-transfer log output to its own log file.
 
     Mirrors _enable_metadata_transfer_file_logging(): only attached for
-    --transfer-images runs, writing to the same file transfer_images.py's own
-    CLI writes to, so a bulk --compare --transfer-images run and a manual
-    one-off transfer share one audit trail.
+    --transfer-images runs, only to transfer_images.LOGGER, writing to the
+    same file transfer_images.py's own CLI writes to, so a bulk
+    --compare --transfer-images run and a manual one-off transfer share one
+    audit trail.
     """
-    file_handler = logging.FileHandler(
-        transfer_images.IMAGE_TRANSFER_LOG_FILE, encoding="utf-8"
-    )
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    LOGGER.addHandler(file_handler)
+    _add_file_handler(transfer_images.LOGGER, transfer_images.IMAGE_TRANSFER_LOG_FILE)
 
 
 def _enable_subtitle_transfer_file_logging() -> None:
-    """Persist this run's log output to the shared subtitle-transfer log file.
+    """Persist this run's subtitle-transfer log output to its own log file.
 
     Mirrors _enable_image_transfer_file_logging(): only attached for
-    --transfer-subtitles runs, writing to the same file
-    transfer_subtitles.py's own CLI writes to, so a bulk
+    --transfer-subtitles runs, only to transfer_subtitles.LOGGER, writing to
+    the same file transfer_subtitles.py's own CLI writes to, so a bulk
     --compare --transfer-subtitles run and a manual one-off transfer share
     one audit trail.
     """
-    file_handler = logging.FileHandler(
-        transfer_subtitles.SUBTITLE_TRANSFER_LOG_FILE, encoding="utf-8"
-    )
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    LOGGER.addHandler(file_handler)
+    _add_file_handler(transfer_subtitles.LOGGER, transfer_subtitles.SUBTITLE_TRANSFER_LOG_FILE)
 
 
 def audit_library(client: JellyfinClient, library: MediaLibrary) -> tuple[AuditFinding, ...]:
@@ -290,6 +312,10 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         )
     if args.limit is not None and args.limit < 1:
         raise CommandLineUsageError("--limit must be a positive integer.")
+    if args.verify and not any_transfer_flag:
+        raise CommandLineUsageError(
+            "--verify requires --transfer-metadata, --transfer-images, or --transfer-subtitles."
+        )
 
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
@@ -307,6 +333,7 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         transfer_images=bool(args.transfer_images),
         transfer_subtitles=bool(args.transfer_subtitles),
         transfer_limit=args.limit,
+        verify=bool(args.verify),
     )
 
 
@@ -342,6 +369,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         options = parse_args(argv)
+        if options.transfer_metadata or options.transfer_images or options.transfer_subtitles:
+            _enable_general_file_logging()
         if options.transfer_metadata:
             _enable_metadata_transfer_file_logging()
         if options.transfer_images:
@@ -417,6 +446,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=options.transfer_limit,
             )
         transfer_exit_code = max(transfer_exit_code, image_transfer_exit_code, subtitle_transfer_exit_code)
+        if compare_result is not None and options.verify:
+            if options.transfer_metadata_dry_run:
+                LOGGER.info(
+                    "Skipping --verify: --dry-run did not write anything, so there is nothing to verify."
+                )
+            else:
+                compare_result = _verify_transfer_result(results[0], compare_result, options)
         if compare_result is not None:
             _write_comparison_site(
                 results[0],
@@ -670,6 +706,17 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "waiting for a full run."
         ),
     )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "With --transfer-metadata/--transfer-images/--transfer-subtitles, "
+            "re-audit the --compare server once transfers finish and write the "
+            "comparison report from that post-transfer state, so it reflects "
+            "what actually changed rather than the pre-transfer snapshot. "
+            "Ignored with --dry-run, since nothing was written to verify."
+        ),
+    )
     return parser
 
 
@@ -743,6 +790,53 @@ def _write_comparison_site(
     )
 
 
+def _verify_transfer_result(
+    left_result: AuditServerResult,
+    compare_result: AuditServerResult,
+    options: AuditRunOptions,
+) -> AuditServerResult:
+    """Re-audit the --compare server after transfers finish and log what remains.
+
+    Without this, the comparison report written at the end of a
+    --transfer-metadata/--transfer-images/--transfer-subtitles run still
+    reflects the compare server's state from before any of those writes
+    happened, so it can't actually confirm whether the transfer resolved
+    what it targeted.
+
+    Args:
+        left_result: Completed pre-transfer audit results for the base
+            server, reused as-is since the base server was never written to.
+        compare_result: Completed pre-transfer audit results for the compare
+            server, used only to identify which server to re-audit.
+        options: Parsed run options, for the library selection used the
+            first time.
+
+    Returns:
+        Freshly audited results for the compare server.
+    """
+    right_label = compare_result.server_name or compare_result.server_key or "compare server"
+    LOGGER.info("Verifying transfer results: re-auditing %s...", right_label)
+    verified_result = audit_server(
+        compare_result.server_key,
+        options.library_names,
+        include_configuration_snapshot=True,
+    )
+    summary_counts = comparison_summary_counts(left_result, verified_result)
+    LOGGER.info(
+        "Post-transfer comparison for %s: %d missing media, %d missing seasons, "
+        "%d missing episodes, %d mismatched metadata, %d artwork differences, "
+        "%d subtitle differences remaining.",
+        right_label,
+        summary_counts["missing_media"],
+        summary_counts["missing_seasons"],
+        summary_counts["missing_episodes"],
+        summary_counts["mismatched_metadata"],
+        summary_counts["artwork_differences"],
+        summary_counts["subtitle_differences"],
+    )
+    return verified_result
+
+
 def _run_bulk_metadata_transfer(
     left_result: AuditServerResult,
     right_result: AuditServerResult,
@@ -771,6 +865,7 @@ def _run_bulk_metadata_transfer(
         every attempted transfer succeeded (or nothing needed transferring),
         ``1`` if any item was rejected or failed.
     """
+    logger = transfer_metadata.LOGGER
     targets = mismatched_metadata_transfer_targets(left_result, right_result)
     if limit is not None:
         targets = targets[:limit]
@@ -778,10 +873,10 @@ def _run_bulk_metadata_transfer(
     right_label = right_result.server_name or right_result.server_key or "right"
 
     if not targets:
-        LOGGER.info("No mismatched metadata found between %s and %s.", left_label, right_label)
+        logger.info("No mismatched metadata found between %s and %s.", left_label, right_label)
         return 0, ()
 
-    LOGGER.info(
+    logger.info(
         "%s metadata for %d item(s) from %s to %s.",
         "Would transfer" if dry_run else "About to transfer",
         len(targets),
@@ -791,7 +886,7 @@ def _run_bulk_metadata_transfer(
     if not dry_run and not assume_yes:
         response = input(f"Transfer metadata for {len(targets)} item(s)? [y/N] ").strip().lower()
         if response not in {"y", "yes"}:
-            LOGGER.info("Aborted.")
+            logger.info("Aborted.")
             return 1, ()
 
     config = get_config()
@@ -812,7 +907,7 @@ def _run_bulk_metadata_transfer(
                 )
             except (ConfigError, JellyfinError) as error:
                 failed += 1
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: failed to prepare transfer: %s",
                     target.library, target.display_name, error,
                 )
@@ -828,7 +923,7 @@ def _run_bulk_metadata_transfer(
 
             if plan.is_rejected:
                 rejected += 1
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: refusing to update - %s",
                     target.library, target.display_name, plan.rejected_reason,
                 )
@@ -844,7 +939,7 @@ def _run_bulk_metadata_transfer(
 
             if not plan.has_changes:
                 unchanged += 1
-                LOGGER.info("[%s] %s: no transferable fields differ.", target.library, target.display_name)
+                logger.info("[%s] %s: no transferable fields differ.", target.library, target.display_name)
                 results.append(
                     MetadataTransferResult(
                         library=target.library,
@@ -858,7 +953,7 @@ def _run_bulk_metadata_transfer(
             change_summary = ", ".join(changed_fields)
             if dry_run:
                 transferred += 1
-                LOGGER.info("[%s] %s: would change %s", target.library, target.display_name, change_summary)
+                logger.info("[%s] %s: would change %s", target.library, target.display_name, change_summary)
                 results.append(
                     MetadataTransferResult(
                         library=target.library,
@@ -873,7 +968,7 @@ def _run_bulk_metadata_transfer(
                 transfer_metadata.apply_transfer(to_client, plan)
             except JellyfinError as error:
                 failed += 1
-                LOGGER.error("[%s] %s: update failed: %s", target.library, target.display_name, error)
+                logger.error("[%s] %s: update failed: %s", target.library, target.display_name, error)
                 results.append(
                     MetadataTransferResult(
                         library=target.library,
@@ -885,7 +980,7 @@ def _run_bulk_metadata_transfer(
                 continue
 
             transferred += 1
-            LOGGER.info("[%s] %s: transferred %s", target.library, target.display_name, change_summary)
+            logger.info("[%s] %s: transferred %s", target.library, target.display_name, change_summary)
             results.append(
                 MetadataTransferResult(
                     library=target.library,
@@ -898,7 +993,7 @@ def _run_bulk_metadata_transfer(
         for client in server_clients.values():
             client.close()
 
-    LOGGER.info(
+    logger.info(
         "Metadata transfer summary: %d transferred, %d unchanged, %d rejected, %d failed (of %d total).",
         transferred, unchanged, rejected, failed, len(targets),
     )
@@ -939,6 +1034,7 @@ def _run_bulk_image_transfer(
         ``0`` when every attempted transfer succeeded (or nothing needed
         transferring), ``1`` if any transfer failed.
     """
+    logger = transfer_images.LOGGER
     targets = missing_image_transfer_targets(left_result, right_result)
     if limit is not None:
         targets = targets[:limit]
@@ -946,10 +1042,10 @@ def _run_bulk_image_transfer(
     right_label = right_result.server_name or right_result.server_key or "right"
 
     if not targets:
-        LOGGER.info("No artwork differences found between %s and %s.", left_label, right_label)
+        logger.info("No artwork differences found between %s and %s.", left_label, right_label)
         return 0, ()
 
-    LOGGER.info(
+    logger.info(
         "%s images for %d item(s) from %s to %s.",
         "Would transfer" if dry_run else "About to transfer",
         len(targets),
@@ -959,7 +1055,7 @@ def _run_bulk_image_transfer(
     if not dry_run and not assume_yes:
         response = input(f"Transfer images for {len(targets)} item(s)? [y/N] ").strip().lower()
         if response not in {"y", "yes"}:
-            LOGGER.info("Aborted.")
+            logger.info("Aborted.")
             return 1, ()
 
     config = get_config()
@@ -977,7 +1073,7 @@ def _run_bulk_image_transfer(
                 to_client = _cached_jellyfin_client(server_clients, config, target.right_server_key)
             except ConfigError as error:
                 failed += len(BULK_IMAGE_TYPES)
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: failed to prepare transfer: %s",
                     target.library, target.display_name, error,
                 )
@@ -997,7 +1093,7 @@ def _run_bulk_image_transfer(
                 destination_item = to_client.get_item(target.right_item_id)
             except JellyfinError as error:
                 failed += len(BULK_IMAGE_TYPES)
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: failed to read destination item %s: %s",
                     target.library, target.display_name, target.right_item_id, error,
                 )
@@ -1023,7 +1119,7 @@ def _run_bulk_image_transfer(
                 # "Name" field), not display_name, which is a composed label
                 # ("Series - Season - S04E13 - Title") that would never match
                 # Jellyfin's Name for an episode even when correctly paired.
-                LOGGER.warning(
+                logger.warning(
                     "[%s] %s: destination item %s is named %r, not %r - verify this "
                     "pairing is correct before trusting this transfer.",
                     target.library, target.display_name, target.right_item_id,
@@ -1049,7 +1145,7 @@ def _run_bulk_image_transfer(
                     )
                 except JellyfinError as error:
                     failed += 1
-                    LOGGER.error(
+                    logger.error(
                         "[%s] %s: failed to read %s image: %s",
                         target.library, target.display_name, image_type, error,
                     )
@@ -1078,7 +1174,7 @@ def _run_bulk_image_transfer(
 
                 if dry_run:
                     transferred += 1
-                    LOGGER.info(
+                    logger.info(
                         "[%s] %s: would transfer %s image", target.library, target.display_name, image_type
                     )
                     results.append(
@@ -1095,7 +1191,7 @@ def _run_bulk_image_transfer(
                     transfer_images.apply_image_transfer(to_client, plan)
                 except JellyfinError as error:
                     failed += 1
-                    LOGGER.error(
+                    logger.error(
                         "[%s] %s: %s image upload failed: %s",
                         target.library, target.display_name, image_type, error,
                     )
@@ -1111,7 +1207,7 @@ def _run_bulk_image_transfer(
                     continue
 
                 transferred += 1
-                LOGGER.info("[%s] %s: transferred %s image", target.library, target.display_name, image_type)
+                logger.info("[%s] %s: transferred %s image", target.library, target.display_name, image_type)
                 results.append(
                     ImageTransferResult(
                         library=target.library,
@@ -1124,7 +1220,7 @@ def _run_bulk_image_transfer(
         for client in server_clients.values():
             client.close()
 
-    LOGGER.info(
+    logger.info(
         "Image transfer summary: %d transferred, %d already present, %d unavailable, "
         "%d failed (of %d item(s), %d image(s) attempted).",
         transferred, already_present, unavailable, failed, len(targets), len(results),
@@ -1171,6 +1267,7 @@ def _run_bulk_subtitle_transfer(
         every attempted transfer succeeded (or nothing needed transferring),
         ``1`` if any transfer failed.
     """
+    logger = transfer_subtitles.LOGGER
     targets = missing_subtitle_transfer_targets(left_result, right_result)
     if limit is not None:
         targets = targets[:limit]
@@ -1178,10 +1275,10 @@ def _run_bulk_subtitle_transfer(
     right_label = right_result.server_name or right_result.server_key or "right"
 
     if not targets:
-        LOGGER.info("No subtitle differences found between %s and %s.", left_label, right_label)
+        logger.info("No subtitle differences found between %s and %s.", left_label, right_label)
         return 0, ()
 
-    LOGGER.info(
+    logger.info(
         "%s subtitles for %d item(s) from %s to %s.",
         "Would transfer" if dry_run else "About to transfer",
         len(targets),
@@ -1191,7 +1288,7 @@ def _run_bulk_subtitle_transfer(
     if not dry_run and not assume_yes:
         response = input(f"Transfer subtitles for {len(targets)} item(s)? [y/N] ").strip().lower()
         if response not in {"y", "yes"}:
-            LOGGER.info("Aborted.")
+            logger.info("Aborted.")
             return 1, ()
 
     config = get_config()
@@ -1209,7 +1306,7 @@ def _run_bulk_subtitle_transfer(
                 to_client = _cached_jellyfin_client(server_clients, config, target.right_server_key)
             except ConfigError as error:
                 failed += 1
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: failed to prepare transfer: %s",
                     target.library, target.display_name, error,
                 )
@@ -1227,7 +1324,7 @@ def _run_bulk_subtitle_transfer(
                 destination_item = to_client.get_item(target.right_item_id)
             except JellyfinError as error:
                 failed += 1
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: failed to read destination item %s: %s",
                     target.library, target.display_name, target.right_item_id, error,
                 )
@@ -1258,7 +1355,7 @@ def _run_bulk_subtitle_transfer(
                 )
             except JellyfinError as error:
                 failed += 1
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: failed to read source subtitle: %s",
                     target.library, target.display_name, error,
                 )
@@ -1286,7 +1383,7 @@ def _run_bulk_subtitle_transfer(
 
             if dry_run:
                 transferred += 1
-                LOGGER.info(
+                logger.info(
                     "[%s] %s: would transfer subtitle (%s)",
                     target.library, target.display_name, plan.track_description,
                 )
@@ -1303,7 +1400,7 @@ def _run_bulk_subtitle_transfer(
                 transfer_subtitles.apply_subtitle_transfer(to_client, plan)
             except JellyfinError as error:
                 failed += 1
-                LOGGER.error(
+                logger.error(
                     "[%s] %s: subtitle upload failed: %s",
                     target.library, target.display_name, error,
                 )
@@ -1318,7 +1415,7 @@ def _run_bulk_subtitle_transfer(
                 continue
 
             transferred += 1
-            LOGGER.info(
+            logger.info(
                 "[%s] %s: transferred subtitle (%s)",
                 target.library, target.display_name, plan.track_description,
             )
@@ -1333,7 +1430,7 @@ def _run_bulk_subtitle_transfer(
         for client in server_clients.values():
             client.close()
 
-    LOGGER.info(
+    logger.info(
         "Subtitle transfer summary: %d transferred, %d already present, %d unavailable, "
         "%d failed (of %d total).",
         transferred, already_present, unavailable, failed, len(targets),

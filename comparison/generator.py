@@ -265,6 +265,39 @@ def missing_subtitle_transfer_targets(
     )
 
 
+def comparison_summary_counts(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+) -> dict[str, int]:
+    """Return headline comparison counts, matching the Overview page cards.
+
+    Args:
+        left_result: Completed audit results for the left server.
+        right_result: Completed audit results for the right server.
+
+    Returns:
+        A dictionary of comparison counts keyed by a stable label.
+    """
+    comparison = _build_comparison(left_result, right_result)
+    return {
+        "missing_libraries": (
+            len(comparison["missing_left_libraries"]) + len(comparison["missing_right_libraries"])
+        ),
+        "missing_media": (
+            len(comparison["missing_left_media"]) + len(comparison["missing_right_media"])
+        ),
+        "missing_seasons": (
+            len(comparison["left_missing_seasons"]) + len(comparison["right_missing_seasons"])
+        ),
+        "missing_episodes": (
+            len(comparison["left_missing_episodes"]) + len(comparison["right_missing_episodes"])
+        ),
+        "mismatched_metadata": len(comparison["mismatched_metadata"]),
+        "artwork_differences": len(comparison["artwork_differences"]),
+        "subtitle_differences": len(comparison["subtitle_differences"]),
+    }
+
+
 def write_comparison_reports(
     left_result: AuditServerResult,
     right_result: AuditServerResult,

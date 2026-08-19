@@ -3,12 +3,16 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results/comparison_results" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results/jellyfin" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results/jellyfin/checks" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results/jellyfin/libraries" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results/mediaserver" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results/mediaserver/checks" />
+      <excludeFolder url="file://$MODULE_DIR$/audit_results/mediaserver/libraries" />
     </content>
     <orderEntry type="jdk" jdkName="~\PycharmProjects\Jellyfin-Library_Auditor\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
-  <component name="PackageRequirementsSettings" />
-  <component name="PyDocumentationSettings" />
-  <component name="ReSTService" />
-  <component name="TestRunnerService" />
 </module>
