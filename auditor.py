@@ -21,8 +21,10 @@ from audit_types import AuditFinding
 from audit_types import AuditSeverity
 from comparison import ImageTransferResult
 from comparison import MetadataTransferResult
+from comparison import SubtitleTransferResult
 from comparison import mismatched_metadata_transfer_targets
 from comparison import missing_image_transfer_targets
+from comparison import missing_subtitle_transfer_targets
 from comparison import write_comparison_reports
 from config import ConfigError
 from config import ProcessingConfig
@@ -31,6 +33,7 @@ from config import ServerConfig
 from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
 from jellyfin import JellyfinRequestError
+from media import configured_english_language_codes
 from media import has_english_subtitles
 from media import local_backdrop_exists
 from media import local_nfo_exists
@@ -44,6 +47,7 @@ from results import AuditServerResult
 from results import LibraryAuditResult
 import transfer_images
 import transfer_metadata
+import transfer_subtitles
 
 
 LOGGER = logging.getLogger("")
@@ -78,6 +82,7 @@ class AuditRunOptions:
     transfer_metadata_dry_run: bool
     transfer_metadata_yes: bool
     transfer_images: bool
+    transfer_subtitles: bool
     transfer_limit: int | None
 
 
@@ -115,6 +120,22 @@ def _enable_image_transfer_file_logging() -> None:
     """
     file_handler = logging.FileHandler(
         transfer_images.IMAGE_TRANSFER_LOG_FILE, encoding="utf-8"
+    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    LOGGER.addHandler(file_handler)
+
+
+def _enable_subtitle_transfer_file_logging() -> None:
+    """Persist this run's log output to the shared subtitle-transfer log file.
+
+    Mirrors _enable_image_transfer_file_logging(): only attached for
+    --transfer-subtitles runs, writing to the same file
+    transfer_subtitles.py's own CLI writes to, so a bulk
+    --compare --transfer-subtitles run and a manual one-off transfer share
+    one audit trail.
+    """
+    file_handler = logging.FileHandler(
+        transfer_subtitles.SUBTITLE_TRANSFER_LOG_FILE, encoding="utf-8"
     )
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     LOGGER.addHandler(file_handler)
@@ -248,16 +269,25 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
     except argparse.ArgumentError as error:
         raise CommandLineUsageError(str(error)) from error
 
+    any_transfer_flag = args.transfer_metadata or args.transfer_images or args.transfer_subtitles
     if args.transfer_metadata and args.compare is None:
         raise CommandLineUsageError("--transfer-metadata requires --compare.")
     if args.transfer_images and args.compare is None:
         raise CommandLineUsageError("--transfer-images requires --compare.")
-    if args.dry_run and not (args.transfer_metadata or args.transfer_images):
-        raise CommandLineUsageError("--dry-run requires --transfer-metadata or --transfer-images.")
-    if args.yes and not (args.transfer_metadata or args.transfer_images):
-        raise CommandLineUsageError("--yes requires --transfer-metadata or --transfer-images.")
-    if args.limit is not None and not (args.transfer_metadata or args.transfer_images):
-        raise CommandLineUsageError("--limit requires --transfer-metadata or --transfer-images.")
+    if args.transfer_subtitles and args.compare is None:
+        raise CommandLineUsageError("--transfer-subtitles requires --compare.")
+    if args.dry_run and not any_transfer_flag:
+        raise CommandLineUsageError(
+            "--dry-run requires --transfer-metadata, --transfer-images, or --transfer-subtitles."
+        )
+    if args.yes and not any_transfer_flag:
+        raise CommandLineUsageError(
+            "--yes requires --transfer-metadata, --transfer-images, or --transfer-subtitles."
+        )
+    if args.limit is not None and not any_transfer_flag:
+        raise CommandLineUsageError(
+            "--limit requires --transfer-metadata, --transfer-images, or --transfer-subtitles."
+        )
     if args.limit is not None and args.limit < 1:
         raise CommandLineUsageError("--limit must be a positive integer.")
 
@@ -275,6 +305,7 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         transfer_metadata_dry_run=bool(args.dry_run),
         transfer_metadata_yes=bool(args.yes),
         transfer_images=bool(args.transfer_images),
+        transfer_subtitles=bool(args.transfer_subtitles),
         transfer_limit=args.limit,
     )
 
@@ -315,6 +346,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _enable_metadata_transfer_file_logging()
         if options.transfer_images:
             _enable_image_transfer_file_logging()
+        if options.transfer_subtitles:
+            _enable_subtitle_transfer_file_logging()
         selected_server_keys, compare_server_key = _resolve_run_targets(options)
         include_configuration_snapshot = compare_server_key is not None
         results = tuple(
@@ -373,13 +406,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assume_yes=options.transfer_metadata_yes,
                 limit=options.transfer_limit,
             )
-        transfer_exit_code = max(transfer_exit_code, image_transfer_exit_code)
+        subtitle_transfer_exit_code = 0
+        subtitle_transfer_results: tuple[SubtitleTransferResult, ...] | None = None
+        if compare_result is not None and options.transfer_subtitles:
+            subtitle_transfer_exit_code, subtitle_transfer_results = _run_bulk_subtitle_transfer(
+                results[0],
+                compare_result,
+                dry_run=options.transfer_metadata_dry_run,
+                assume_yes=options.transfer_metadata_yes,
+                limit=options.transfer_limit,
+            )
+        transfer_exit_code = max(transfer_exit_code, image_transfer_exit_code, subtitle_transfer_exit_code)
         if compare_result is not None:
             _write_comparison_site(
                 results[0],
                 compare_result,
                 transfer_results=transfer_results,
                 image_transfer_results=image_transfer_results,
+                subtitle_transfer_results=subtitle_transfer_results,
             )
         if should_write_html_site:
             if output_root is None:
@@ -588,23 +632,42 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--transfer-subtitles",
+        action="store_true",
+        help=(
+            "Transfer the English subtitle track for every item with a subtitle "
+            "difference from the base --server to the --compare server, reading "
+            "and writing entirely through the Jellyfin API so it also picks up "
+            "subtitles stored in Jellyfin's internal metadata cache rather than "
+            "next to the media file. Requires --compare. Prompts once for "
+            "confirmation before writing anything, unless --yes is given."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="With --transfer-metadata/--transfer-images, preview planned transfers without writing anything.",
+        help=(
+            "With --transfer-metadata/--transfer-images/--transfer-subtitles, "
+            "preview planned transfers without writing anything."
+        ),
     )
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="With --transfer-metadata/--transfer-images, skip the batch confirmation prompt.",
+        help=(
+            "With --transfer-metadata/--transfer-images/--transfer-subtitles, "
+            "skip the batch confirmation prompt."
+        ),
     )
     parser.add_argument(
         "--limit",
         type=int,
         metavar="N",
         help=(
-            "With --transfer-metadata/--transfer-images, only attempt the first N "
-            "items found, regardless of outcome. Useful for quickly testing code "
-            "changes in bulk mode without waiting for a full run."
+            "With --transfer-metadata/--transfer-images/--transfer-subtitles, "
+            "only attempt the first N items found, regardless of outcome. "
+            "Useful for quickly testing code changes in bulk mode without "
+            "waiting for a full run."
         ),
     )
     return parser
@@ -665,6 +728,7 @@ def _write_comparison_site(
     *,
     transfer_results: tuple[MetadataTransferResult, ...] | None = None,
     image_transfer_results: tuple[ImageTransferResult, ...] | None = None,
+    subtitle_transfer_results: tuple[SubtitleTransferResult, ...] | None = None,
 ) -> None:
     """Write comparison reports for two audited servers."""
     if left_result.server_key == right_result.server_key:
@@ -675,6 +739,7 @@ def _write_comparison_site(
         right_result,
         transfer_results=transfer_results,
         image_transfer_results=image_transfer_results,
+        subtitle_transfer_results=subtitle_transfer_results,
     )
 
 
@@ -1066,6 +1131,240 @@ def _run_bulk_image_transfer(
     )
     exit_code = 1 if failed else 0
     return exit_code, tuple(results)
+
+
+def _run_bulk_subtitle_transfer(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+    *,
+    dry_run: bool,
+    assume_yes: bool,
+    limit: int | None = None,
+) -> tuple[int, tuple[SubtitleTransferResult, ...]]:
+    """Transfer the English subtitle track for every subtitle-differing item pair.
+
+    Reuses the same source/destination pairing the comparison report shows,
+    so this only ever acts on items the "Subtitle Differences" table would
+    also flag. Reads and writes subtitles entirely through the Jellyfin API
+    (see transfer_subtitles.plan_subtitle_transfer), so a source subtitle
+    stored in Jellyfin's internal metadata cache rather than next to the
+    media file transfers the same as one that isn't - the gap a plain rsync
+    of the media directories leaves. Skipped with "already_present" when the
+    destination already has an English subtitle track (not attempted, not
+    duplicated), and recorded "no_source_subtitle" (not a failure) when the
+    source has none to give - this also covers pairs where the comparison's
+    real direction is right-has-it/left-doesn't, since subtitle_differences
+    doesn't itself encode which side is missing. Continues past a single
+    item's failure rather than aborting the whole batch, logging a summary
+    at the end.
+
+    Args:
+        left_result: Completed audit results for the source server.
+        right_result: Completed audit results for the destination server.
+        dry_run: Preview planned transfers without writing anything.
+        assume_yes: Skip the batch confirmation prompt.
+        limit: When given, only attempt the first N items found, regardless
+            of outcome - for quickly testing bulk-mode changes.
+
+    Returns:
+        A tuple of (exit code, per-item results). Exit code is ``0`` when
+        every attempted transfer succeeded (or nothing needed transferring),
+        ``1`` if any transfer failed.
+    """
+    targets = missing_subtitle_transfer_targets(left_result, right_result)
+    if limit is not None:
+        targets = targets[:limit]
+    left_label = left_result.server_name or left_result.server_key or "left"
+    right_label = right_result.server_name or right_result.server_key or "right"
+
+    if not targets:
+        LOGGER.info("No subtitle differences found between %s and %s.", left_label, right_label)
+        return 0, ()
+
+    LOGGER.info(
+        "%s subtitles for %d item(s) from %s to %s.",
+        "Would transfer" if dry_run else "About to transfer",
+        len(targets),
+        left_label,
+        right_label,
+    )
+    if not dry_run and not assume_yes:
+        response = input(f"Transfer subtitles for {len(targets)} item(s)? [y/N] ").strip().lower()
+        if response not in {"y", "yes"}:
+            LOGGER.info("Aborted.")
+            return 1, ()
+
+    config = get_config()
+    server_clients: dict[str, JellyfinClient] = {}
+    results: list[SubtitleTransferResult] = []
+    transferred = 0
+    unavailable = 0
+    already_present = 0
+    failed = 0
+
+    try:
+        for target in targets:
+            try:
+                from_client = _cached_jellyfin_client(server_clients, config, target.left_server_key)
+                to_client = _cached_jellyfin_client(server_clients, config, target.right_server_key)
+            except ConfigError as error:
+                failed += 1
+                LOGGER.error(
+                    "[%s] %s: failed to prepare transfer: %s",
+                    target.library, target.display_name, error,
+                )
+                results.append(
+                    SubtitleTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="failed",
+                        detail=str(error),
+                    )
+                )
+                continue
+
+            try:
+                destination_item = to_client.get_item(target.right_item_id)
+            except JellyfinError as error:
+                failed += 1
+                LOGGER.error(
+                    "[%s] %s: failed to read destination item %s: %s",
+                    target.library, target.display_name, target.right_item_id, error,
+                )
+                results.append(
+                    SubtitleTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="failed",
+                        detail=str(error),
+                    )
+                )
+                continue
+
+            if _has_english_subtitle_stream(destination_item):
+                already_present += 1
+                results.append(
+                    SubtitleTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="already_present",
+                    )
+                )
+                continue
+
+            try:
+                plan = transfer_subtitles.plan_subtitle_transfer(
+                    from_client, to_client, target.left_item_id, target.right_item_id
+                )
+            except JellyfinError as error:
+                failed += 1
+                LOGGER.error(
+                    "[%s] %s: failed to read source subtitle: %s",
+                    target.library, target.display_name, error,
+                )
+                results.append(
+                    SubtitleTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="failed",
+                        detail=str(error),
+                    )
+                )
+                continue
+
+            if not plan.has_subtitle:
+                unavailable += 1
+                results.append(
+                    SubtitleTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="no_source_subtitle",
+                        detail=plan.track_description,
+                    )
+                )
+                continue
+
+            if dry_run:
+                transferred += 1
+                LOGGER.info(
+                    "[%s] %s: would transfer subtitle (%s)",
+                    target.library, target.display_name, plan.track_description,
+                )
+                results.append(
+                    SubtitleTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="would_transfer",
+                    )
+                )
+                continue
+
+            try:
+                transfer_subtitles.apply_subtitle_transfer(to_client, plan)
+            except JellyfinError as error:
+                failed += 1
+                LOGGER.error(
+                    "[%s] %s: subtitle upload failed: %s",
+                    target.library, target.display_name, error,
+                )
+                results.append(
+                    SubtitleTransferResult(
+                        library=target.library,
+                        display_name=target.display_name,
+                        status="failed",
+                        detail=str(error),
+                    )
+                )
+                continue
+
+            transferred += 1
+            LOGGER.info(
+                "[%s] %s: transferred subtitle (%s)",
+                target.library, target.display_name, plan.track_description,
+            )
+            results.append(
+                SubtitleTransferResult(
+                    library=target.library,
+                    display_name=target.display_name,
+                    status="transferred",
+                )
+            )
+    finally:
+        for client in server_clients.values():
+            client.close()
+
+    LOGGER.info(
+        "Subtitle transfer summary: %d transferred, %d already present, %d unavailable, "
+        "%d failed (of %d total).",
+        transferred, already_present, unavailable, failed, len(targets),
+    )
+    exit_code = 1 if failed else 0
+    return exit_code, tuple(results)
+
+
+def _has_english_subtitle_stream(item_dto: dict) -> bool:
+    """Return whether a Jellyfin item document already has an English subtitle track.
+
+    Mirrors the language criterion has_english_subtitles() applies to a
+    normalized MediaItem, but reads directly from a raw item document's
+    MediaStreams so the bulk --transfer-subtitles run can check a freshly
+    fetched destination item without re-normalizing it into a MediaItem.
+    """
+    english_codes = configured_english_language_codes()
+    media_streams = item_dto.get("MediaStreams")
+    if not isinstance(media_streams, list):
+        return False
+
+    for stream in media_streams:
+        if not isinstance(stream, dict):
+            continue
+        if str(stream.get("Type", "")).strip().lower() != "subtitle":
+            continue
+        language = str(stream.get("Language") or "").strip().lower()
+        if language in english_codes:
+            return True
+
+    return False
 
 
 def _has_image_of_type(item_dto: dict, image_type: str) -> bool:

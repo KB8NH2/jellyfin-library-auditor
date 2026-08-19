@@ -30,6 +30,10 @@ LIBRARIES_ENDPOINT = "/Library/MediaFolders"
 ITEMS_ENDPOINT = "/Items"
 ITEM_ENDPOINT_TEMPLATE = "/Items/{item_id}"
 ITEM_IMAGE_ENDPOINT_TEMPLATE = "/Items/{item_id}/Images/{image_type}"
+ITEM_SUBTITLE_STREAM_ENDPOINT_TEMPLATE = (
+    "/Videos/{item_id}/{media_source_id}/Subtitles/{index}/Stream.{format}"
+)
+ITEM_SUBTITLE_UPLOAD_ENDPOINT_TEMPLATE = "/Videos/{item_id}/Subtitles"
 USER_ITEM_ENDPOINT_TEMPLATE = "/Users/{user_id}/Items/{item_id}"
 USERS_ENDPOINT = "/Users"
 PING_ENDPOINT = "/System/Info/Public"
@@ -58,6 +62,12 @@ ITEM_DETAIL_FIELDS = ",".join(
         "ImageTags",
         "BackdropImageTags",
         "MediaStreams",
+        # Needed to address a specific subtitle stream for transfer (the
+        # download/upload endpoints are scoped by media source id, which
+        # isn't otherwise part of the item document). Excluded from update
+        # payloads by transfer_metadata.NON_EDITABLE_ITEM_FIELDS, so
+        # fetching it here doesn't risk being sent back on a metadata write.
+        "MediaSources",
         "Overview",
         "Genres",
         "Tags",
@@ -489,6 +499,90 @@ class JellyfinClient:
         except requests.RequestException as error:
             raise self._wrap_request_error("POST", url, error) from error
 
+    def get_item_subtitle(
+        self,
+        item_id: str,
+        media_source_id: str,
+        index: int,
+        subtitle_format: str,
+    ) -> bytes | None:
+        """Return the raw bytes of one item's subtitle stream, converted to a format.
+
+        Jellyfin serves subtitle content through this streaming endpoint
+        regardless of where the underlying file actually lives on disk -
+        next to the media file or in Jellyfin's own internal metadata cache
+        - and transcodes on the fly when the source track uses a different
+        text-based subtitle codec (e.g. ASS/SSA to SRT), so the caller never
+        needs filesystem access to the source server.
+
+        Args:
+            item_id: Jellyfin item identifier.
+            media_source_id: Media source identifier the stream belongs to.
+            index: Stream index of the subtitle track, from its MediaStreams
+                entry.
+            subtitle_format: Subtitle format to request, e.g. ``"srt"``.
+
+        Returns:
+            The raw subtitle file bytes, or ``None`` when Jellyfin has
+            nothing to return for this stream.
+        """
+        url = self._build_url(
+            ITEM_SUBTITLE_STREAM_ENDPOINT_TEMPLATE.format(
+                item_id=item_id,
+                media_source_id=media_source_id,
+                index=index,
+                format=subtitle_format,
+            )
+        )
+        try:
+            response = self._session.request(
+                "GET", url, headers={"Accept": "*/*"}, timeout=self._timeout
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise self._wrap_request_error("GET", url, error) from error
+
+        return response.content or None
+
+    def upload_item_subtitle(
+        self,
+        item_id: str,
+        *,
+        language: str,
+        subtitle_format: str,
+        is_forced: bool,
+        is_hearing_impaired: bool,
+        subtitle_bytes: bytes,
+    ) -> None:
+        """Upload one subtitle file to an item, adding it alongside existing tracks.
+
+        Jellyfin's subtitle-upload endpoint expects the subtitle bytes
+        base64-encoded in the request body, mirroring
+        :meth:`upload_item_image`.
+
+        Args:
+            item_id: Jellyfin item identifier to update.
+            language: Subtitle language code (e.g. ``"eng"``).
+            subtitle_format: Subtitle file format/extension (e.g. ``"srt"``).
+            is_forced: Whether the subtitle should be marked forced.
+            is_hearing_impaired: Whether the subtitle should be marked
+                hearing-impaired (SDH).
+            subtitle_bytes: Raw, non-encoded subtitle file bytes.
+        """
+        self._request_payload(
+            "POST",
+            ITEM_SUBTITLE_UPLOAD_ENDPOINT_TEMPLATE.format(item_id=item_id),
+            json_body={
+                "Language": language,
+                "Format": subtitle_format,
+                "IsForced": is_forced,
+                "IsHearingImpaired": is_hearing_impaired,
+                "Data": base64.b64encode(subtitle_bytes).decode("ascii"),
+            },
+        )
+
     def get_server_user_experience_settings(self) -> tuple[ComparisonSetting, ...]:
         """Return selected server settings that can affect user-visible behavior."""
         payload = self._request(SYSTEM_CONFIGURATION_ENDPOINT)
@@ -873,12 +967,18 @@ class JellyfinClient:
         Returns:
             A normalized subtitle track.
         """
+        index = self._get_optional_int(stream_data, "Index")
+        if index is None:
+            raise JellyfinResponseError(
+                "Jellyfin returned a subtitle stream with no Index."
+            )
         return SubtitleTrack(
             language=self._get_optional_str(stream_data, "Language") or "",
             codec=self._get_optional_str(stream_data, "Codec"),
             is_external=self._get_bool(stream_data, "IsExternal"),
             is_default=self._get_bool(stream_data, "IsDefault"),
             is_forced=self._get_bool(stream_data, "IsForced"),
+            index=index,
         )
 
     def _audio_track_from_stream(self, stream_data: Mapping[str, Any]) -> AudioTrack:

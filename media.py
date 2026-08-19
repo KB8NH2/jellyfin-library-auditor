@@ -46,7 +46,7 @@ JELLYFIN_IMAGE_TAGS = (
 )
 
 
-def _configured_english_language_codes() -> frozenset[str]:
+def configured_english_language_codes() -> frozenset[str]:
     """Return the configured set of English language codes."""
     config = get_config()
     return frozenset(config.reporting.english_language_codes)
@@ -193,7 +193,7 @@ def get_english_subtitle_tracks(item: MediaItem) -> tuple[SubtitleTrack, ...]:
     Returns:
         A tuple of matching subtitle tracks.
     """
-    language_codes = _configured_english_language_codes()
+    language_codes = configured_english_language_codes()
     return tuple(
         track
         for track in item.subtitle_tracks

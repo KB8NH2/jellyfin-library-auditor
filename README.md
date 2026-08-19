@@ -151,9 +151,10 @@ python auditor.py --server main --compare backup --transfer-metadata
 | `--severity SEVERITY` | Filter by severity: `info`, `warning`, `error` |
 | `--transfer-metadata` | Transfer metadata for every mismatched item from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing metadata between servers](#synchronizing-metadata-between-servers)) |
 | `--transfer-images` | Transfer cached images (Primary, Backdrop, Thumb) for every item with an artwork difference from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing images between servers](#synchronizing-images-between-servers)) |
-| `--dry-run` | With `--transfer-metadata`/`--transfer-images`, preview planned transfers without writing anything |
-| `--yes` | With `--transfer-metadata`/`--transfer-images`, skip the batch confirmation prompt |
-| `--limit N` | With `--transfer-metadata`/`--transfer-images`, only attempt the first N items found, regardless of outcome - useful for quickly testing bulk-mode changes without waiting for a full run |
+| `--transfer-subtitles` | Transfer the English subtitle track for every item with a subtitle difference from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing subtitles between servers](#synchronizing-subtitles-between-servers)) |
+| `--dry-run` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, preview planned transfers without writing anything |
+| `--yes` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, skip the batch confirmation prompt |
+| `--limit N` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, only attempt the first N items found, regardless of outcome - useful for quickly testing bulk-mode changes without waiting for a full run |
 
 ## Synchronizing metadata between servers
 
@@ -212,6 +213,35 @@ python transfer_images.py --from-server main --from-item <id> --to-server backup
 
 It prints both items' names before writing (so you can confirm you're pointed at the item you think you are), and re-reads the destination item's `ImageTags` immediately after the upload to show whether Jellyfin actually recorded the new image, not just whether the HTTP request succeeded. Skip the confirmation prompt with `--yes`; `--image-type` defaults to `Primary` and also accepts `Backdrop` or `Thumb`. Transfers append to `image_transfer.log`, mirroring `metadata_transfer.log`.
 
+## Synchronizing subtitles between servers
+
+When `--compare` finds items whose English subtitle availability differs between the two servers (the "Subtitle Differences" table), the subtitle track can be copied from the server that has it to the one that doesn't - entirely through the Jellyfin API, not the filesystem:
+
+```powershell
+python auditor.py --server main --compare backup --transfer-subtitles --dry-run
+python auditor.py --server main --compare backup --transfer-subtitles
+```
+
+This is what makes it possible to sync subtitles a plain rsync of the media directories misses: Jellyfin sometimes stores an external subtitle file inside its own internal metadata cache (e.g. `/var/lib/jellyfin/metadata/library/...`) rather than next to the video file, so a scheduled rsync of the media library never touches it even though the source server plays it fine. `--transfer-subtitles` downloads the subtitle through Jellyfin's video-streaming endpoint (which serves it regardless of where the file actually lives) and uploads it to the destination through Jellyfin's subtitle-upload endpoint, so it works the same way whether the source file sits next to the media or only in the metadata cache.
+
+Only text-based subtitle tracks (SRT, ASS/SSA, VTT, etc.) can be transferred this way - Jellyfin transcodes any of those to SRT on the fly when streaming. Bitmap-based tracks (PGS, VobSub) can't be converted and are reported as "no source subtitle" rather than attempted. It only fills in what the destination is actually missing: an item that already has an English subtitle track is left alone ("already present"), and one item failing doesn't stop the rest of the batch. As with `--transfer-metadata`/`--transfer-images`, it asks for one confirmation covering the whole batch (skip it with `--yes`), and `--dry-run` previews without writing anything.
+
+The comparison report gains a "Subtitle Transfer Results" table (Subtitles page) whenever `--transfer-subtitles` was used, showing each item's outcome - transferred, would transfer (`--dry-run`), already present, no source subtitle, or failed.
+
+`--transfer-metadata`, `--transfer-images`, and `--transfer-subtitles` are independent and can be combined in the same run; all three share `--dry-run`/`--yes`/`--limit`.
+
+**Given this writes to a live Jellyfin server, run `--dry-run` first before trusting it on a real library, especially unattended.**
+
+### One item at a time
+
+`transfer_subtitles.py` transfers a single item's English subtitle track directly, without going through a comparison run:
+
+```powershell
+python transfer_subtitles.py --from-server main --from-item <id> --to-server backup --to-item <id>
+```
+
+It prints both items' names before writing, then re-reads the destination item's `MediaStreams` after the upload to show how many subtitle tracks it has. Skip the confirmation prompt with `--yes`. Transfers append to `subtitle_transfer.log`, mirroring `metadata_transfer.log`/`image_transfer.log`.
+
 ## Output
 
 By default, reports are written under `audit_results\`.
@@ -222,14 +252,16 @@ By default, reports are written under `audit_results\`.
 - `audit_results\comparison_results\index.html` - comparison dashboard when `--compare` is used
 - `metadata_transfer.log` - append-only record of every metadata transfer, written next to wherever `auditor.py --transfer-metadata` or `transfer_metadata.py` was run
 - `image_transfer.log` - append-only record of every image transfer, written next to wherever `auditor.py --transfer-images` or `transfer_images.py` was run
+- `subtitle_transfer.log` - append-only record of every subtitle transfer, written next to wherever `auditor.py --transfer-subtitles` or `transfer_subtitles.py` was run
 
 ## Project layout
 
-- `auditor.py` - CLI entry point and orchestration, including the bulk `--transfer-metadata` and `--transfer-images` runs
+- `auditor.py` - CLI entry point and orchestration, including the bulk `--transfer-metadata`, `--transfer-images`, and `--transfer-subtitles` runs
 - `transfer_metadata.py` - standalone CLI to transfer one item's metadata between two servers; also provides the plan/apply functions the bulk run uses
 - `transfer_images.py` - standalone CLI to transfer one item's cached image between two servers; also provides the plan/apply functions the bulk `--transfer-images` run uses
+- `transfer_subtitles.py` - standalone CLI to transfer one item's English subtitle track between two servers, entirely through the Jellyfin API; also provides the plan/apply functions the bulk `--transfer-subtitles` run uses
 - `config.py` - application and server configuration
-- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata and image read/upload calls transfers use)
+- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use)
 - `models.py` - normalized data models
 - `media.py` - media and filesystem helpers, including filename-based episode title parsing
 - `audit.py` / `audit_types.py` - audit rules and finding types

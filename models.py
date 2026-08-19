@@ -106,6 +106,11 @@ class SubtitleTrack:
     is_external: bool
     is_default: bool
     is_forced: bool
+    # Jellyfin's MediaStreams stream index for this track, needed to address
+    # it via the subtitle streaming/upload endpoints for a transfer. Defaults
+    # to -1 so existing callers that build a SubtitleTrack without knowing
+    # the source stream (e.g. test fixtures) keep working.
+    index: int = -1
 
     def __post_init__(self) -> None:
         """Normalize language and codec values."""
