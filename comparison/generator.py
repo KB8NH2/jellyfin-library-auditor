@@ -188,20 +188,27 @@ def missing_image_transfer_targets(
     left_result: AuditServerResult,
     right_result: AuditServerResult,
 ) -> tuple[ImageTransferTarget, ...]:
-    """Return one transfer target for every item pair with an artwork difference.
+    """Return one transfer target for every item pair the source can actually fill in.
 
-    Reuses the same comparison used to build the "Artwork Differences" report
-    table, so this always matches what that report shows. Returns nothing
-    when either server is missing a configured server key, since a transfer
-    can't be built without one.
+    Starts from the same comparison used to build the "Artwork Differences"
+    report table, but that table is symmetric - it flags a pair whenever
+    presence differs in either direction, including when the destination
+    already has the image and the source is the one missing it. A transfer
+    only ever pulls from the source (left) to the destination (right), so a
+    pair like that can never be filled in; including it would just inflate
+    the "about to transfer" count and cost a wasted destination lookup before
+    landing on "already_present". Filtered here to only the direction a
+    transfer can resolve: source has the image, destination doesn't. Returns
+    nothing when either server is missing a configured server key, since a
+    transfer can't be built without one.
 
     Args:
         left_result: Completed audit results for the source server.
         right_result: Completed audit results for the destination server.
 
     Returns:
-        One target per artwork-differing item pair, in the same order the
-        report displays them.
+        One target per pair where the source has artwork the destination is
+        missing, in the same order the report displays them.
     """
     left_server_key = left_result.server_key
     right_server_key = right_result.server_key
@@ -220,6 +227,7 @@ def missing_image_transfer_targets(
             right_item_id=pair.right.id,
         )
         for pair in comparison["artwork_differences"]
+        if has_jellyfin_primary_image(pair.left) and not has_jellyfin_primary_image(pair.right)
     )
 
 
@@ -227,24 +235,28 @@ def missing_subtitle_transfer_targets(
     left_result: AuditServerResult,
     right_result: AuditServerResult,
 ) -> tuple[SubtitleTransferTarget, ...]:
-    """Return one transfer target for every item pair with a subtitle difference.
+    """Return one transfer target for every item pair the source can actually fill in.
 
-    Reuses the same comparison used to build the "Subtitle Differences"
-    report table, so this always matches what that report shows. A pair
-    lands here regardless of which side actually has the English subtitle -
-    the bulk transfer loop itself resolves direction by checking the
-    destination before attempting anything, the same way
-    ``missing_image_transfer_targets`` does for artwork. Returns nothing
-    when either server is missing a configured server key, since a transfer
-    can't be built without one.
+    Starts from the same comparison used to build the "Subtitle Differences"
+    report table, but that table is symmetric - it flags a pair whenever
+    English-subtitle presence differs in either direction, including when
+    the destination already has one and the source is the one missing it. A
+    transfer only ever pulls from the source (left) to the destination
+    (right), so a pair like that can never be filled in; including it would
+    just inflate the "about to transfer" count and cost a wasted destination
+    lookup before landing on "already_present" - the same issue fixed in
+    ``missing_image_transfer_targets`` for artwork. Filtered here to only the
+    direction a transfer can resolve: source has an English subtitle,
+    destination doesn't. Returns nothing when either server is missing a
+    configured server key, since a transfer can't be built without one.
 
     Args:
         left_result: Completed audit results for the source server.
         right_result: Completed audit results for the destination server.
 
     Returns:
-        One target per subtitle-differing item pair, in the same order the
-        report displays them.
+        One target per pair where the source has an English subtitle the
+        destination is missing, in the same order the report displays them.
     """
     left_server_key = left_result.server_key
     right_server_key = right_result.server_key
@@ -262,6 +274,7 @@ def missing_subtitle_transfer_targets(
             right_item_id=pair.right.id,
         )
         for pair in comparison["subtitle_differences"]
+        if has_english_subtitles(pair.left) and not has_english_subtitles(pair.right)
     )
 
 

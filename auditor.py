@@ -1247,12 +1247,12 @@ def _run_bulk_subtitle_transfer(
     media file transfers the same as one that isn't - the gap a plain rsync
     of the media directories leaves. Skipped with "already_present" when the
     destination already has an English subtitle track (not attempted, not
-    duplicated), and recorded "no_source_subtitle" (not a failure) when the
-    source has none to give - this also covers pairs where the comparison's
-    real direction is right-has-it/left-doesn't, since subtitle_differences
-    doesn't itself encode which side is missing. Continues past a single
-    item's failure rather than aborting the whole batch, logging a summary
-    at the end.
+    duplicated - a safety net for staleness between the audit snapshot and
+    the live server, since missing_subtitle_transfer_targets already filters
+    to source-has/destination-doesn't pairs), and recorded
+    "no_source_subtitle" (not a failure) when the source has none to give.
+    Continues past a single item's failure rather than aborting the whole
+    batch, logging a summary at the end.
 
     Args:
         left_result: Completed audit results for the source server.
