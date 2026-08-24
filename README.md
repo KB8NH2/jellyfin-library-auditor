@@ -165,7 +165,7 @@ python auditor.py --server main --compare backup --transfer-metadata
 | `--dry-run` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, preview planned transfers without writing anything |
 | `--yes` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, skip the batch confirmation prompt |
 | `--limit N` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, only attempt the first N items found, regardless of outcome - useful for quickly testing bulk-mode changes without waiting for a full run |
-| `--verify` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, re-audit the `--compare` server once transfers finish and write the comparison report from that post-transfer state instead of the pre-transfer snapshot; ignored with `--dry-run` |
+| `--verify` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, re-audit the `--compare` server once transfers finish and write the comparison report from that post-transfer state instead of the pre-transfer snapshot; ignored with `--dry-run`, or if no item was actually transferred |
 
 ## Synchronizing metadata between servers
 
@@ -251,7 +251,7 @@ By default, the comparison report written at the end of a `--transfer-metadata`/
 python auditor.py --server main --compare backup --transfer-metadata --transfer-images --transfer-subtitles --yes --verify
 ```
 
-It also logs a one-line summary of what remains (missing media, mismatched metadata, artwork differences, subtitle differences, etc.) right after the re-audit finishes. `--verify` is ignored with `--dry-run`, since a dry run doesn't write anything for a re-audit to pick up.
+It also logs a one-line summary of what remains (missing media, mismatched metadata, artwork differences, subtitle differences, etc.) right after the re-audit finishes. `--verify` is ignored with `--dry-run`, since a dry run doesn't write anything for a re-audit to pick up, and it's also skipped whenever no item in the batch actually reached `transferred` status - e.g. every flagged item turned out to have no transferable field differences once fully read, or was rejected/failed - since there's nothing a re-audit would show as changed.
 
 ### One item at a time
 

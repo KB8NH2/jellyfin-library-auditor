@@ -487,6 +487,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 LOGGER.info(
                     "Skipping --verify: --dry-run did not write anything, so there is nothing to verify."
                 )
+            elif not _any_transfer_completed(
+                transfer_results, image_transfer_results, subtitle_transfer_results
+            ):
+                LOGGER.info(
+                    "Skipping --verify: no items were actually transferred, so there is nothing to verify."
+                )
             else:
                 compare_result = _verify_transfer_result(results[0], compare_result, options)
         if compare_result is not None:
@@ -823,7 +829,8 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "re-audit the --compare server once transfers finish and write the "
             "comparison report from that post-transfer state, so it reflects "
             "what actually changed rather than the pre-transfer snapshot. "
-            "Ignored with --dry-run, since nothing was written to verify."
+            "Ignored with --dry-run, or if no item was actually transferred, "
+            "since there is nothing to verify."
         ),
     )
     return parser
@@ -897,6 +904,27 @@ def _write_comparison_site(
         image_transfer_results=image_transfer_results,
         subtitle_transfer_results=subtitle_transfer_results,
     )
+
+
+def _any_transfer_completed(
+    transfer_results: tuple[MetadataTransferResult, ...] | None,
+    image_transfer_results: tuple[ImageTransferResult, ...] | None,
+    subtitle_transfer_results: tuple[SubtitleTransferResult, ...] | None,
+) -> bool:
+    """Return whether at least one item across the transfer batches was written.
+
+    A finding flagged as different doesn't always mean anything was actually
+    sent - an item can be rejected, fail, or turn out to have no
+    transferable field differences once the full item is read from both
+    servers. Verifying re-audits the compare server, which is only worth the
+    round-trip if a write actually happened.
+    """
+    for results in (transfer_results, image_transfer_results, subtitle_transfer_results):
+        if results is None:
+            continue
+        if any(result.status == "transferred" for result in results):
+            return True
+    return False
 
 
 def _verify_transfer_result(
