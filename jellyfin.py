@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Iterable
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -76,10 +77,22 @@ ITEM_DETAIL_FIELDS = ",".join(
         "Studios",
         "People",
         "ProviderIds",
+        # Also gated behind Fields. A caller that locks a field it just
+        # edited (so a metadata provider's next refresh doesn't silently
+        # revert it) needs the item's existing locks here first, or a
+        # "replace the whole item" update would wipe out any locks Jellyfin
+        # already had for this item.
+        "LockedFields",
+        # Also gated behind Fields (transfer_metadata.py includes this
+        # among TRANSFERABLE_METADATA_FIELDS, but without it here that
+        # transfer silently never had a source value to copy - every
+        # OriginalTitle read came back missing rather than None).
+        "OriginalTitle",
     ]
 )
 ITEM_TYPES = "Movie,Episode"
 SERIES_ITEM_TYPE = "Series"
+EPISODE_ITEM_TYPE = "Episode"
 VIDEO_STREAM_TYPE = "video"
 AUDIO_STREAM_TYPE = "audio"
 SUBTITLE_STREAM_TYPE = "subtitle"
@@ -266,6 +279,24 @@ LIBRARY_USER_EXPERIENCE_FIELDS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class SeriesMatch:
+    """One Series item found by name, with its TheTVDB provider id if any."""
+
+    library_name: str
+    series_id: str
+    tvdb_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeSummary:
+    """A minimal Episode item summary used to locate items to update."""
+
+    id: str
+    name: str
+    episode_number: int
+
+
 class JellyfinError(RuntimeError):
     """Base exception for Jellyfin client errors."""
 
@@ -430,6 +461,151 @@ class JellyfinClient:
                 break
 
         return series_tvdb_ids
+
+    def find_series(
+        self,
+        series_name: str,
+        *,
+        library_name: str | None = None,
+    ) -> tuple[SeriesMatch, ...]:
+        """Return every Series item in TV libraries whose name matches.
+
+        Args:
+            series_name: Series display name to match, case-insensitively.
+            library_name: When given, only that library (matched
+                case-insensitively) is searched instead of every TV library.
+
+        Returns:
+            One SeriesMatch per matching series, across every TV library
+            searched. A series with no "Tvdb" provider id is still included,
+            with tvdb_id set to None.
+        """
+        normalized_name = series_name.strip().casefold()
+        normalized_library_name = (
+            library_name.strip().casefold() if library_name is not None else None
+        )
+
+        matches: list[SeriesMatch] = []
+        for library in self.get_libraries():
+            if not library.is_tv_library:
+                continue
+            if (
+                normalized_library_name is not None
+                and library.name.strip().casefold() != normalized_library_name
+            ):
+                continue
+
+            matches.extend(self._find_series_in_library(library, normalized_name))
+
+        return tuple(matches)
+
+    def _find_series_in_library(
+        self,
+        library: MediaLibrary,
+        normalized_name: str,
+    ) -> list[SeriesMatch]:
+        """Return every Series item in one library whose name matches."""
+        matches: list[SeriesMatch] = []
+        start_index = 0
+
+        while True:
+            payload = self._request(
+                ITEMS_ENDPOINT,
+                params={
+                    "ParentId": library.id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": SERIES_ITEM_TYPE,
+                    "Fields": "ProviderIds",
+                    "StartIndex": start_index,
+                    "Limit": self._page_size,
+                },
+            )
+            raw_items = self._get_required_list(payload, "Items", "series response")
+
+            for raw_item in raw_items:
+                name = self._get_optional_str(raw_item, "Name")
+                if name is None or name.strip().casefold() != normalized_name:
+                    continue
+                matches.append(
+                    SeriesMatch(
+                        library_name=library.name,
+                        series_id=self._get_required_str(raw_item, "Id", "series item"),
+                        tvdb_id=self._get_string_dict(raw_item, "ProviderIds").get("Tvdb"),
+                    )
+                )
+
+            total_count = self._get_optional_int(payload, "TotalRecordCount")
+            start_index += len(raw_items)
+
+            if not raw_items:
+                break
+            if total_count is not None and start_index >= total_count:
+                break
+            if len(raw_items) < self._page_size:
+                break
+
+        return matches
+
+    def get_series_season_episodes(
+        self,
+        series_id: str,
+        season_number: int,
+    ) -> tuple[EpisodeSummary, ...]:
+        """Return every Episode item in one season of one series.
+
+        Episode items already carry their season number directly
+        (ParentIndexNumber), so this needs no separate Season-item lookup.
+
+        Args:
+            series_id: Jellyfin Series item identifier.
+            season_number: Season number to match against each episode's
+                ParentIndexNumber.
+
+        Returns:
+            EpisodeSummary tuples for every matching episode, sorted by
+            episode number. Episodes with no episode number are omitted.
+        """
+        episodes: list[EpisodeSummary] = []
+        start_index = 0
+
+        while True:
+            payload = self._request(
+                ITEMS_ENDPOINT,
+                params={
+                    "ParentId": series_id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": EPISODE_ITEM_TYPE,
+                    "StartIndex": start_index,
+                    "Limit": self._page_size,
+                },
+            )
+            raw_items = self._get_required_list(payload, "Items", "episodes response")
+
+            for raw_item in raw_items:
+                if self._get_optional_int(raw_item, "ParentIndexNumber") != season_number:
+                    continue
+                episode_number = self._get_optional_int(raw_item, "IndexNumber")
+                if episode_number is None:
+                    continue
+                episodes.append(
+                    EpisodeSummary(
+                        id=self._get_required_str(raw_item, "Id", "episode item"),
+                        name=self._get_optional_str(raw_item, "Name") or "",
+                        episode_number=episode_number,
+                    )
+                )
+
+            total_count = self._get_optional_int(payload, "TotalRecordCount")
+            start_index += len(raw_items)
+
+            if not raw_items:
+                break
+            if total_count is not None and start_index >= total_count:
+                break
+            if len(raw_items) < self._page_size:
+                break
+
+        return tuple(sorted(episodes, key=lambda episode: episode.episode_number))
 
     def get_item(self, item_id: str) -> dict[str, Any]:
         """Return the full Jellyfin metadata document for one item.
@@ -1426,9 +1602,11 @@ class JellyfinClient:
 
 
 __all__ = [
+    "EpisodeSummary",
     "JellyfinClient",
     "JellyfinConfigurationError",
     "JellyfinError",
     "JellyfinRequestError",
     "JellyfinResponseError",
+    "SeriesMatch",
 ]

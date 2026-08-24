@@ -263,6 +263,28 @@ python transfer_subtitles.py --from-server main --from-item <id> --to-server bac
 
 It prints both items' names before writing, then re-reads the destination item's `MediaStreams` after the upload to show how many subtitle tracks it has. Skip the confirmation prompt with `--yes`. Transfers append to `subtitle_transfer.log`, mirroring `metadata_transfer.log`/`image_transfer.log`.
 
+## Applying TheTVDB DVD-order metadata
+
+`--check-episode-order` only flags a season whose title disagrees between TheTVDB's aired order and DVD order at the same position - it doesn't fix it. `apply_dvd_metadata.py` fixes one series/season in place: for every episode currently in that season, it looks up TheTVDB's DVD-order episode at that same season/episode position and overwrites the episode's `Name` and `Overview` with the DVD-order values. Episode and season numbers are never touched, so this only corrects what an episode is called, not where it lives.
+
+```powershell
+python apply_dvd_metadata.py --series-name "Show Name" --season-number 2
+```
+
+Uses the same `servers.toml` (defaulting to `default_server`; override with `--server`) and `tvdb_cache.json` as the rest of the project. If the series name matches shows in more than one library, add `--library NAME` to disambiguate. It prints every episode's planned outcome - the old and new title/overview, "no DVD-order match at this position" when TheTVDB has nothing at that position, or "already matches DVD order" when there's nothing to change - then asks for one confirmation covering the whole season (skip it with `--yes`). Attempts append to `dvd_metadata_apply.log`, mirroring `metadata_transfer.log`.
+
+Any of `Name`/`Overview` it actually changes is added to the episode's `LockedFields`, the same thing Jellyfin's own "Edit Metadata" dialog does when you change a field by hand - without this, a library with TheTVDB's internet metadata provider enabled treats those fields as provider-owned and its next scheduled/on-demand refresh silently reverts the edit back to aired-order data, even though the write itself succeeded. (`OriginalTitle` is written but never locked - Jellyfin's `LockedFields` deserializes into a fixed server-side enum that has no `OriginalTitle` member, and any unrecognized entry fails the whole update with a 400.) It also re-reads each episode immediately after writing it and reports "update did not take effect" instead of "updated" if Jellyfin still shows the old value - a successful HTTP response only means the write was accepted, not that it stuck.
+
+### Undoing an inadvertent reordering
+
+Before changing an episode's `Name`, the tool copies whatever `Name` currently holds into `OriginalTitle` first - this repurposes `OriginalTitle` as this tool's own undo backup, so it will overwrite any genuine original-language title already stored there. Add `--aired` to reverse the process and restore toward aired order:
+
+```powershell
+python apply_dvd_metadata.py --series-name "Show Name" --season-number 2 --aired
+```
+
+For `Name`, `--aired` prefers each episode's `OriginalTitle` backup over a fresh TheTVDB aired-order lookup, since the backup is exactly what the episode had before this tool last changed it, even if TheTVDB's own aired-order data has changed since. If an episode has no `OriginalTitle` backup (it was never touched by a DVD-order apply), `--aired` falls back to TheTVDB's aired-order title for that position instead. `Overview` has no equivalent backup field, so it's always restored from TheTVDB's aired-order data when available. An episode with neither a backup nor any TheTVDB aired-order data at that position is skipped, same as a DVD-order apply skips a position TheTVDB's DVD order doesn't cover.
+
 ## Output
 
 By default, reports are written under `audit_results\`.
@@ -274,6 +296,7 @@ By default, reports are written under `audit_results\`.
 - `metadata_transfer.log` - append-only record of every metadata transfer, written next to wherever `auditor.py --transfer-metadata` or `transfer_metadata.py` was run
 - `image_transfer.log` - append-only record of every image transfer, written next to wherever `auditor.py --transfer-images` or `transfer_images.py` was run
 - `subtitle_transfer.log` - append-only record of every subtitle transfer, written next to wherever `auditor.py --transfer-subtitles` or `transfer_subtitles.py` was run
+- `dvd_metadata_apply.log` - append-only record of every DVD-order metadata apply attempt, written next to wherever `apply_dvd_metadata.py` was run
 - `audit.log` - append-only record of everything else logged during an `auditor.py` run that used at least one `--transfer-*` flag (audit progress, comparison writing, `--verify` output, errors) - the transfer-type log files above only ever contain their own transfer's history, never this. Combine multiple `--transfer-*` flags in one run and each still only writes to its own log file; nothing gets duplicated across them.
 
 ## Project layout
@@ -282,8 +305,9 @@ By default, reports are written under `audit_results\`.
 - `transfer_metadata.py` - standalone CLI to transfer one item's metadata between two servers; also provides the plan/apply functions the bulk run uses
 - `transfer_images.py` - standalone CLI to transfer one item's cached image between two servers; also provides the plan/apply functions the bulk `--transfer-images` run uses
 - `transfer_subtitles.py` - standalone CLI to transfer one item's English subtitle track between two servers, entirely through the Jellyfin API; also provides the plan/apply functions the bulk `--transfer-subtitles` run uses
+- `apply_dvd_metadata.py` - standalone CLI to overwrite one series/season's episode Name/Overview with TheTVDB's DVD-order values
 - `config.py` - application and server configuration
-- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use)
+- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use, plus series/episode lookups by name for `apply_dvd_metadata.py`)
 - `models.py` - normalized data models
 - `media.py` - media and filesystem helpers, including filename-based episode title parsing
 - `audit.py` / `audit_types.py` - audit rules and finding types
