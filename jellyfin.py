@@ -88,9 +88,6 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_PAGE_SIZE = 200
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
-# Transient failures worth retrying: 429 (rate limited) and the 5xx codes a
-# Jellyfin server can return while briefly overloaded or restarting.
-RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 LOGGER = logging.getLogger("jellyfin")
 SERVER_USER_EXPERIENCE_FIELDS = (
@@ -853,11 +850,13 @@ class JellyfinClient:
         url: str,
         **kwargs: Any,
     ) -> requests.Response:
-        """Send an HTTP request, retrying transient network failures.
+        """Send an HTTP request, retrying on connection failures and timeouts.
 
-        Jellyfin occasionally times out or briefly returns a 5xx/429 under
+        Jellyfin can intermittently time out or drop the connection under
         load; a short exponential backoff retry recovers from those without
-        the caller having to notice.
+        the caller having to notice. HTTP error status codes are left to the
+        caller (via ``response.raise_for_status()``) since those are not
+        necessarily transient.
 
         Args:
             method: HTTP method to use.
@@ -876,20 +875,13 @@ class JellyfinClient:
         """
         for attempt in range(1, self._max_retries + 1):
             try:
-                response = self._session.request(
+                return self._session.request(
                     method=method, url=url, timeout=self._timeout, **kwargs
                 )
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as error:
                 if attempt >= self._max_retries:
                     raise
                 self._log_retry(attempt, method, url, str(error))
-                continue
-
-            if response.status_code in RETRYABLE_STATUS_CODES and attempt < self._max_retries:
-                self._log_retry(attempt, method, url, f"HTTP {response.status_code}")
-                continue
-
-            return response
 
         raise AssertionError("unreachable: retry loop always returns or raises")
 
