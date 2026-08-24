@@ -18,7 +18,7 @@ The current implementation checks:
 - TV episode metadata titles that don't match the title implied by the filename's `SxxExx` naming (including `SxxEyy-Ezz` multi-episode ranges)
 - TV episode metadata titles that don't match the title implied by an embedded video/audio stream title (some rips, e.g. from mkvmerge, preserve the original scene-release filename in a stream's title even after the file itself is renamed - this catches mislabeled episodes a filename-only check can't, since the renamed filename and Jellyfin's metadata can otherwise agree with each other while both being wrong)
 - Movie metadata titles that don't match the title implied by the filename's `(Year)` naming
-- Optionally (`--check-episode-order`, requires `TVDB_API_KEY`): TV episodes whose title disagrees between TheTVDB's aired order and DVD order at the same season/episode position - catches series stored on disk in one ordering but labeled with the other, where the filename, season number, and episode number all still look correct
+- Optionally (`--check-episode-order`, requires a TheTVDB `api_key` in `servers.toml`): TV episodes whose title disagrees between TheTVDB's aired order and DVD order at the same season/episode position - catches series stored on disk in one ordering but labeled with the other, where the filename, season number, and episode number all still look correct
 
 The filename-title checks tolerate cosmetic differences that don't represent a real mismatch: dot-delimited release names (`Show.S01E02.Episode.Title.mkv`), straight vs. curly quotes and dashes, roman vs. arabic numerals in a parenthetical suffix (`(I)` vs. `(1)`), `&` vs. `and`, `+` vs. `/`, a Unicode ellipsis (`…`) vs. three literal periods (`...`), and leading parenthetical text that's actually part of the title (e.g. `(Dis)Members Only`). Release-quality tags in a filename (`1080p`, `WEB-DL`, `x264`, etc.) are stripped only when they form a genuine trailing run of tags, so an ordinary title word that happens to look like one - an episode called "Spider in the Web," for example - isn't mistaken for one.
 
@@ -64,7 +64,12 @@ api_key = "your_api_key_here"
 name = "Backup Jellyfin"
 url = "http://your-backup-host:8096"
 api_key = "your_backup_api_key_here"
+
+[tvdb]
+api_key = "your_thetvdb_v4_api_key_here"
 ```
+
+The optional `[tvdb]` table holds the TheTVDB v4 API key used by `--check-episode-order`. Omit the table, or leave `api_key` empty, to leave the feature disabled.
 
 ### Environment variables
 
@@ -80,7 +85,6 @@ Optional environment variables:
 | `ENABLE_MOVIES` | Enable movie library auditing | `true` |
 | `ENABLE_TV` | Enable TV library auditing | `true` |
 | `ENGLISH_LANGUAGE_CODES` | Comma-separated language codes treated as English subtitles | `en,eng,` |
-| `TVDB_API_KEY` | TheTVDB v4 API key, required by `--check-episode-order` | empty (feature disabled) |
 | `TVDB_CACHE_TTL_DAYS` | How many days a cached TheTVDB episode-ordering lookup stays valid before `--check-episode-order` re-fetches it | `7` |
 
 ## Usage
@@ -153,7 +157,7 @@ python auditor.py --server main --compare backup --transfer-metadata
 | `--library NAME` | Limit auditing to a library name; repeatable |
 | `--category CATEGORY` | Filter by category: `subtitles`, `artwork`, `metadata`, `episode_order`, `video`, `audio`, `filesystem` |
 | `--severity SEVERITY` | Filter by severity: `info`, `warning`, `error` |
-| `--check-episode-order` | Check TV episodes against TheTVDB's aired and DVD orderings and flag any episode whose title differs between the two at its season/episode position; requires `TVDB_API_KEY`. Results are cached to `tvdb_cache.json` (see `TVDB_CACHE_TTL_DAYS`) so repeat runs skip TheTVDB entirely for series with a fresh cache entry |
+| `--check-episode-order` | Check TV episodes against TheTVDB's aired and DVD orderings and flag any episode whose title differs between the two at its season/episode position; requires a TheTVDB `api_key` in the `[tvdb]` table of `servers.toml`. Results are cached to `tvdb_cache.json` (see `TVDB_CACHE_TTL_DAYS`) so repeat runs skip TheTVDB entirely for series with a fresh cache entry |
 | `--refresh-tvdb-cache` | With `--check-episode-order`, ignore cached TheTVDB lookups and fetch fresh data for every series this run (still updates the cache) |
 | `--transfer-metadata` | Transfer metadata for every mismatched item from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing metadata between servers](#synchronizing-metadata-between-servers)) |
 | `--transfer-images` | Transfer cached images (Primary, Backdrop, Thumb) for every item with an artwork difference from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing images between servers](#synchronizing-images-between-servers)) |

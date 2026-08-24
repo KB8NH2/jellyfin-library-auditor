@@ -331,7 +331,7 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         )
     if args.check_episode_order and not get_config().tvdb.api_key:
         raise CommandLineUsageError(
-            "--check-episode-order requires the TVDB_API_KEY environment variable to be set."
+            "--check-episode-order requires api_key to be set in the [tvdb] table of servers.toml."
         )
     if args.refresh_tvdb_cache and not args.check_episode_order:
         raise CommandLineUsageError(
@@ -742,8 +742,8 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "orderings and flag any episode whose title differs between the "
             "two at its season/episode position, since a series stored on "
             "disk in one order but labeled with the other still looks "
-            "internally consistent to every other check. Requires the "
-            "TVDB_API_KEY environment variable."
+            "internally consistent to every other check. Requires api_key "
+            "to be set in the [tvdb] table of servers.toml."
         ),
     )
     parser.add_argument(

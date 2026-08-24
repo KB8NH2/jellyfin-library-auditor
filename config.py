@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 try:
     import tomllib
@@ -27,7 +28,6 @@ AUDIT_HTML_FILENAME_ENV_VAR = "AUDIT_HTML_FILENAME"
 ENABLE_MOVIES_ENV_VAR = "ENABLE_MOVIES"
 ENABLE_TV_ENV_VAR = "ENABLE_TV"
 ENGLISH_LANGUAGE_CODES_ENV_VAR = "ENGLISH_LANGUAGE_CODES"
-TVDB_API_KEY_ENV_VAR = "TVDB_API_KEY"
 TVDB_CACHE_TTL_DAYS_ENV_VAR = "TVDB_CACHE_TTL_DAYS"
 
 DEFAULT_REPORT_MEDIA_PATH_PREFIX = ""
@@ -293,7 +293,7 @@ def load_config() -> AppConfig:
     )
 
     tvdb_config = TvdbConfig(
-        api_key=_read_string(TVDB_API_KEY_ENV_VAR, "") or None,
+        api_key=load_tvdb_api_key(),
         cache_ttl_days=_read_int(TVDB_CACHE_TTL_DAYS_ENV_VAR, DEFAULT_TVDB_CACHE_TTL_DAYS),
     )
 
@@ -305,9 +305,8 @@ def load_config() -> AppConfig:
     )
 
 
-def load_server_collection(path: Path | None = None) -> ServerCollection:
-    """Load the configured Jellyfin servers from TOML."""
-    servers_path = path or _default_servers_path()
+def _load_toml_payload(servers_path: Path) -> dict[str, Any]:
+    """Load and parse the servers TOML file into a raw dict payload."""
     if not servers_path.is_file():
         raise ConfigError(
             f"Server configuration file was not found at {servers_path}."
@@ -320,6 +319,34 @@ def load_server_collection(path: Path | None = None) -> ServerCollection:
 
     if not isinstance(payload, dict):
         raise ConfigError(f"{servers_path} must contain a TOML table.")
+
+    return payload
+
+
+def load_tvdb_api_key(path: Path | None = None) -> str | None:
+    """Load the optional TheTVDB API key from the ``[tvdb]`` table in TOML."""
+    servers_path = path or _default_servers_path()
+    payload = _load_toml_payload(servers_path)
+
+    tvdb_table = payload.get("tvdb")
+    if tvdb_table is None:
+        return None
+    if not isinstance(tvdb_table, dict):
+        raise ConfigError(f"[tvdb] in {servers_path} must be a TOML table.")
+
+    api_key = tvdb_table.get("api_key")
+    if api_key is None:
+        return None
+    if not isinstance(api_key, str):
+        raise ConfigError(f"[tvdb] api_key in {servers_path} must be a string.")
+
+    return api_key.strip() or None
+
+
+def load_server_collection(path: Path | None = None) -> ServerCollection:
+    """Load the configured Jellyfin servers from TOML."""
+    servers_path = path or _default_servers_path()
+    payload = _load_toml_payload(servers_path)
 
     default_server = payload.get("default_server")
     if not isinstance(default_server, str) or not default_server.strip():
