@@ -8,6 +8,8 @@ reporting, or any assumptions about how media data will be evaluated.
 from __future__ import annotations
 
 import base64
+import logging
+import time
 from collections.abc import Iterable
 from collections.abc import Mapping
 from pathlib import Path
@@ -77,12 +79,20 @@ ITEM_DETAIL_FIELDS = ",".join(
     ]
 )
 ITEM_TYPES = "Movie,Episode"
+SERIES_ITEM_TYPE = "Series"
 VIDEO_STREAM_TYPE = "video"
 AUDIO_STREAM_TYPE = "audio"
 SUBTITLE_STREAM_TYPE = "subtitle"
 RequestParamValue = str | bytes | int | float | list[str] | tuple[str, ...] | None
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_PAGE_SIZE = 200
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
+# Transient failures worth retrying: 429 (rate limited) and the 5xx codes a
+# Jellyfin server can return while briefly overloaded or restarting.
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+LOGGER = logging.getLogger("jellyfin")
 SERVER_USER_EXPERIENCE_FIELDS = (
     ("ServerName", "Server Name"),
     ("UICulture", "UI Culture"),
@@ -285,6 +295,8 @@ class JellyfinClient:
         processing: ProcessingConfig | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         page_size: int = DEFAULT_PAGE_SIZE,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
     ) -> None:
         """Initialize the Jellyfin client from one server configuration."""
         self._session = requests.Session()
@@ -299,6 +311,8 @@ class JellyfinClient:
         self._server_url = server.url.rstrip("/")
         self._timeout = timeout_seconds
         self._page_size = page_size
+        self._max_retries = max(1, max_retries)
+        self._retry_backoff_seconds = retry_backoff_seconds
         self._cached_user_id: str | None = None
 
         self._session.headers.update(
@@ -369,6 +383,56 @@ class JellyfinClient:
         """
         library = self._get_library_by_id(library_id)
         return self._get_library_items_for_library(library)
+
+    def get_series_tvdb_ids(self, library_id: str) -> dict[str, str]:
+        """Return each TV series' TheTVDB id, keyed by series name.
+
+        Used by the optional aired/DVD episode-ordering check, which needs
+        TheTVDB's series id but has no reason to fetch anything else about
+        the Series item itself.
+
+        Args:
+            library_id: Jellyfin library identifier.
+
+        Returns:
+            A mapping of series display name to TheTVDB provider id, for
+            series that have one. Series without a "Tvdb" provider id are
+            omitted.
+        """
+        series_tvdb_ids: dict[str, str] = {}
+        start_index = 0
+
+        while True:
+            payload = self._request(
+                ITEMS_ENDPOINT,
+                params={
+                    "ParentId": library_id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": SERIES_ITEM_TYPE,
+                    "Fields": "ProviderIds",
+                    "StartIndex": start_index,
+                    "Limit": self._page_size,
+                },
+            )
+            raw_items = self._get_required_list(payload, "Items", "series response")
+
+            for raw_item in raw_items:
+                name = self._get_optional_str(raw_item, "Name")
+                tvdb_id = self._get_string_dict(raw_item, "ProviderIds").get("Tvdb")
+                if name and tvdb_id:
+                    series_tvdb_ids[name] = tvdb_id
+
+            total_count = self._get_optional_int(payload, "TotalRecordCount")
+            start_index += len(raw_items)
+
+            if not raw_items:
+                break
+            if total_count is not None and start_index >= total_count:
+                break
+            if len(raw_items) < self._page_size:
+                break
+
+        return series_tvdb_ids
 
     def get_item(self, item_id: str) -> dict[str, Any]:
         """Return the full Jellyfin metadata document for one item.
@@ -453,9 +517,7 @@ class JellyfinClient:
             ITEM_IMAGE_ENDPOINT_TEMPLATE.format(item_id=item_id, image_type=image_type)
         )
         try:
-            response = self._session.request(
-                "GET", url, headers={"Accept": "*/*"}, timeout=self._timeout
-            )
+            response = self._send_request("GET", url, headers={"Accept": "*/*"})
             if response.status_code == 404:
                 return None
             response.raise_for_status()
@@ -488,12 +550,11 @@ class JellyfinClient:
             ITEM_IMAGE_ENDPOINT_TEMPLATE.format(item_id=item_id, image_type=image_type)
         )
         try:
-            response = self._session.request(
+            response = self._send_request(
                 "POST",
                 url,
                 data=base64.b64encode(image_bytes),
                 headers={"Content-Type": content_type},
-                timeout=self._timeout,
             )
             response.raise_for_status()
         except requests.RequestException as error:
@@ -535,9 +596,7 @@ class JellyfinClient:
             )
         )
         try:
-            response = self._session.request(
-                "GET", url, headers={"Accept": "*/*"}, timeout=self._timeout
-            )
+            response = self._send_request("GET", url, headers={"Accept": "*/*"})
             if response.status_code == 404:
                 return None
             response.raise_for_status()
@@ -773,13 +832,7 @@ class JellyfinClient:
         url = self._build_url(path)
 
         try:
-            response = self._session.request(
-                method=method,
-                url=url,
-                params=params,
-                json=json_body,
-                timeout=self._timeout,
-            )
+            response = self._send_request(method, url, params=params, json=json_body)
             response.raise_for_status()
         except requests.RequestException as error:
             raise self._wrap_request_error(method, url, error) from error
@@ -793,6 +846,66 @@ class JellyfinClient:
             raise JellyfinResponseError(
                 f"Jellyfin returned invalid JSON for {method} {url}."
             ) from error
+
+    def _send_request(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Send an HTTP request, retrying transient network failures.
+
+        Jellyfin occasionally times out or briefly returns a 5xx/429 under
+        load; a short exponential backoff retry recovers from those without
+        the caller having to notice.
+
+        Args:
+            method: HTTP method to use.
+            url: Absolute URL to request.
+            kwargs: Extra keyword arguments forwarded to
+                :meth:`requests.Session.request` (e.g. ``params``, ``json``,
+                ``data``, ``headers``).
+
+        Returns:
+            The HTTP response, which may still carry a non-2xx status code
+            for the caller to handle.
+
+        Raises:
+            requests.RequestException: If every retry attempt fails with a
+                connection error or timeout.
+        """
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                response = self._session.request(
+                    method=method, url=url, timeout=self._timeout, **kwargs
+                )
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as error:
+                if attempt >= self._max_retries:
+                    raise
+                self._log_retry(attempt, method, url, str(error))
+                continue
+
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < self._max_retries:
+                self._log_retry(attempt, method, url, f"HTTP {response.status_code}")
+                continue
+
+            return response
+
+        raise AssertionError("unreachable: retry loop always returns or raises")
+
+    def _log_retry(self, attempt: int, method: str, url: str, reason: str) -> None:
+        """Log a retry attempt and sleep for an exponential backoff delay."""
+        delay = self._retry_backoff_seconds * (2 ** (attempt - 1))
+        LOGGER.warning(
+            "Jellyfin request failed (attempt %d/%d): %s %s: %s; retrying in %.1fs",
+            attempt,
+            self._max_retries,
+            method,
+            url,
+            reason,
+            delay,
+        )
+        time.sleep(delay)
 
     @classmethod
     def _wrap_request_error(
@@ -1016,6 +1129,8 @@ class JellyfinClient:
             bitrate=self._get_optional_int(stream_data, "BitRate"),
             hdr=self._is_hdr_video_stream(stream_data, video_range),
             video_range=video_range,
+            title=self._get_optional_str(stream_data, "Title")
+            or self._get_optional_str(stream_data, "DisplayTitle"),
         )
 
     def _is_hdr_video_stream(

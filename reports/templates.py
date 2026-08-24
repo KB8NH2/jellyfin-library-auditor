@@ -30,7 +30,9 @@ CHECK_DISPLAY_LABELS = {
     "unknown_audio_codec": "Unknown Audio Codec",
     "hdr_video": "HDR Video",
     "mismatched_episode_filename_title": "Mismatched Episode Filename Title",
+    "mismatched_episode_stream_title": "Mismatched Episode Stream Title",
     "mismatched_movie_filename_title": "Mismatched Movie Filename Title",
+    "aired_dvd_order_mismatch": "Aired/DVD Order Mismatch",
 }
 CHECK_DISPLAY_ORDER = (
     "missing_primary_image",
@@ -49,6 +51,7 @@ CHECK_SUMMARY_LABELS = {
     "missing_episodes": "Episodes",
     "unknown_video_codec": "Video Codec",
     "unknown_audio_codec": "Audio Codec",
+    "aired_dvd_order_mismatch": "Episode Order",
 }
 
 

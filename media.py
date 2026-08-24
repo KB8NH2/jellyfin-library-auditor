@@ -29,12 +29,25 @@ GENERIC_NFO_FILENAMES = (
     "season.nfo",
 )
 RELEASE_TAG_TOKEN_PATTERN = re.compile(
-    r"(?i)^("
+    r"(?i)^(?:"
     r"2160p|1080p|720p|480p|4k|"
-    r"hdtv|web[- ]?dl|webrip|web|bluray|brrip|bdrip|dvdrip|hdrip|"
-    r"x264|x265|h264|h265|hevc|aac|ac3|dts|flac"
-    r")(-\S+)?$"
+    r"hdtv|web[- ]?dl|webrip|web|bluray|brrip|bdrip|dvdrip|dvd|hdrip|ntsc|pal|"
+    r"repack|proper|remux|extended|unrated|"
+    r"x264|x265|h264|h265|hevc|av1|vp9|"
+    r"aac|ac3|eac3|ddp\d*|dd\d*|truehd|atmos|dts(?:-?hd|-?ma)?|flac|"
+    r"sdr|hdr10?"
+    # Named rather than positional so a future alternative added above (like
+    # "dts(?:-?hd|-?ma)?") can't silently shift this group's index and break
+    # the "-GROUPNAME" suffix check below without any test catching it -
+    # exactly what happened here once already.
+    r")(?P<group_suffix>-\S+)?$"
 )
+# Matches the *shape* of a bare release-group name or stray channel-count
+# digit (e.g. the "JCH" in "x264 JCH", or the "1" in "DDP5 1"): a single word
+# with no attached punctuation, so it's never confused with e.g. the "(1)"
+# copy marker. See _trailing_tag_run for how this is used - matching this
+# shape alone is never enough on its own to strip a word.
+_RELEASE_GROUP_NAME_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
 TITLE_STRIP_CHARACTERS = " -_.[]{}:"
 PRIMARY_IMAGE_TAG = "Primary"
 BACKDROP_IMAGE_TAG = "Backdrop"
@@ -311,20 +324,180 @@ def expected_episode_title_from_filename(item: MediaItem) -> str | None:
     if not item.is_episode or item.season_number is None or item.episode_number is None:
         return None
 
-    marker_pattern = re.compile(
-        rf"(?i)s0*{item.season_number}e0*{item.episode_number}(?:-?e0*\d+)*(?!\d)"
+    return _expected_episode_title_from_text(
+        item.path.stem, item.season_number, item.episode_number
     )
-    stem = item.path.stem
-    marker_match = marker_pattern.search(stem)
+
+
+def expected_episode_title_from_stream_titles(item: MediaItem) -> str | None:
+    """Return the episode title implied by an embedded video/audio stream title.
+
+    Tools like mkvmerge often set a stream's ``Title`` to the original
+    scene-release filename at rip time, and that title survives even after
+    the container file itself gets renamed to fit Jellyfin's naming
+    convention. So a rip that was mislabeled at organize time can still carry
+    its true episode identity here, in a place a filename-only check can't
+    see - the (renamed) filename and Jellyfin's metadata can otherwise agree
+    with each other while both being wrong. This checks the primary video
+    track first, then each audio track in order, since either can carry the
+    original title independently of the other.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        The episode title segment implied by the first track whose title
+        contains a marker matching the item's known season and starting
+        episode numbers, or ``None`` when no track has one.
+    """
+    if not item.is_episode or item.season_number is None or item.episode_number is None:
+        return None
+
+    candidate_titles = [
+        track.title for track in (item.video_track,) if track is not None
+    ]
+    candidate_titles.extend(track.title for track in item.audio_tracks)
+
+    for candidate_title in candidate_titles:
+        if not candidate_title:
+            continue
+        expected_title = _expected_episode_title_from_text(
+            candidate_title, item.season_number, item.episode_number
+        )
+        if expected_title is not None:
+            return expected_title
+
+    return None
+
+
+def _expected_episode_title_from_text(
+    text: str,
+    season_number: int,
+    episode_number: int,
+) -> str | None:
+    """Return the episode title implied by a filename-style text fragment.
+
+    Args:
+        text: Filename-like text to search, e.g. a filename stem or an
+            embedded stream title.
+        season_number: The item's known season number.
+        episode_number: The item's known starting episode number.
+
+    Returns:
+        The episode title segment implied by the text, or ``None`` when the
+        text has no recognizable ``SxxExx`` marker or no title text follows
+        it.
+    """
+    marker_pattern = re.compile(
+        rf"(?i)s0*{season_number}e0*{episode_number}(?:-?e0*\d+)*(?!\d)"
+    )
+    marker_match = marker_pattern.search(text)
     if marker_match is None:
         return None
 
-    remainder = stem[marker_match.end() :].replace("_", " ").replace(".", " ")
+    remainder = text[marker_match.end() :].replace("_", " ").replace(".", " ")
     remainder = _strip_trailing_release_tags(remainder)
 
     remainder = remainder.strip(TITLE_STRIP_CHARACTERS)
     remainder = re.sub(r"\s+", " ", remainder).strip()
     return remainder or None
+
+
+def _strip_wrapping_parens(word: str) -> str:
+    """Return ``word`` with one layer of wrapping parentheses removed.
+
+    Used only to decide whether a word is a release tag (e.g. a
+    parenthesized tag group like "(1080p AV1)" splits into the words
+    "(1080p" and "AV1)") - the original word, parentheses included, is what
+    actually gets kept or dropped from the title.
+    """
+    core = word
+    if core.startswith("("):
+        core = core[1:]
+    if core.endswith(")"):
+        core = core[:-1]
+    return core
+
+
+def _is_separator_word(word: str) -> bool:
+    """Return whether ``word`` is made entirely of separator punctuation."""
+    return bool(word) and all(character in TITLE_STRIP_CHARACTERS for character in word)
+
+
+def _trailing_tag_run(
+    words: list[str],
+    *,
+    wildcard_budget: int = 1,
+) -> tuple[int, int, bool]:
+    """Scan ``words`` from the end for a run of recognized release tags.
+
+    A separator-only word (e.g. a lone "-" left over from a dash-delimited
+    filename) and a layer of wrapping parentheses around a tag word (e.g.
+    "(1080p" / "AV1)" from a parenthesized tag group like "(1080p AV1)")
+    are transparent: neither counts as a tag itself, but neither stops the
+    run either, so a technical-info suffix like "(1080p AV1) - SDR" is
+    recognized as a whole even though half of it isn't a bare tag word.
+
+    A release group name is sometimes its own bare trailing word instead of
+    hyphenated onto the last tag (e.g. "x264 JCH" instead of "x264-JCH"), and
+    a channel-count suffix like "5.1" can itself split into two words ("5"
+    and "1") once dots become spaces, stranding a bare digit in the middle
+    of otherwise-genuine release info (e.g. "... DDP5 1 x264-NTb"). Since
+    such words can't be enumerated the way tags can, up to ``wildcard_budget``
+    of them may be skipped over - but only when doing so is later justified
+    by finding at least one more real tag further back; a bare word that
+    isn't followed (further back) by anything recognizable is left alone; a
+    lone bare trailing word is exactly as likely to be a real title's last
+    word (e.g. "Spider in the Web") as it is release info, so this alone
+    never causes a title's actual final word(s) to be misread as junk.
+
+    Args:
+        words: Words to scan from the end.
+        wildcard_budget: How many unrecognized bare words may still be
+            skipped over in this scan (and any it recurses into).
+
+    Returns:
+        A tuple of (how many trailing words were consumed by the run,
+        counting transparent and wildcard words; how many of those were
+        genuine tag matches; whether any tag match carried a "-GROUPNAME"
+        suffix).
+    """
+    consumed = 0
+    real_tag_count = 0
+    has_group_suffix = False
+    index = len(words) - 1
+
+    while index >= 0:
+        word = words[index]
+
+        if _is_separator_word(word):
+            consumed += 1
+            index -= 1
+            continue
+
+        match = RELEASE_TAG_TOKEN_PATTERN.match(_strip_wrapping_parens(word))
+        if match is not None:
+            consumed += 1
+            real_tag_count += 1
+            if match.group("group_suffix"):
+                has_group_suffix = True
+            index -= 1
+            continue
+
+        if wildcard_budget > 0 and _RELEASE_GROUP_NAME_PATTERN.match(word):
+            further_consumed, further_real, further_suffix = _trailing_tag_run(
+                words[:index], wildcard_budget=wildcard_budget - 1
+            )
+            if further_real > 0:
+                return (
+                    consumed + 1 + further_consumed,
+                    real_tag_count + further_real,
+                    has_group_suffix or further_suffix,
+                )
+
+        break
+
+    return consumed, real_tag_count, has_group_suffix
 
 
 def _strip_trailing_release_tags(remainder: str) -> str:
@@ -338,35 +511,30 @@ def _strip_trailing_release_tags(remainder: str) -> str:
     buried mid-title. Words are matched whole (optionally with a
     "-GROUPNAME" release-group suffix chained onto the last tag, e.g.
     "x264-GROUP") rather than as a substring search, so a title word that
-    merely contains a tag-like substring is never mistaken for one.
+    merely contains a tag-like substring is never mistaken for one. See
+    :func:`_trailing_tag_run` for how a parenthesized tag group, a stray
+    separator, and a bare release-group-name-shaped word are also handled
+    within that run.
 
-    A trailing run consisting of just one bare tag word (no attached
-    release-group suffix) is still left alone even though it matches,
-    since that single word is equally plausible as the last word of a real
-    title (e.g. "Spider in the Web", "The Web (1)" - the latter's "(1)"
-    copy marker doesn't itself look like a tag, so the run there is empty
-    and nothing is stripped at all). A run of two or more tag words, or a
-    single tag word with a release-group suffix attached, is unambiguous
-    release info and gets stripped.
+    A trailing run consisting of just one genuine tag match (no attached
+    release-group suffix) is still left alone even though it matches, since
+    that single word is equally plausible as the last word of a real title
+    (e.g. "Spider in the Web", "The Web (1)" - the latter's "(1)" copy
+    marker doesn't itself look like a tag, so the run there is empty and
+    nothing is stripped at all). A run of two or more tag words, or a single
+    tag word with a release-group suffix attached, is unambiguous release
+    info and gets stripped.
     """
     words = remainder.split()
 
-    trailing_tag_count = 0
-    trailing_has_group_suffix = False
-    for word in reversed(words):
-        match = RELEASE_TAG_TOKEN_PATTERN.match(word)
-        if match is None:
-            break
-        trailing_tag_count += 1
-        if match.group(2):
-            trailing_has_group_suffix = True
+    consumed, real_tag_count, has_group_suffix = _trailing_tag_run(words)
 
-    if trailing_tag_count == 0:
+    if real_tag_count == 0:
         return remainder
-    if trailing_tag_count == 1 and not trailing_has_group_suffix:
+    if real_tag_count == 1 and not has_group_suffix:
         return remainder
 
-    kept_words = words[: len(words) - trailing_tag_count]
+    kept_words = words[: len(words) - consumed]
     return " ".join(kept_words)
 
 

@@ -26,6 +26,7 @@ class AuditCategory(StrEnum):
     SUBTITLES = "subtitles"
     ARTWORK = "artwork"
     METADATA = "metadata"
+    EPISODE_ORDER = "episode_order"
     VIDEO = "video"
     AUDIO = "audio"
     FILESYSTEM = "filesystem"

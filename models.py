@@ -151,6 +151,7 @@ class VideoTrack:
     bitrate: int | None
     hdr: bool
     video_range: str | None
+    title: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize codec and video range values."""
@@ -161,6 +162,8 @@ class VideoTrack:
                 "video_range",
                 self.video_range.strip() or None,
             )
+        if self.title is not None:
+            object.__setattr__(self, "title", self.title.strip() or None)
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,3 +20,6 @@ audit_results/
 
 # Configuration files
 servers.toml
+
+# TheTVDB episode-ordering cache
+tvdb_cache.json

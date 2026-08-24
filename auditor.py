@@ -9,12 +9,15 @@ logic, or report formatting.
 from __future__ import annotations
 
 import argparse
+import contextlib
+from datetime import timedelta
 import logging
 from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from audit import audit_episode_ordering
 from audit import audit_library_items
 from audit import audit_media_item
 from audit_types import AuditCategory
@@ -39,6 +42,7 @@ from media import configured_english_language_codes
 from media import has_english_subtitles
 from media import local_backdrop_exists
 from media import local_nfo_exists
+from models import MediaItem
 from models import MediaLibrary
 from output_layout import audit_results_root
 from output_layout import reset_audit_results_root
@@ -47,6 +51,10 @@ from report_filters import filter_report_output
 from reports import write_csv_report, write_html_report
 from results import AuditServerResult
 from results import LibraryAuditResult
+from tvdb import TvdbClient
+from tvdb import TvdbEpisode
+from tvdb import TvdbEpisodeCache
+from tvdb import TvdbError
 import transfer_images
 import transfer_metadata
 import transfer_subtitles
@@ -87,6 +95,8 @@ class AuditRunOptions:
     library_names: tuple[str, ...]
     categories: frozenset[AuditCategory] | None
     severities: frozenset[AuditSeverity] | None
+    check_episode_order: bool
+    refresh_tvdb_cache: bool
     transfer_metadata: bool
     transfer_metadata_dry_run: bool
     transfer_metadata_yes: bool
@@ -181,6 +191,7 @@ def audit_server(
     requested_library_names: Iterable[str] = (),
     *,
     include_configuration_snapshot: bool = False,
+    tvdb_client: TvdbClient | None = None,
 ) -> AuditServerResult:
     """Audit all enabled movie and TV libraries on the configured server.
 
@@ -190,6 +201,8 @@ def audit_server(
             scope to matching enabled Jellyfin libraries.
         include_configuration_snapshot: Whether to include extra server and
             library settings intended for comparison reporting.
+        tvdb_client: Optional TheTVDB client. When provided, TV libraries are
+            also checked for aired/DVD episode-ordering mismatches.
 
     Returns:
         Structured audit results for the server.
@@ -228,7 +241,7 @@ def audit_server(
                 library.name,
                 server_display_name,
             )
-            library_result = _audit_library_result(client, library)
+            library_result = _audit_library_result(client, library, tvdb_client=tvdb_client)
             library_results.append(library_result)
             media_items_processed += library_result.media_items_processed
             findings.extend(library_result.findings)
@@ -316,6 +329,14 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         raise CommandLineUsageError(
             "--verify requires --transfer-metadata, --transfer-images, or --transfer-subtitles."
         )
+    if args.check_episode_order and not get_config().tvdb.api_key:
+        raise CommandLineUsageError(
+            "--check-episode-order requires the TVDB_API_KEY environment variable to be set."
+        )
+    if args.refresh_tvdb_cache and not args.check_episode_order:
+        raise CommandLineUsageError(
+            "--refresh-tvdb-cache requires --check-episode-order."
+        )
 
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
@@ -327,6 +348,8 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         library_names=_normalize_requested_library_names(args.library),
         categories=_parse_categories(args.category),
         severities=_parse_severities(args.severity),
+        check_episode_order=bool(args.check_episode_order),
+        refresh_tvdb_cache=bool(args.refresh_tvdb_cache),
         transfer_metadata=bool(args.transfer_metadata),
         transfer_metadata_dry_run=bool(args.dry_run),
         transfer_metadata_yes=bool(args.yes),
@@ -379,14 +402,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             _enable_subtitle_transfer_file_logging()
         selected_server_keys, compare_server_key = _resolve_run_targets(options)
         include_configuration_snapshot = compare_server_key is not None
-        results = tuple(
-            audit_server(
-                server_key,
-                options.library_names,
-                include_configuration_snapshot=include_configuration_snapshot,
+        tvdb_client_context = (
+            TvdbClient(
+                get_config().tvdb.api_key,
+                cache=TvdbEpisodeCache(
+                    ttl=timedelta(days=get_config().tvdb.cache_ttl_days),
+                    force_refresh=options.refresh_tvdb_cache,
+                ),
             )
-            for server_key in selected_server_keys
+            if options.check_episode_order
+            else contextlib.nullcontext(None)
         )
+        with tvdb_client_context as tvdb_client:
+            results = tuple(
+                audit_server(
+                    server_key,
+                    options.library_names,
+                    include_configuration_snapshot=include_configuration_snapshot,
+                    tvdb_client=tvdb_client,
+                )
+                for server_key in selected_server_keys
+            )
         filtered_results = tuple(
             filter_report_output(
                 filter_audit_result(
@@ -496,7 +532,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     return transfer_exit_code
 
 
-def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> LibraryAuditResult:
+def _audit_library_result(
+    client: JellyfinClient,
+    library: MediaLibrary,
+    *,
+    tvdb_client: TvdbClient | None = None,
+) -> LibraryAuditResult:
     """Return full audit results for one library."""
     items = client.get_library_items(library.id)
     findings: list[AuditFinding] = []
@@ -510,6 +551,8 @@ def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> Libr
         items_with_local_backdrop += int(local_backdrop_exists(item))
         findings.extend(audit_media_item(item))
     findings.extend(audit_library_items(items))
+    if tvdb_client is not None and library.is_tv_library:
+        findings.extend(_audit_episode_ordering(client, tvdb_client, library, items))
 
     return LibraryAuditResult(
         library=library,
@@ -520,6 +563,50 @@ def _audit_library_result(client: JellyfinClient, library: MediaLibrary) -> Libr
         items_with_local_backdrop=items_with_local_backdrop,
         findings=tuple(findings),
     )
+
+
+def _audit_episode_ordering(
+    client: JellyfinClient,
+    tvdb_client: TvdbClient,
+    library: MediaLibrary,
+    items: Iterable[MediaItem],
+) -> tuple[AuditFinding, ...]:
+    """Return aired/DVD episode-ordering findings for one TV library.
+
+    Looks up each series' TheTVDB id once per library, then fetches both
+    orderings only for series actually present in this library's items. A
+    lookup failure for one series is logged and skipped rather than failing
+    the whole audit run.
+    """
+    series_names = {item.series_name for item in items if item.is_episode and item.series_name}
+    if not series_names:
+        return ()
+
+    series_tvdb_ids = client.get_series_tvdb_ids(library.id)
+
+    aired_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
+    dvd_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
+
+    for series_name in series_names:
+        tvdb_id = series_tvdb_ids.get(series_name)
+        if tvdb_id is None:
+            continue
+
+        try:
+            aired_episodes = tvdb_client.get_series_episodes(tvdb_id, "official")
+            dvd_episodes = tvdb_client.get_series_episodes(tvdb_id, "dvd")
+        except TvdbError as error:
+            LOGGER.warning("Skipping episode-order check for %r: %s", series_name, error)
+            continue
+
+        aired_positions[series_name] = {
+            (episode.season_number, episode.episode_number): episode for episode in aired_episodes
+        }
+        dvd_positions[series_name] = {
+            (episode.season_number, episode.episode_number): episode for episode in dvd_episodes
+        }
+
+    return audit_episode_ordering(items, aired_positions, dvd_positions)
 
 
 def _log_library_summaries(library_results: Iterable[LibraryAuditResult]) -> None:
@@ -646,6 +733,28 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="SEVERITY",
         help="Filter findings by severity. Repeat the option for multiple severities.",
+    )
+    parser.add_argument(
+        "--check-episode-order",
+        action="store_true",
+        help=(
+            "Check TV episodes against TheTVDB's aired and DVD episode "
+            "orderings and flag any episode whose title differs between the "
+            "two at its season/episode position, since a series stored on "
+            "disk in one order but labeled with the other still looks "
+            "internally consistent to every other check. Requires the "
+            "TVDB_API_KEY environment variable."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-tvdb-cache",
+        action="store_true",
+        help=(
+            "With --check-episode-order, ignore cached TheTVDB episode "
+            "lookups and fetch fresh data for every series this run, still "
+            "updating the cache with the results. Requires "
+            "--check-episode-order."
+        ),
     )
     parser.add_argument(
         "--transfer-metadata",

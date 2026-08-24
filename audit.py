@@ -8,12 +8,14 @@ findings. It operates only on application models and helper functions from
 from __future__ import annotations
 
 from collections.abc import Iterable
+from collections.abc import Mapping
 import re
 
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
 from media import expected_episode_title_from_filename
+from media import expected_episode_title_from_stream_titles
 from media import expected_movie_title_from_filename
 from media import get_primary_audio_codec
 from media import get_video_codec
@@ -21,6 +23,7 @@ from media import has_english_subtitles
 from media import has_jellyfin_primary_image
 from media import local_backdrop_exists
 from models import MediaItem
+from tvdb import TvdbEpisode
 
 
 _EPISODE_TITLE_PUNCTUATION_PATTERN = re.compile(
@@ -46,6 +49,7 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
         unknown_video_codec,
         unknown_audio_codec,
         mismatched_episode_filename_title,
+        mismatched_episode_stream_title,
         mismatched_movie_filename_title,
     )
     findings: list[AuditFinding] = []
@@ -210,6 +214,36 @@ def mismatched_episode_filename_title(item: MediaItem) -> AuditFinding | None:
     )
 
 
+def mismatched_episode_stream_title(item: MediaItem) -> AuditFinding | None:
+    """Return a finding when an embedded stream title implies a different title.
+
+    Args:
+        item: Media item to evaluate.
+
+    Returns:
+        A warning finding, or ``None`` when no video/audio track has a
+        discernible episode title, or its implied title matches the metadata
+        title.
+    """
+    expected_title = expected_episode_title_from_stream_titles(item)
+    if expected_title is None:
+        return None
+
+    if _normalized_title(expected_title) == _normalized_title(item.title):
+        return None
+
+    return _finding(
+        item,
+        category=AuditCategory.METADATA,
+        severity=AuditSeverity.WARNING,
+        check_name="mismatched_episode_stream_title",
+        message=(
+            f'An embedded stream title suggests episode title "{expected_title}" but '
+            f'metadata title is "{item.title}".'
+        ),
+    )
+
+
 def mismatched_movie_filename_title(item: MediaItem) -> AuditFinding | None:
     """Return a finding when the filename implies a different movie title.
 
@@ -367,6 +401,68 @@ def missing_tv_season_episodes(items: Iterable[MediaItem]) -> tuple[AuditFinding
     return tuple(findings)
 
 
+def audit_episode_ordering(
+    items: Iterable[MediaItem],
+    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]],
+    dvd_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]],
+) -> tuple[AuditFinding, ...]:
+    """Return findings for episodes whose aired/DVD order titles disagree.
+
+    Some series are organized on disk in TheTVDB's DVD order while Jellyfin
+    labels files using aired order (or vice versa), so the filename, season
+    number, and episode number all line up with Jellyfin's own metadata even
+    though the video content is a different episode. Comparing Jellyfin's
+    metadata against a single online ordering can't catch that; this compares
+    each episode's (season, episode) position against both of TheTVDB's
+    orderings and flags positions where they disagree, so the user knows
+    exactly which episodes are worth checking by eye.
+
+    Args:
+        items: Media items from one audited library.
+        aired_positions: TheTVDB aired-order episodes for each series name,
+            keyed by (season_number, episode_number).
+        dvd_positions: TheTVDB DVD-order episodes for each series name, keyed
+            by (season_number, episode_number).
+
+    Returns:
+        One finding per episode whose aired-order and DVD-order titles differ
+        at its (season, episode) position.
+    """
+    findings: list[AuditFinding] = []
+
+    for item in items:
+        if not item.is_episode or not item.series_name:
+            continue
+        if item.season_number is None or item.episode_number is None:
+            continue
+
+        position = (item.season_number, item.episode_number)
+        aired_episode = aired_positions.get(item.series_name, {}).get(position)
+        dvd_episode = dvd_positions.get(item.series_name, {}).get(position)
+        if aired_episode is None or dvd_episode is None:
+            continue
+
+        if _normalized_title(aired_episode.name) == _normalized_title(dvd_episode.name):
+            continue
+
+        findings.append(
+            _finding(
+                item,
+                category=AuditCategory.EPISODE_ORDER,
+                severity=AuditSeverity.WARNING,
+                check_name="aired_dvd_order_mismatch",
+                message=(
+                    f'TheTVDB aired order lists S{item.season_number:02d}E{item.episode_number:02d} '
+                    f'as "{aired_episode.name}", but DVD order lists a different episode at that '
+                    f'position: "{dvd_episode.name}". Verify the video content matches the aired-order '
+                    f"title before trusting Jellyfin's metadata."
+                ),
+            )
+        )
+
+    return tuple(findings)
+
+
 def _missing_sequence_numbers(numbers: Iterable[int]) -> tuple[int, ...]:
     """Return missing integers between the smallest and largest values."""
     sorted_numbers = sorted(set(numbers))
@@ -453,9 +549,11 @@ __all__ = [
     "AuditCategory",
     "AuditFinding",
     "AuditSeverity",
+    "audit_episode_ordering",
     "audit_library_items",
     "audit_media_item",
     "mismatched_episode_filename_title",
+    "mismatched_episode_stream_title",
     "mismatched_movie_filename_title",
     "missing_backdrop",
     "missing_english_subtitles",

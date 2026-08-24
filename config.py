@@ -27,6 +27,8 @@ AUDIT_HTML_FILENAME_ENV_VAR = "AUDIT_HTML_FILENAME"
 ENABLE_MOVIES_ENV_VAR = "ENABLE_MOVIES"
 ENABLE_TV_ENV_VAR = "ENABLE_TV"
 ENGLISH_LANGUAGE_CODES_ENV_VAR = "ENGLISH_LANGUAGE_CODES"
+TVDB_API_KEY_ENV_VAR = "TVDB_API_KEY"
+TVDB_CACHE_TTL_DAYS_ENV_VAR = "TVDB_CACHE_TTL_DAYS"
 
 DEFAULT_REPORT_MEDIA_PATH_PREFIX = ""
 DEFAULT_MOVIES_CSV_FILENAME = "movies_report.csv"
@@ -34,6 +36,7 @@ DEFAULT_TV_CSV_FILENAME = "tv_report.csv"
 DEFAULT_AUDIT_CSV_FILENAME = "audit.csv"
 DEFAULT_AUDIT_HTML_FILENAME = "audit_results"
 DEFAULT_SERVERS_TOML = "servers.toml"
+DEFAULT_TVDB_CACHE_TTL_DAYS = 7
 
 REQUIRED_ENGLISH_LANGUAGE_CODES = ("en", "eng", "")
 DEFAULT_ENGLISH_LANGUAGE_CODES = ("en", "eng", "")
@@ -159,12 +162,21 @@ class ProcessingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TvdbConfig:
+    """Settings for the optional TheTVDB episode-ordering check."""
+
+    api_key: str | None
+    cache_ttl_days: int = DEFAULT_TVDB_CACHE_TTL_DAYS
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     """Complete application configuration grouped by subsystem."""
 
     reporting: ReportingConfig
     processing: ProcessingConfig
     servers: ServerCollection
+    tvdb: TvdbConfig
 
 
 def _read_string(name: str, default: str) -> str:
@@ -173,6 +185,19 @@ def _read_string(name: str, default: str) -> str:
     if value is None:
         return default
     return value.strip()
+
+
+def _read_int(name: str, default: int) -> int:
+    """Read an integer environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    stripped_value = value.strip()
+    try:
+        return int(stripped_value)
+    except ValueError as error:
+        raise ConfigError(f"{name} must be an integer; received {value!r}.") from error
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -267,10 +292,16 @@ def load_config() -> AppConfig:
         enable_tv=_read_bool(ENABLE_TV_ENV_VAR, default=True),
     )
 
+    tvdb_config = TvdbConfig(
+        api_key=_read_string(TVDB_API_KEY_ENV_VAR, "") or None,
+        cache_ttl_days=_read_int(TVDB_CACHE_TTL_DAYS_ENV_VAR, DEFAULT_TVDB_CACHE_TTL_DAYS),
+    )
+
     return AppConfig(
         reporting=reporting_config,
         processing=processing_config,
         servers=load_server_collection(),
+        tvdb=tvdb_config,
     )
 
 

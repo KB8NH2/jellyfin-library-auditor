@@ -38,6 +38,7 @@ CSV_HEADER = (
     "Missing Subtitles",
     "Missing Primary",
     "Mismatched Filename Title",
+    "Mismatched Stream Title",
     "Unknown Audio Codec",
     "Unknown Video Codec",
 )
@@ -239,6 +240,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 _yes_no("missing_english_subtitles" in check_names),
                 _yes_no("missing_primary_image" in check_names),
                 _yes_no(bool(MISMATCHED_FILENAME_TITLE_CHECKS & check_names)),
+                _yes_no("mismatched_episode_stream_title" in check_names),
                 _yes_no("unknown_audio_codec" in check_names),
                 _yes_no("unknown_video_codec" in check_names),
             )
