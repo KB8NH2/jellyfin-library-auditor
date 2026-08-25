@@ -10,7 +10,12 @@ leaving the episode's own season/episode numbers untouched. Before changing
 Name, it backs up the episode's current Name into OriginalTitle; --aired
 reverses the process, preferring that backup over a fresh TheTVDB aired-order
 lookup so an inadvertent reordering can be undone with the exact title the
-episode had before. It does not contain audit logic or report formatting.
+episode had before. --images additionally replaces each episode's Primary
+image with TheTVDB's image for the target-order episode, when TheTVDB has
+one - unlike Name, there is no local backup for the pre-change image, so
+--aired --images can only restore it when TheTVDB still reports an
+aired-order image at that position. It does not contain audit logic or
+report formatting.
 """
 
 from __future__ import annotations
@@ -225,11 +230,19 @@ class EpisodePlan:
     changes: tuple[tuple[str, Any, Any], ...]
     rejected_reason: str | None
     no_target_match: bool
+    image_bytes: bytes | None = None
+    image_content_type: str | None = None
+    previous_primary_image_tag: str | None = None
 
     @property
     def has_changes(self) -> bool:
         """Return whether applying this plan would change anything."""
         return bool(self.changes)
+
+    @property
+    def has_image_change(self) -> bool:
+        """Return whether this plan has a Primary image ready to upload."""
+        return self.image_bytes is not None
 
     @property
     def is_rejected(self) -> bool:
@@ -239,7 +252,11 @@ class EpisodePlan:
     @property
     def is_actionable(self) -> bool:
         """Return whether this plan should actually be applied."""
-        return not self.no_target_match and not self.is_rejected and self.has_changes
+        return (
+            not self.no_target_match
+            and not self.is_rejected
+            and (self.has_changes or self.has_image_change)
+        )
 
 
 def _rejected_reason(merged_dto: Mapping[str, Any]) -> str | None:
@@ -263,6 +280,8 @@ def plan_episode_update(
     target_positions: Mapping[tuple[int, int], TvdbEpisode],
     *,
     restore_aired: bool,
+    images: bool = False,
+    tvdb_client: TvdbClient | None = None,
 ) -> EpisodePlan:
     """Compute one episode's metadata update, without writing anything.
 
@@ -276,6 +295,13 @@ def plan_episode_update(
             reports them for that ordering.
         restore_aired: Restore toward aired order (preferring the episode's
             own OriginalTitle backup) instead of applying DVD order.
+        images: Also plan replacing the episode's Primary image with
+            TheTVDB's image for the target-order episode at this position,
+            when TheTVDB has one. Runs independently of whether Name/Overview
+            change this run, so it also fixes an episode's image after a
+            previous apply already corrected its title.
+        tvdb_client: TheTVDB client to download the target episode's image
+            with. Required when ``images`` is ``True``.
 
     Returns:
         A plan describing what would change and whether it's safe to apply.
@@ -318,6 +344,22 @@ def plan_episode_update(
     else:
         merged_dto = build_dvd_merged_item_dto(destination_dto, target_episode)
 
+    image_bytes: bytes | None = None
+    image_content_type: str | None = None
+    previous_primary_image_tag = destination_dto.get("ImageTags", {}).get("Primary")
+    if images and target_episode is not None and target_episode.image_url:
+        assert tvdb_client is not None
+        try:
+            image_bytes, image_content_type = tvdb_client.download_image(
+                target_episode.image_url
+            )
+        except TvdbError as error:
+            _log_line(
+                f"  {_format_position(position)}: failed to download TheTVDB "
+                f"image, leaving the Primary image unchanged: {error}",
+                error=True,
+            )
+
     return EpisodePlan(
         episode_id=episode.id,
         position=position,
@@ -326,6 +368,9 @@ def plan_episode_update(
         changes=_changed_fields(destination_dto, merged_dto),
         rejected_reason=_rejected_reason(merged_dto),
         no_target_match=False,
+        image_bytes=image_bytes,
+        image_content_type=image_content_type,
+        previous_primary_image_tag=previous_primary_image_tag,
     )
 
 
@@ -336,9 +381,15 @@ def apply_episode_plan(client: JellyfinClient, plan: EpisodePlan) -> None:
         client: Client for the server the episode lives on.
         plan: A plan from :func:`plan_episode_update` that is actionable.
     """
-    if plan.merged_dto is None:
-        raise ValueError("Cannot apply a plan with no target-order match.")
-    client.update_item(plan.episode_id, plan.merged_dto)
+    if plan.has_changes:
+        if plan.merged_dto is None:
+            raise ValueError("Cannot apply a plan with no target-order match.")
+        client.update_item(plan.episode_id, plan.merged_dto)
+    if plan.has_image_change:
+        assert plan.image_bytes is not None and plan.image_content_type is not None
+        client.upload_item_image(
+            plan.episode_id, "Primary", plan.image_bytes, plan.image_content_type
+        )
 
 
 def _verify_applied(client: JellyfinClient, plan: EpisodePlan) -> tuple[str, ...]:
@@ -357,11 +408,19 @@ def _verify_applied(client: JellyfinClient, plan: EpisodePlan) -> tuple[str, ...
         The field names that still report their pre-update value.
     """
     current_dto = client.get_item(plan.episode_id)
-    return tuple(
+    stale_fields = [
         field
         for field, _, expected_value in plan.changes
         if current_dto.get(field) != expected_value
-    )
+    ]
+    if plan.has_image_change:
+        new_primary_image_tag = current_dto.get("ImageTags", {}).get("Primary")
+        if (
+            new_primary_image_tag is None
+            or new_primary_image_tag == plan.previous_primary_image_tag
+        ):
+            stale_fields.append("PrimaryImage")
+    return tuple(stale_fields)
 
 
 def _format_position(position: tuple[int, int]) -> str:
@@ -386,11 +445,16 @@ def _describe_plan(plan: EpisodePlan, *, restore_aired: bool) -> None:
     if plan.is_rejected:
         _log_line(f"  {label}: rejected: {plan.rejected_reason}", error=True)
         return
-    if not plan.has_changes:
+    if not plan.has_changes and not plan.has_image_change:
         _log_line(f"  {label}: already matches {order_label}.")
         return
     for field, old_value, new_value in plan.changes:
         _log_line(f"  {label} {field}: {old_value!r} -> {new_value!r}")
+    if plan.has_image_change:
+        _log_line(
+            f"  {label} Primary image: {len(plan.image_bytes)} bytes, "
+            f"{plan.image_content_type} (from TheTVDB)"
+        )
 
 
 def run_apply_dvd_metadata(
@@ -401,6 +465,7 @@ def run_apply_dvd_metadata(
     library_name: str | None,
     assume_yes: bool,
     restore_aired: bool = False,
+    images: bool = False,
 ) -> int:
     """Switch TheTVDB's aired/DVD-order Name/Overview for one series' season.
 
@@ -414,6 +479,8 @@ def run_apply_dvd_metadata(
         assume_yes: Skip the interactive confirmation prompt when ``True``.
         restore_aired: Restore toward aired order (preferring each episode's
             own OriginalTitle backup) instead of applying DVD order.
+        images: Also replace each episode's Primary image with TheTVDB's
+            image for the target-order episode, when TheTVDB has one.
 
     Returns:
         A process exit code: ``0`` on success (including "nothing to do"),
@@ -447,6 +514,7 @@ def run_apply_dvd_metadata(
 
     try:
         with JellyfinClient(server) as client:
+            LOGGER.debug("Looking up series %r on %s...", series_name, server.name)
             matches = client.find_series(series_name, library_name=library_name)
             if not matches:
                 _log_line(
@@ -475,6 +543,14 @@ def run_apply_dvd_metadata(
                 )
                 return 1
 
+            LOGGER.debug(
+                "Matched series %r -> item %s in library %r (TheTVDB id %s).",
+                series_name,
+                match.series_id,
+                match.library_name,
+                match.tvdb_id,
+            )
+
             episodes = client.get_series_season_episodes(match.series_id, season_number)
             if not episodes:
                 _log_line(
@@ -488,19 +564,41 @@ def run_apply_dvd_metadata(
                 app_config.tvdb.api_key,
                 cache=TvdbEpisodeCache(ttl=timedelta(days=app_config.tvdb.cache_ttl_days)),
             ) as tvdb_client:
+                LOGGER.debug(
+                    "Fetching TheTVDB %s-order episodes for series id %s...",
+                    season_type,
+                    match.tvdb_id,
+                )
                 target_episodes = tvdb_client.get_series_episodes(match.tvdb_id, season_type)
 
-            target_positions = {
-                (target_episode.season_number, target_episode.episode_number): target_episode
-                for target_episode in target_episodes
-            }
+                target_positions = {
+                    (target_episode.season_number, target_episode.episode_number): target_episode
+                    for target_episode in target_episodes
+                }
 
-            plans = tuple(
-                plan_episode_update(
-                    client, episode, season_number, target_positions, restore_aired=restore_aired
-                )
-                for episode in episodes
-            )
+                # Image downloads happen here, while tvdb_client's session is
+                # still open, mirroring transfer_images.py's plan_image_transfer
+                # fetching the source image during planning, before confirmation.
+                plans = []
+                for episode in episodes:
+                    LOGGER.debug(
+                        "Checking %s %r (item %s)...",
+                        _format_position((season_number, episode.episode_number)),
+                        episode.name,
+                        episode.id,
+                    )
+                    plans.append(
+                        plan_episode_update(
+                            client,
+                            episode,
+                            season_number,
+                            target_positions,
+                            restore_aired=restore_aired,
+                            images=images,
+                            tvdb_client=tvdb_client if images else None,
+                        )
+                    )
+                plans = tuple(plans)
 
             _log_line(
                 f"{order_label_title} metadata {verb}: {series_name!r} "
@@ -527,6 +625,7 @@ def run_apply_dvd_metadata(
 
             failed = 0
             for plan in actionable_plans:
+                LOGGER.debug("Applying %s...", _format_position(plan.position))
                 try:
                     apply_episode_plan(client, plan)
                 except JellyfinError as error:
@@ -537,6 +636,7 @@ def run_apply_dvd_metadata(
                     )
                     continue
 
+                LOGGER.debug("Verifying %s...", _format_position(plan.position))
                 stale_fields = _verify_applied(client, plan)
                 if stale_fields:
                     failed += 1
@@ -618,9 +718,31 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--images",
+        action="store_true",
+        help=(
+            "Also replace each episode's Primary image with TheTVDB's image "
+            "for the target-order episode, when TheTVDB has one. Runs "
+            "independently of whether Name/Overview change this run, so it "
+            "also fixes an episode's image after a previous apply already "
+            "corrected its title. There is no local backup for the "
+            "pre-change image, so --aired --images can only restore it when "
+            "TheTVDB still reports an aired-order image at that position."
+        ),
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Skip the confirmation prompt and apply immediately.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Print verbose progress to the console (which item is being "
+            "checked, calls to Jellyfin and TheTVDB) - console only, never "
+            "written to dvd_metadata_apply.log."
+        ),
     )
     return parser
 
@@ -636,6 +758,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOGGER.error("%s", error)
         return 2
 
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     if args.season_number < 0:
         LOGGER.error("--season-number must not be negative.")
         return 2
@@ -647,6 +772,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         library_name=args.library,
         assume_yes=args.yes,
         restore_aired=args.aired,
+        images=args.images,
     )
 
 

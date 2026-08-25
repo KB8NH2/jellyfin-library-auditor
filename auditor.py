@@ -104,6 +104,7 @@ class AuditRunOptions:
     transfer_subtitles: bool
     transfer_limit: int | None
     verify: bool
+    debug: bool
 
 
 def configure_logging() -> None:
@@ -115,8 +116,14 @@ def configure_logging() -> None:
 
 
 def _add_file_handler(logger: logging.Logger, log_file: Path) -> None:
-    """Attach a timestamped file handler to a logger."""
+    """Attach a timestamped file handler to a logger.
+
+    Pinned to INFO regardless of the logger's own effective level, so
+    --debug's console-only progress output (LOGGER.debug(...)) never leaks
+    into this file even though it shares the same logger.
+    """
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logger.addHandler(file_handler)
 
@@ -357,6 +364,7 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         transfer_subtitles=bool(args.transfer_subtitles),
         transfer_limit=args.limit,
         verify=bool(args.verify),
+        debug=bool(args.debug),
     )
 
 
@@ -392,6 +400,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         options = parse_args(argv)
+        if options.debug:
+            logging.getLogger().setLevel(logging.DEBUG)
         if options.transfer_metadata or options.transfer_images or options.transfer_subtitles:
             _enable_general_file_logging()
         if options.transfer_metadata:
@@ -552,6 +562,7 @@ def _audit_library_result(
     items_with_local_backdrop = 0
 
     for item in items:
+        LOGGER.debug("Checking %r (%s)...", item.title, item.id)
         items_with_english_subtitles += int(has_english_subtitles(item))
         items_with_local_nfo += int(local_nfo_exists(item))
         items_with_local_backdrop += int(local_backdrop_exists(item))
@@ -598,6 +609,11 @@ def _audit_episode_ordering(
         if tvdb_id is None:
             continue
 
+        LOGGER.debug(
+            "Checking TheTVDB episode order for %r (TheTVDB id %s)...",
+            series_name,
+            tvdb_id,
+        )
         try:
             aired_episodes = tvdb_client.get_series_episodes(tvdb_id, "official")
             dvd_episodes = tvdb_client.get_series_episodes(tvdb_id, "dvd")
@@ -831,6 +847,15 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "what actually changed rather than the pre-transfer snapshot. "
             "Ignored with --dry-run, or if no item was actually transferred, "
             "since there is nothing to verify."
+        ),
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Print verbose progress to the console (which library/item is "
+            "being audited, calls to Jellyfin and TheTVDB) - console only, "
+            "never written to any of the log files."
         ),
     )
     return parser

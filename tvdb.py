@@ -34,7 +34,10 @@ SeasonType = Literal["official", "dvd"]
 
 DEFAULT_TVDB_CACHE_PATH = Path("tvdb_cache.json")
 DEFAULT_CACHE_TTL = timedelta(days=7)
-CACHE_SCHEMA_VERSION = 1
+# Bump whenever TvdbEpisode's cached shape changes (e.g. a new field is
+# added) so an existing on-disk cache from before the change is discarded
+# and refetched instead of silently loading with the new field missing.
+CACHE_SCHEMA_VERSION = 2
 
 
 class TvdbError(RuntimeError):
@@ -63,6 +66,7 @@ class TvdbEpisode:
     name: str
     overview: str | None
     runtime_minutes: int | None
+    image_url: str | None = None
 
 
 class TvdbEpisodeCache:
@@ -154,6 +158,14 @@ class TvdbEpisodeCache:
             LOGGER.warning("Ignoring malformed TheTVDB cache at %s.", self._path)
             return {}
 
+        if raw_document.get("version") != CACHE_SCHEMA_VERSION:
+            LOGGER.info(
+                "Ignoring TheTVDB cache at %s from an older schema version; "
+                "it will be refetched.",
+                self._path,
+            )
+            return {}
+
         raw_series = raw_document.get("series")
         if not isinstance(raw_series, dict):
             return {}
@@ -208,6 +220,7 @@ class TvdbEpisodeCache:
                 name=raw_episode["name"],
                 overview=raw_episode.get("overview"),
                 runtime_minutes=raw_episode.get("runtime_minutes"),
+                image_url=raw_episode.get("image_url"),
             )
         except (KeyError, TypeError):
             return None
@@ -222,6 +235,7 @@ class TvdbEpisodeCache:
             "name": episode.name,
             "overview": episode.overview,
             "runtime_minutes": episode.runtime_minutes,
+            "image_url": episode.image_url,
         }
 
     def _save(self) -> None:
@@ -366,7 +380,30 @@ class TvdbClient:
             name=self._get_optional_str(episode_data, "name") or "",
             overview=self._get_optional_str(episode_data, "overview"),
             runtime_minutes=self._get_optional_int(episode_data, "runtime"),
+            image_url=self._get_optional_str(episode_data, "image"),
         )
+
+    def download_image(self, url: str) -> tuple[bytes, str]:
+        """Download one TheTVDB-hosted image and return its bytes and content type.
+
+        Args:
+            url: An absolute image URL, e.g. from ``TvdbEpisode.image_url``.
+
+        Returns:
+            A ``(image_bytes, content_type)`` tuple.
+
+        Raises:
+            TvdbRequestError: If the HTTP request fails.
+        """
+        LOGGER.debug("TheTVDB GET %s (image)", url)
+        try:
+            response = self._session.request("GET", url, timeout=self._timeout)
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise self._wrap_request_error("GET", url, error) from error
+
+        content_type = response.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        return response.content, content_type
 
     def _request(
         self,
@@ -394,6 +431,7 @@ class TvdbClient:
         """Perform a TheTVDB REST request and decode any JSON response body."""
         url = self._build_url(path)
 
+        LOGGER.debug("TheTVDB %s %s", method, url)
         try:
             response = self._session.request(
                 method=method,

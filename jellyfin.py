@@ -1049,6 +1049,7 @@ class JellyfinClient:
             requests.RequestException: If every retry attempt fails with a
                 connection error or timeout.
         """
+        LOGGER.debug("Jellyfin %s %s", method, url)
         for attempt in range(1, self._max_retries + 1):
             try:
                 return self._session.request(
