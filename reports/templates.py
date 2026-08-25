@@ -26,6 +26,7 @@ CHECK_DISPLAY_LABELS = {
     "missing_nfo": "Missing NFO",
     "missing_seasons": "Missing Seasons",
     "missing_episodes": "Missing Episodes",
+    "missing_episode_number": "Missing Episode Number",
     "unknown_video_codec": "Unknown Video Codec",
     "unknown_audio_codec": "Unknown Audio Codec",
     "hdr_video": "HDR Video",
@@ -39,6 +40,7 @@ CHECK_DISPLAY_ORDER = (
     "missing_english_subtitles",
     "missing_seasons",
     "missing_episodes",
+    "missing_episode_number",
     "unknown_audio_codec",
     "unknown_video_codec",
 )
@@ -49,6 +51,7 @@ CHECK_SUMMARY_LABELS = {
     "missing_nfo": "NFO",
     "missing_seasons": "Seasons",
     "missing_episodes": "Episodes",
+    "missing_episode_number": "Episode Number",
     "unknown_video_codec": "Video Codec",
     "unknown_audio_codec": "Audio Codec",
     "aired_dvd_order_mismatch": "Episode Order",

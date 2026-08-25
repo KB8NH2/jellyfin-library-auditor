@@ -11,10 +11,10 @@ from . import templates
 
 DEFAULT_TABLE_HEADERS = (
     "Library",
-    "Title",
     "Series",
     "Season",
     "Episode",
+    "Title",
     "Details",
 )
 
@@ -67,9 +67,9 @@ def render_check_page(
 def _table_headers(check_name: str) -> tuple[str, ...]:
     """Return the table headers for one check page."""
     if check_name == "missing_episodes":
-        return ("Library", "Title", "Series", "Season", "Details")
+        return ("Library", "Series", "Season", "Title", "Details")
     if check_name == "missing_seasons":
-        return ("Library", "Title", "Series", "Details")
+        return ("Library", "Series", "Title", "Details")
     if check_name == "mismatched_episode_filename_title":
         return ("Library", "Series", "Season", "Episode", "Title", "Suggested Title (Filename)")
     if check_name == "mismatched_episode_stream_title":
@@ -109,9 +109,9 @@ def _check_rows(
                 (
                     f'          <tr data-search-row data-search="{templates.row_search_text(media_findings)}">',
                     f'            <td data-sort-value="{templates.escape(templates.check_row_library_sort_value(item))}"><a href="{templates.library_page_href(item.library, site_links=site_links, relative_prefix="../")}">{templates.escape(item.library)}</a></td>',
-                    f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(item.title)}</a></td>',
                     f"            <td>{templates.escape(item.series_name or '')}</td>",
                     *_optional_row_cells(check_name, item),
+                    f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(item.title)}</a></td>',
                     f"            <td>{_finding_messages(media_findings)}</td>",
                     "          </tr>",
                 )

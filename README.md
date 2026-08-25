@@ -285,6 +285,16 @@ python apply_dvd_metadata.py --series-name "Show Name" --season-number 2 --aired
 
 For `Name`, `--aired` prefers each episode's `OriginalTitle` backup over a fresh TheTVDB aired-order lookup, since the backup is exactly what the episode had before this tool last changed it, even if TheTVDB's own aired-order data has changed since. If an episode has no `OriginalTitle` backup (it was never touched by a DVD-order apply), `--aired` falls back to TheTVDB's aired-order title for that position instead. `Overview` has no equivalent backup field, so it's always restored from TheTVDB's aired-order data when available. An episode with neither a backup nor any TheTVDB aired-order data at that position is skipped, same as a DVD-order apply skips a position TheTVDB's DVD order doesn't cover.
 
+## Filling in missing episode numbers
+
+Jellyfin can't always parse an episode number out of a filename - a file with no recognizable `SxxExx` marker gets no `IndexNumber` at all, which the `missing_episode_number` audit check flags. When a series is organized as one descriptively-titled file per episode instead of `SxxExx` naming, Jellyfin falls back to using the filename itself as the episode's `Name`, so that fallback title is usually the episode's real title, just not yet tied to a number. `apply_episode_numbers.py` fixes one series/season in place: it fetches TheTVDB's aired-order episode list for that season, works out which aired-order numbers aren't already used by a numbered episode in the season, and matches each unnumbered episode to one of those by comparing its `Name` against each candidate's title (case/punctuation-insensitively, and ignoring a leading "The"/"A"/"An" if that's the only difference) - deliberately **not** by file order, since on-disk file order (e.g. alphabetical) doesn't necessarily follow aired order. An episode whose title matches none of the remaining candidates is left alone rather than guessed at.
+
+```powershell
+python apply_episode_numbers.py --series-name "Show Name" --season-number 2
+```
+
+It takes the same `--server`/`--library`/`--yes`/`--debug` options as `apply_dvd_metadata.py`, uses the same `servers.toml` and `tvdb_cache.json`, and follows the same plan-then-confirm-then-apply flow: it prints every unnumbered episode's planned outcome - the filename and the number it will be assigned, "no unused TheTVDB aired-order episode title matches this episode's name" when nothing matches, or "already numbered" when there's nothing to change - then asks for one confirmation covering the whole batch (skip it with `--yes`). Only `IndexNumber` is written; `Name`, `Overview`, and every other field are left untouched. Attempts append to `episode_numbers_apply.log`, mirroring `dvd_metadata_apply.log`. It also re-reads each episode immediately after writing it and reports "update did not take effect" instead of "numbered" if Jellyfin still shows the old value, the same safeguard `apply_dvd_metadata.py` uses.
+
 ## Output
 
 By default, reports are written under `audit_results\`.
@@ -297,6 +307,7 @@ By default, reports are written under `audit_results\`.
 - `image_transfer.log` - append-only record of every image transfer, written next to wherever `auditor.py --transfer-images` or `transfer_images.py` was run
 - `subtitle_transfer.log` - append-only record of every subtitle transfer, written next to wherever `auditor.py --transfer-subtitles` or `transfer_subtitles.py` was run
 - `dvd_metadata_apply.log` - append-only record of every DVD-order metadata apply attempt, written next to wherever `apply_dvd_metadata.py` was run
+- `episode_numbers_apply.log` - append-only record of every episode-number apply attempt, written next to wherever `apply_episode_numbers.py` was run
 - `audit.log` - append-only record of everything else logged during an `auditor.py` run that used at least one `--transfer-*` flag (audit progress, comparison writing, `--verify` output, errors) - the transfer-type log files above only ever contain their own transfer's history, never this. Combine multiple `--transfer-*` flags in one run and each still only writes to its own log file; nothing gets duplicated across them.
 
 ## Project layout
@@ -306,8 +317,9 @@ By default, reports are written under `audit_results\`.
 - `transfer_images.py` - standalone CLI to transfer one item's cached image between two servers; also provides the plan/apply functions the bulk `--transfer-images` run uses
 - `transfer_subtitles.py` - standalone CLI to transfer one item's English subtitle track between two servers, entirely through the Jellyfin API; also provides the plan/apply functions the bulk `--transfer-subtitles` run uses
 - `apply_dvd_metadata.py` - standalone CLI to overwrite one series/season's episode Name/Overview with TheTVDB's DVD-order values
+- `apply_episode_numbers.py` - standalone CLI to fill in missing episode numbers for one series/season from TheTVDB's aired order
 - `config.py` - application and server configuration
-- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use, plus series/episode lookups by name for `apply_dvd_metadata.py`)
+- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use, plus series/episode lookups by name for `apply_dvd_metadata.py`/`apply_episode_numbers.py`)
 - `models.py` - normalized data models
 - `media.py` - media and filesystem helpers, including filename-based episode title parsing
 - `audit.py` / `audit_types.py` - audit rules and finding types

@@ -46,6 +46,7 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
         missing_english_subtitles,
         missing_backdrop,
         missing_primary_image,
+        missing_episode_number,
         unknown_video_codec,
         unknown_audio_codec,
         mismatched_episode_filename_title,
@@ -142,6 +143,33 @@ def missing_primary_image(item: MediaItem) -> AuditFinding | None:
     )
 
 
+def missing_episode_number(item: MediaItem) -> AuditFinding | None:
+    """Return a finding when an episode has no episode number set.
+
+    Unlike missing_tv_season_episodes, which flags numeric gaps between
+    episodes that already have numbers, this catches an episode file Jellyfin
+    could not assign a number to at all (episode_number is None) - the kind
+    of gap apply_episode_numbers.py can fill in from TheTVDB's aired order.
+
+    Args:
+        item: Media item to evaluate.
+
+    Returns:
+        A warning finding, or ``None`` when the item is not an episode or
+        already has an episode number.
+    """
+    if not item.is_episode or item.episode_number is not None:
+        return None
+
+    return _finding(
+        item,
+        category=AuditCategory.METADATA,
+        severity=AuditSeverity.WARNING,
+        check_name="missing_episode_number",
+        message="No episode number is set.",
+    )
+
+
 def unknown_video_codec(item: MediaItem) -> AuditFinding | None:
     """Return a finding when the primary video codec is missing or unknown.
 
@@ -199,7 +227,7 @@ def mismatched_episode_filename_title(item: MediaItem) -> AuditFinding | None:
     if expected_title is None:
         return None
 
-    if _normalized_title(expected_title) == _normalized_title(item.title):
+    if normalized_title(expected_title) == normalized_title(item.title):
         return None
 
     return _finding(
@@ -229,7 +257,7 @@ def mismatched_episode_stream_title(item: MediaItem) -> AuditFinding | None:
     if expected_title is None:
         return None
 
-    if _normalized_title(expected_title) == _normalized_title(item.title):
+    if normalized_title(expected_title) == normalized_title(item.title):
         return None
 
     return _finding(
@@ -258,7 +286,7 @@ def mismatched_movie_filename_title(item: MediaItem) -> AuditFinding | None:
     if expected_title is None:
         return None
 
-    if _normalized_title(expected_title) == _normalized_title(item.title):
+    if normalized_title(expected_title) == normalized_title(item.title):
         return None
 
     return _finding(
@@ -273,7 +301,7 @@ def mismatched_movie_filename_title(item: MediaItem) -> AuditFinding | None:
     )
 
 
-def _normalized_title(value: str) -> str:
+def normalized_title(value: str) -> str:
     """Return a normalized title for filename/metadata comparison.
 
     Periods are treated as word separators (like filename extraction does for
@@ -442,7 +470,7 @@ def audit_episode_ordering(
         if aired_episode is None or dvd_episode is None:
             continue
 
-        if _normalized_title(aired_episode.name) == _normalized_title(dvd_episode.name):
+        if normalized_title(aired_episode.name) == normalized_title(dvd_episode.name):
             continue
 
         findings.append(
@@ -557,9 +585,11 @@ __all__ = [
     "mismatched_movie_filename_title",
     "missing_backdrop",
     "missing_english_subtitles",
+    "missing_episode_number",
     "missing_tv_season_episodes",
     "missing_tv_series_seasons",
     "missing_primary_image",
+    "normalized_title",
     "unknown_audio_codec",
     "unknown_video_codec",
 ]

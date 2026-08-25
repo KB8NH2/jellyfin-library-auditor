@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import time
 from collections.abc import Iterable
 from collections.abc import Mapping
@@ -97,6 +98,14 @@ VIDEO_STREAM_TYPE = "video"
 AUDIO_STREAM_TYPE = "audio"
 SUBTITLE_STREAM_TYPE = "subtitle"
 RequestParamValue = str | bytes | int | float | list[str] | tuple[str, ...] | None
+# Jellyfin sometimes leaves ParentIndexNumber unset on an episode even
+# though it still names the containing Season item "Season N" (e.g. when it
+# can't confidently number every episode file in that season) - the same gap
+# reports/templates.season_sort_value already falls back around for display.
+# _resolved_season_number applies the identical fallback when matching
+# episodes to a requested season number, so a season lookup doesn't silently
+# drop episodes whose season is only known by name.
+SEASON_NAME_NUMBER_PATTERN = re.compile(r"^\s*season\s+(\d+)\s*$", re.IGNORECASE)
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_PAGE_SIZE = 200
 DEFAULT_MAX_RETRIES = 3
@@ -295,6 +304,23 @@ class EpisodeSummary:
     id: str
     name: str
     episode_number: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonEpisodeSummary:
+    """An Episode item summary that keeps episodes missing an episode number.
+
+    Unlike EpisodeSummary/get_series_season_episodes, episode_number may be
+    ``None`` here - apply_episode_numbers.py needs exactly those episodes to
+    know which ones to fill in. path is carried along too, since it's the
+    best available proxy for on-disk/aired sequence for an episode that has
+    no episode number of its own to sort by.
+    """
+
+    id: str
+    name: str
+    path: Path | None
+    episode_number: int | None
 
 
 class JellyfinError(RuntimeError):
@@ -546,6 +572,29 @@ class JellyfinClient:
 
         return matches
 
+    def _resolved_season_number(self, raw_item: Mapping[str, Any]) -> int | None:
+        """Return one episode's season number, falling back to its season name.
+
+        Usually ParentIndexNumber alone is enough, but Jellyfin sometimes
+        leaves it unset on an episode it couldn't confidently number even
+        though the containing Season item still has a plain "Season N" name
+        - in which case that name is the only place the season number is
+        recorded at all. Without this fallback, such an episode would never
+        match any season lookup, silently vanishing from
+        get_series_season_episodes/get_series_season_episodes_all instead of
+        being found under the season its name says it belongs to.
+        """
+        season_number = self._get_optional_int(raw_item, "ParentIndexNumber")
+        if season_number is not None:
+            return season_number
+
+        season_name = self._get_optional_str(raw_item, "SeasonName")
+        if season_name is None:
+            return None
+
+        match = SEASON_NAME_NUMBER_PATTERN.match(season_name)
+        return int(match.group(1)) if match else None
+
     def get_series_season_episodes(
         self,
         series_id: str,
@@ -553,13 +602,14 @@ class JellyfinClient:
     ) -> tuple[EpisodeSummary, ...]:
         """Return every Episode item in one season of one series.
 
-        Episode items already carry their season number directly
-        (ParentIndexNumber), so this needs no separate Season-item lookup.
+        Episode items usually carry their season number directly
+        (ParentIndexNumber), so this needs no separate Season-item lookup;
+        see _resolved_season_number for the fallback used when that's unset.
 
         Args:
             series_id: Jellyfin Series item identifier.
             season_number: Season number to match against each episode's
-                ParentIndexNumber.
+                resolved season number.
 
         Returns:
             EpisodeSummary tuples for every matching episode, sorted by
@@ -582,7 +632,7 @@ class JellyfinClient:
             raw_items = self._get_required_list(payload, "Items", "episodes response")
 
             for raw_item in raw_items:
-                if self._get_optional_int(raw_item, "ParentIndexNumber") != season_number:
+                if self._resolved_season_number(raw_item) != season_number:
                     continue
                 episode_number = self._get_optional_int(raw_item, "IndexNumber")
                 if episode_number is None:
@@ -606,6 +656,79 @@ class JellyfinClient:
                 break
 
         return tuple(sorted(episodes, key=lambda episode: episode.episode_number))
+
+    def get_series_season_episodes_all(
+        self,
+        series_id: str,
+        season_number: int,
+    ) -> tuple[SeasonEpisodeSummary, ...]:
+        """Return every Episode item in one season, including unnumbered ones.
+
+        Unlike get_series_season_episodes, an episode with no IndexNumber is
+        included (with episode_number set to ``None``) instead of being
+        dropped, so a caller can locate and fill those in. Each item's Path
+        is also fetched, since apply_episode_numbers.py needs it to identify
+        each episode in its output.
+
+        Args:
+            series_id: Jellyfin Series item identifier.
+            season_number: Season number to match against each episode's
+                resolved season number; see _resolved_season_number.
+
+        Returns:
+            SeasonEpisodeSummary tuples for every matching episode, sorted by
+            episode number with unnumbered episodes (sorted by path) last.
+        """
+        episodes: list[SeasonEpisodeSummary] = []
+        start_index = 0
+
+        while True:
+            payload = self._request(
+                ITEMS_ENDPOINT,
+                params={
+                    "ParentId": series_id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": EPISODE_ITEM_TYPE,
+                    "Fields": "Path",
+                    "StartIndex": start_index,
+                    "Limit": self._page_size,
+                },
+            )
+            raw_items = self._get_required_list(payload, "Items", "episodes response")
+
+            for raw_item in raw_items:
+                if self._resolved_season_number(raw_item) != season_number:
+                    continue
+                raw_path = self._get_optional_str(raw_item, "Path")
+                episodes.append(
+                    SeasonEpisodeSummary(
+                        id=self._get_required_str(raw_item, "Id", "episode item"),
+                        name=self._get_optional_str(raw_item, "Name") or "",
+                        path=Path(raw_path) if raw_path else None,
+                        episode_number=self._get_optional_int(raw_item, "IndexNumber"),
+                    )
+                )
+
+            total_count = self._get_optional_int(payload, "TotalRecordCount")
+            start_index += len(raw_items)
+
+            if not raw_items:
+                break
+            if total_count is not None and start_index >= total_count:
+                break
+            if len(raw_items) < self._page_size:
+                break
+
+        return tuple(sorted(episodes, key=self._season_episode_sort_key))
+
+    @staticmethod
+    def _season_episode_sort_key(
+        episode: SeasonEpisodeSummary,
+    ) -> tuple[bool, int, str]:
+        """Return a sort key placing numbered episodes first, by number."""
+        if episode.episode_number is not None:
+            return (False, episode.episode_number, "")
+        return (True, 0, str(episode.path).casefold() if episode.path else "")
 
     def get_item(self, item_id: str) -> dict[str, Any]:
         """Return the full Jellyfin metadata document for one item.
@@ -1609,5 +1732,6 @@ __all__ = [
     "JellyfinError",
     "JellyfinRequestError",
     "JellyfinResponseError",
+    "SeasonEpisodeSummary",
     "SeriesMatch",
 ]
