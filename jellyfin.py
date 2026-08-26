@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterable
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1046,7 +1047,7 @@ class JellyfinClient:
             for raw_item in raw_items:
                 media_item = self._media_item_from_json(raw_item, library)
                 if media_item is not None:
-                    media_items.append(media_item)
+                    media_items.append(self._resolve_missing_episode_number(media_item))
             total_count = self._get_optional_int(payload, "TotalRecordCount")
             start_index += len(raw_items)
 
@@ -1060,6 +1061,36 @@ class JellyfinClient:
                 break
 
         return media_items
+
+    def _resolve_missing_episode_number(self, item: MediaItem) -> MediaItem:
+        """Re-check one episode's IndexNumber with a per-item lookup.
+
+        Jellyfin's broad, whole-library recursive /Items listing silently
+        omits IndexNumber for episodes whose number was set by a direct API
+        PATCH (as apply_episode_numbers.py and apply_dvd_metadata.py do)
+        rather than assigned at normal library-scan time - the value is
+        genuinely saved and reads back correctly from a query scoped to the
+        item's own series/season, just not from the whole-library query
+        this method's caller relies on. Without this fallback, an audit run
+        misreports those episodes as missing a number even though Jellyfin
+        (and its own UI) has it.
+
+        Args:
+            item: A media item just parsed from the whole-library listing.
+
+        Returns:
+            ``item`` unchanged, unless it is an episode with no
+            episode_number and a per-item lookup finds one - in which case
+            a copy with that episode_number is returned.
+        """
+        if not item.is_episode or item.episode_number is not None:
+            return item
+
+        detail = self.get_item(item.id)
+        episode_number = self._get_optional_int(detail, "IndexNumber")
+        if episode_number is None:
+            return item
+        return replace(item, episode_number=episode_number)
 
     def get_all_media(self) -> list[MediaItem]:
         """Return all media items from enabled libraries only.
