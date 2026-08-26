@@ -287,13 +287,21 @@ For `Name`, `--aired` prefers each episode's `OriginalTitle` backup over a fresh
 
 ## Filling in missing episode numbers
 
-Jellyfin can't always parse an episode number out of a filename - a file with no recognizable `SxxExx` marker gets no `IndexNumber` at all, which the `missing_episode_number` audit check flags. When a series is organized as one descriptively-titled file per episode instead of `SxxExx` naming, Jellyfin falls back to using the filename itself as the episode's `Name`, so that fallback title is usually the episode's real title, just not yet tied to a number. `apply_episode_numbers.py` fixes one series/season in place: it fetches TheTVDB's aired-order episode list for that season, works out which aired-order numbers aren't already used by a numbered episode in the season, and matches each unnumbered episode to one of those by comparing its `Name` against each candidate's title (case/punctuation-insensitively, and ignoring a leading "The"/"A"/"An" if that's the only difference) - deliberately **not** by file order, since on-disk file order (e.g. alphabetical) doesn't necessarily follow aired order. An episode whose title matches none of the remaining candidates is left alone rather than guessed at.
+Jellyfin can't always parse an episode number out of a filename - a file with no recognizable `SxxExx` marker gets no `IndexNumber` at all, which the `missing_episode_number` audit check flags. When a series is organized as one descriptively-titled file per episode instead of `SxxExx` naming, Jellyfin falls back to using the filename itself as the episode's `Name`, so that fallback title is usually the episode's real title, just not yet tied to a number. `apply_episode_numbers.py` fixes one series/season in place: it fetches TheTVDB's aired-order episode list for that season, works out which aired-order numbers aren't already used by a numbered episode in the season, and matches each unnumbered episode to one of those by comparing its `Name` against each candidate's title (case/punctuation-insensitively, and ignoring a leading "The"/"A"/"An" if that's the only difference) - deliberately **not** by file order, since on-disk file order (e.g. alphabetical) doesn't necessarily follow aired order.
+
+When an episode's title matches no remaining candidate exactly (or article-insensitively), the closest-scoring candidate by title similarity is offered as a fuzzy match to confirm interactively, one at a time, e.g.:
+
+```
+  Episode Title.mkv: no exact title match. Closest TheTVDB title is "Episode Title." (E07, 92% similar) - use it? [y/N]
+```
+
+Nothing below a minimum similarity threshold is offered at all. Confirming a fuzzy match also overwrites the episode's `Name` with TheTVDB's title (since a fuzzy match by definition means the two titles weren't already equivalent) and locks `Name` the same way `apply_dvd_metadata.py` locks `Name`/`Overview`, so a library with an internet metadata provider enabled doesn't silently revert it on its next refresh. An exact or article-insensitive match never touches `Name`. Declining a fuzzy match, or running with `--yes` (which skips fuzzy-match prompts entirely, not just the final batch confirmation), leaves that episode unmatched instead of guessed at.
 
 ```powershell
 python apply_episode_numbers.py --series-name "Show Name" --season-number 2
 ```
 
-It takes the same `--server`/`--library`/`--yes`/`--debug` options as `apply_dvd_metadata.py`, uses the same `servers.toml` and `tvdb_cache.json`, and follows the same plan-then-confirm-then-apply flow: it prints every unnumbered episode's planned outcome - the filename and the number it will be assigned, "no unused TheTVDB aired-order episode title matches this episode's name" when nothing matches, or "already numbered" when there's nothing to change - then asks for one confirmation covering the whole batch (skip it with `--yes`). Only `IndexNumber` is written; `Name`, `Overview`, and every other field are left untouched. Attempts append to `episode_numbers_apply.log`, mirroring `dvd_metadata_apply.log`. It also re-reads each episode immediately after writing it and reports "update did not take effect" instead of "numbered" if Jellyfin still shows the old value, the same safeguard `apply_dvd_metadata.py` uses.
+It takes the same `--server`/`--library`/`--yes`/`--debug` options as `apply_dvd_metadata.py`, uses the same `servers.toml` and `tvdb_cache.json`, and follows the same plan-then-confirm-then-apply flow: it prints every unnumbered episode's planned outcome - the filename and the number it will be assigned, "no unused TheTVDB aired-order episode title matches this episode's name" when nothing matches, or "already numbered" when there's nothing to change - then asks for one confirmation covering the whole batch (skip it with `--yes`). `IndexNumber` is always written, and `Name` only for a confirmed fuzzy match; `Overview` and every other field are left untouched. Attempts append to `episode_numbers_apply.log`, mirroring `dvd_metadata_apply.log`. It also re-reads each episode immediately after writing it and reports "update did not take effect" instead of "numbered" if Jellyfin still shows the old value, the same safeguard `apply_dvd_metadata.py` uses.
 
 ## Output
 
@@ -317,7 +325,7 @@ By default, reports are written under `audit_results\`.
 - `transfer_images.py` - standalone CLI to transfer one item's cached image between two servers; also provides the plan/apply functions the bulk `--transfer-images` run uses
 - `transfer_subtitles.py` - standalone CLI to transfer one item's English subtitle track between two servers, entirely through the Jellyfin API; also provides the plan/apply functions the bulk `--transfer-subtitles` run uses
 - `apply_dvd_metadata.py` - standalone CLI to overwrite one series/season's episode Name/Overview with TheTVDB's DVD-order values
-- `apply_episode_numbers.py` - standalone CLI to fill in missing episode numbers for one series/season from TheTVDB's aired order
+- `apply_episode_numbers.py` - standalone CLI to fill in missing episode numbers for one series/season from TheTVDB's aired order, with interactive fuzzy title matching for episodes with no exact title match
 - `config.py` - application and server configuration
 - `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use, plus series/episode lookups by name for `apply_dvd_metadata.py`/`apply_episode_numbers.py`)
 - `models.py` - normalized data models
