@@ -11,6 +11,7 @@ import re
 import shutil
 
 from audit_types import AuditFinding
+from compare_csv_files import write_diff_csv
 from config import get_config
 from media import get_primary_audio_codec
 from media import get_video_codec
@@ -319,6 +320,8 @@ def write_comparison_reports(
     transfer_results: tuple[MetadataTransferResult, ...] | None = None,
     image_transfer_results: tuple[ImageTransferResult, ...] | None = None,
     subtitle_transfer_results: tuple[SubtitleTransferResult, ...] | None = None,
+    left_csv_path: Path | None = None,
+    right_csv_path: Path | None = None,
 ) -> Path:
     """Write a static comparison site for two completed audit results.
 
@@ -336,6 +339,11 @@ def write_comparison_reports(
             --transfer-subtitles run to include as a "Subtitle Transfer
             Results" table on the subtitles page. ``None`` omits the table
             entirely.
+        left_csv_path: Path to the left server's --write-csv report, if one
+            was written this run. Paired with right_csv_path to also write a
+            diffs.csv into the comparison output directory.
+        right_csv_path: Path to the right server's --write-csv report, if one
+            was written this run.
     """
     root_dir = _default_output_dir() if output_dir is None else output_dir
     output_root = root_dir.parent
@@ -346,12 +354,23 @@ def write_comparison_reports(
     write_css(shared_css_path(output_root))
     write_javascript(shared_js_path(output_root))
 
+    diff_csv_href: str | None = None
+    if left_csv_path is not None and right_csv_path is not None:
+        write_diff_csv(left_csv_path, right_csv_path, root_dir / "diffs.csv")
+        diff_csv_href = "diffs.csv"
+
     comparison = _build_comparison(left_result, right_result)
     generated_at_text = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     (root_dir / "index.html").write_text(
         _page_document(
             title="Server Comparison",
-            body=_index_page(left_result, right_result, comparison, generated_at_text=generated_at_text),
+            body=_index_page(
+                left_result,
+                right_result,
+                comparison,
+                generated_at_text=generated_at_text,
+                diff_csv_href=diff_csv_href,
+            ),
             asset_prefix="../",
         ),
         encoding="utf-8",
@@ -983,7 +1002,14 @@ def _sequence_gap_findings(
     )
 
 
-def _index_page(left_result: AuditServerResult, right_result: AuditServerResult, comparison: dict[str, object], *, generated_at_text: str = "") -> str:
+def _index_page(
+    left_result: AuditServerResult,
+    right_result: AuditServerResult,
+    comparison: dict[str, object],
+    *,
+    generated_at_text: str = "",
+    diff_csv_href: str | None = None,
+) -> str:
     """Return comparison overview page body."""
     cards = "\n".join(
         (
@@ -998,11 +1024,10 @@ def _index_page(left_result: AuditServerResult, right_result: AuditServerResult,
             _summary_card("Subtitle Differences", str(len(comparison["subtitle_differences"]))),
         )
     )
-    links = "\n".join(
-        (
-            _nav_cards(("libraries.html", "Libraries"), ("artwork.html", "Artwork"), ("subtitles.html", "Subtitles"), ("configuration.html", "Configuration")),
-        )
-    )
+    nav_links = [("libraries.html", "Libraries"), ("artwork.html", "Artwork"), ("subtitles.html", "Subtitles"), ("configuration.html", "Configuration")]
+    if diff_csv_href is not None:
+        nav_links.append((diff_csv_href, "Download CSV Diff"))
+    links = "\n".join((_nav_cards(*nav_links),))
     return _page_shell(
         "Comparison Overview",
         "Compare two completed audit results.",

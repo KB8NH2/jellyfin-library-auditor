@@ -455,9 +455,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root = audit_results_root(get_config().reporting.output.audit_html)
             reset_audit_results_root(output_root)
 
+        csv_report_paths: tuple[Path, ...] | None = None
         if options.write_csv:
-            for filtered_result in filtered_results:
-                write_csv_report(filtered_result)
+            csv_report_paths = tuple(write_csv_report(result) for result in filtered_results)
         if should_write_html_site:
             for filtered_result in filtered_results:
                 write_html_report(filtered_result)
@@ -512,6 +512,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 transfer_results=transfer_results,
                 image_transfer_results=image_transfer_results,
                 subtitle_transfer_results=subtitle_transfer_results,
+                left_csv_path=csv_report_paths[0] if csv_report_paths else None,
+                right_csv_path=csv_report_paths[1] if csv_report_paths else None,
             )
         if should_write_html_site:
             if output_root is None:
@@ -917,6 +919,8 @@ def _write_comparison_site(
     transfer_results: tuple[MetadataTransferResult, ...] | None = None,
     image_transfer_results: tuple[ImageTransferResult, ...] | None = None,
     subtitle_transfer_results: tuple[SubtitleTransferResult, ...] | None = None,
+    left_csv_path: Path | None = None,
+    right_csv_path: Path | None = None,
 ) -> None:
     """Write comparison reports for two audited servers."""
     if left_result.server_key == right_result.server_key:
@@ -928,6 +932,8 @@ def _write_comparison_site(
         transfer_results=transfer_results,
         image_transfer_results=image_transfer_results,
         subtitle_transfer_results=subtitle_transfer_results,
+        left_csv_path=left_csv_path,
+        right_csv_path=right_csv_path,
     )
 
 
