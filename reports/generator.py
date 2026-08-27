@@ -32,6 +32,7 @@ from results import AuditServerResult
 CSV_HEADER = (
     "Library",
     "Path",
+    "Series",
     "Title",
     "Season",
     "Episode",
@@ -234,6 +235,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
             (
                 item.library,
                 get_display_path(item),
+                item.series_name if item.is_episode and item.series_name else "",
                 item.title,
                 str(item.season_number) if item.is_episode and item.season_number is not None else "",
                 str(item.episode_number) if item.is_episode and item.episode_number is not None else "",

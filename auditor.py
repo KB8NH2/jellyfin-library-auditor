@@ -569,9 +569,12 @@ def _audit_library_result(
         items_with_local_nfo += int(local_nfo_exists(item))
         items_with_local_backdrop += int(local_backdrop_exists(item))
         findings.extend(audit_media_item(item))
-    findings.extend(audit_library_items(items))
+
+    aired_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
     if tvdb_client is not None and library.is_tv_library:
-        findings.extend(_audit_episode_ordering(client, tvdb_client, library, items))
+        aired_positions, dvd_positions = _fetch_tvdb_episode_positions(client, tvdb_client, library, items)
+        findings.extend(audit_episode_ordering(items, aired_positions, dvd_positions))
+    findings.extend(audit_library_items(items, aired_positions))
 
     return LibraryAuditResult(
         library=library,
@@ -584,22 +587,24 @@ def _audit_library_result(
     )
 
 
-def _audit_episode_ordering(
+def _fetch_tvdb_episode_positions(
     client: JellyfinClient,
     tvdb_client: TvdbClient,
     library: MediaLibrary,
     items: Iterable[MediaItem],
-) -> tuple[AuditFinding, ...]:
-    """Return aired/DVD episode-ordering findings for one TV library.
+) -> tuple[dict[str, dict[tuple[int, int], TvdbEpisode]], dict[str, dict[tuple[int, int], TvdbEpisode]]]:
+    """Return TheTVDB aired- and DVD-order episode positions for one TV library.
 
     Looks up each series' TheTVDB id once per library, then fetches both
     orderings only for series actually present in this library's items. A
     lookup failure for one series is logged and skipped rather than failing
-    the whole audit run.
+    the whole audit run. The aired-order positions are reused both for
+    aired/DVD episode-ordering findings and for missing-episode detection
+    against TheTVDB's full episode list.
     """
     series_names = {item.series_name for item in items if item.is_episode and item.series_name}
     if not series_names:
-        return ()
+        return {}, {}
 
     series_tvdb_ids = client.get_series_tvdb_ids(library.id)
 
@@ -620,7 +625,7 @@ def _audit_episode_ordering(
             aired_episodes = tvdb_client.get_series_episodes(tvdb_id, "official")
             dvd_episodes = tvdb_client.get_series_episodes(tvdb_id, "dvd")
         except TvdbError as error:
-            LOGGER.warning("Skipping episode-order check for %r: %s", series_name, error)
+            LOGGER.warning("Skipping TheTVDB episode lookup for %r: %s", series_name, error)
             continue
 
         aired_positions[series_name] = {
@@ -630,7 +635,7 @@ def _audit_episode_ordering(
             (episode.season_number, episode.episode_number): episode for episode in dvd_episodes
         }
 
-    return audit_episode_ordering(items, aired_positions, dvd_positions)
+    return aired_positions, dvd_positions
 
 
 def _log_library_summaries(library_results: Iterable[LibraryAuditResult]) -> None:

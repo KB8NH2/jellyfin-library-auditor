@@ -1213,6 +1213,7 @@ def _subtitles_page(
             right_server_name,
             rows,
             include_hide_same=False,
+            split_field="English Subtitles",
         ),
     ]
     if subtitle_transfer_results is not None:
@@ -2006,14 +2007,60 @@ def _artwork_row(left_result: AuditServerResult, right_result: AuditServerResult
 def _subtitle_row(left_result: AuditServerResult, right_result: AuditServerResult, pair: MatchedPair) -> str:
     """Return one subtitle difference row."""
     search_text = f"{pair.library} {pair.left.display_name} subtitles".lower()
-    left_subtitles = _yes_no(has_english_subtitles(pair.left))
-    right_subtitles = _yes_no(has_english_subtitles(pair.right))
+    left_has_subtitles = has_english_subtitles(pair.left)
+    right_has_subtitles = has_english_subtitles(pair.right)
+    left_subtitles = _yes_no(left_has_subtitles)
+    right_subtitles = _yes_no(right_has_subtitles)
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td{_filename_title_attribute(pair.left)}>{escape(pair.left.title)}</td><td>{escape(pair.left.series_name or "")}</td>'
         f'{_table_cell(_display_season(pair.left), sort_value=_season_sort_value(pair.left))}'
         f'{_table_cell("" if pair.left.episode_number is None else pair.left.episode_number, sort_value=_episode_sort_value(pair.left))}'
-        f'{_diff_cell(left_subtitles, is_different=left_subtitles != right_subtitles)}{_diff_cell(right_subtitles, is_different=left_subtitles != right_subtitles)}</tr>'
+        f'{_diff_cell(left_subtitles, is_different=left_subtitles != right_subtitles)}'
+        f'{_subtitle_transfer_cell(left_result.server_key, pair.left.id, left_has_subtitles, right_result.server_key, pair.right.id, right_has_subtitles)}'
+        f'{_diff_cell(right_subtitles, is_different=left_subtitles != right_subtitles)}</tr>'
+    )
+
+
+def _subtitle_transfer_cell(
+    left_server_key: str,
+    left_item_id: str,
+    left_has_subtitles: bool,
+    right_server_key: str,
+    right_item_id: str,
+    right_has_subtitles: bool,
+) -> str:
+    """Return the transfer-subtitles button cell for one subtitle-difference row.
+
+    The button copies a ready-made ``transfer_subtitles.py`` command to the
+    clipboard, directed from whichever server already has the English
+    subtitle track to the one missing it - the reverse direction wouldn't
+    have anything to send.
+    """
+    if not left_server_key or not right_server_key or left_has_subtitles == right_has_subtitles:
+        return '<td class="transfer-cell"></td>'
+
+    if left_has_subtitles:
+        from_server_key, from_item_id = left_server_key, left_item_id
+        to_server_key, to_item_id = right_server_key, right_item_id
+        arrow = "&#8594;"
+    else:
+        from_server_key, from_item_id = right_server_key, right_item_id
+        to_server_key, to_item_id = left_server_key, left_item_id
+        arrow = "&#8592;"
+
+    command = (
+        "python transfer_subtitles.py"
+        f' --from-server "{from_server_key}" --from-item "{from_item_id}"'
+        f' --to-server "{to_server_key}" --to-item "{to_item_id}"'
+    )
+    return (
+        '<td class="transfer-cell">'
+        '<button type="button" class="transfer-button" '
+        f'data-command="{escape(command)}" '
+        'title="Copy command to transfer subtitles from the server that has them to the one missing them" '
+        f'onclick="copyTransferCommand(this)">{arrow}</button>'
+        "</td>"
     )
 
 

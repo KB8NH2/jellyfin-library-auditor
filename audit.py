@@ -63,19 +63,28 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
     return tuple(findings)
 
 
-def audit_library_items(items: Iterable[MediaItem]) -> tuple[AuditFinding, ...]:
+def audit_library_items(
+    items: Iterable[MediaItem],
+    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+) -> tuple[AuditFinding, ...]:
     """Run library-level audits that require multiple media items.
 
     Args:
         items: Media items from one audited library.
+        aired_positions: TheTVDB aired-order episodes for each series name,
+            keyed by (season_number, episode_number), as fetched for
+            :func:`audit_episode_ordering`. When given, missing-season and
+            missing-episode detection are checked against each series' full
+            TheTVDB season/episode list instead of only gaps between
+            locally-present numbers.
 
     Returns:
         A tuple containing findings derived from gaps across TV episodes.
     """
     items_tuple = tuple(items)
     findings: list[AuditFinding] = []
-    findings.extend(missing_tv_series_seasons(items_tuple))
-    findings.extend(missing_tv_season_episodes(items_tuple))
+    findings.extend(missing_tv_series_seasons(items_tuple, aired_positions))
+    findings.extend(missing_tv_season_episodes(items_tuple, aired_positions))
     return tuple(findings)
 
 
@@ -350,14 +359,30 @@ def _roman_numeral_to_int(numeral: str) -> int | None:
     return total or None
 
 
-def missing_tv_series_seasons(items: Iterable[MediaItem]) -> tuple[AuditFinding, ...]:
+def missing_tv_series_seasons(
+    items: Iterable[MediaItem],
+    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+) -> tuple[AuditFinding, ...]:
     """Return findings for series with missing numbered seasons.
+
+    Without TheTVDB data, a series' missing seasons can only be inferred from
+    gaps between the lowest and highest season numbers present locally -
+    there's no way to tell whether seasons are missing after the last one on
+    disk. When ``aired_positions`` has an entry for a series, the set of
+    season numbers found there is used instead, so seasons missing after the
+    last local one (e.g. only seasons 1-2 exist locally but TheTVDB lists
+    1-4) are caught too, not just internal gaps.
 
     Args:
         items: Media items from one audited library.
+        aired_positions: TheTVDB aired-order episodes for each series name,
+            keyed by (season_number, episode_number), as fetched for
+            :func:`audit_episode_ordering`. When omitted, or when a series
+            has no matching TVDB data, only internal gaps between
+            locally-present season numbers are reported.
 
     Returns:
-        One finding per TV series with internal season-number gaps.
+        One finding per TV series with missing numbered seasons.
     """
     series_items: dict[str, list[MediaItem]] = {}
     for item in items:
@@ -368,9 +393,10 @@ def missing_tv_series_seasons(items: Iterable[MediaItem]) -> tuple[AuditFinding,
         series_items.setdefault(item.series_name, []).append(item)
 
     findings: list[AuditFinding] = []
-    for _, grouped_items in sorted(series_items.items(), key=lambda entry: entry[0].casefold()):
-        season_numbers = sorted({item.season_number for item in grouped_items if item.season_number is not None})
-        missing_numbers = _missing_sequence_numbers(season_numbers)
+    for series_name, grouped_items in sorted(series_items.items(), key=lambda entry: entry[0].casefold()):
+        season_numbers = {item.season_number for item in grouped_items if item.season_number is not None}
+        tvdb_season_numbers = _tvdb_series_season_numbers(aired_positions, series_name)
+        missing_numbers = _missing_numbers(season_numbers, tvdb_season_numbers)
         if not missing_numbers:
             continue
         representative = min(grouped_items, key=_episode_sort_key)
@@ -386,14 +412,30 @@ def missing_tv_series_seasons(items: Iterable[MediaItem]) -> tuple[AuditFinding,
     return tuple(findings)
 
 
-def missing_tv_season_episodes(items: Iterable[MediaItem]) -> tuple[AuditFinding, ...]:
+def missing_tv_season_episodes(
+    items: Iterable[MediaItem],
+    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+) -> tuple[AuditFinding, ...]:
     """Return findings for seasons with missing numbered episodes.
+
+    Without TheTVDB data, a season's missing episodes can only be inferred
+    from gaps between the lowest and highest episode numbers present locally
+    - there's no way to tell whether episodes are missing after the last one
+    on disk. When ``aired_positions`` has an entry for a series' season, its
+    full TheTVDB episode list is used instead, so episodes missing after the
+    last local one (e.g. only 1-8 exist locally but TheTVDB lists 1-10) are
+    caught too, not just internal gaps.
 
     Args:
         items: Media items from one audited library.
+        aired_positions: TheTVDB aired-order episodes for each series name,
+            keyed by (season_number, episode_number), as fetched for
+            :func:`audit_episode_ordering`. When omitted, or when a series
+            or season has no matching TVDB data, only internal gaps between
+            locally-present episode numbers are reported.
 
     Returns:
-        One finding per TV season with internal episode-number gaps.
+        One finding per TV season with missing numbered episodes.
     """
     season_items: dict[tuple[str, int], list[MediaItem]] = {}
     for item in items:
@@ -406,14 +448,15 @@ def missing_tv_season_episodes(items: Iterable[MediaItem]) -> tuple[AuditFinding
         season_items.setdefault((item.series_name, item.season_number), []).append(item)
 
     findings: list[AuditFinding] = []
-    for _, grouped_items in sorted(
+    for (series_name, season_number), grouped_items in sorted(
         season_items.items(),
         key=lambda entry: (entry[0][0].casefold(), entry[0][1]),
     ):
-        episode_numbers = sorted(
-            {item.episode_number for item in grouped_items if item.episode_number is not None}
-        )
-        missing_numbers = _missing_sequence_numbers(episode_numbers)
+        episode_numbers = {
+            item.episode_number for item in grouped_items if item.episode_number is not None
+        }
+        tvdb_episode_numbers = _tvdb_season_episode_numbers(aired_positions, series_name, season_number)
+        missing_numbers = _missing_numbers(episode_numbers, tvdb_episode_numbers)
         if not missing_numbers:
             continue
         representative = min(grouped_items, key=_episode_sort_key)
@@ -427,6 +470,55 @@ def missing_tv_season_episodes(items: Iterable[MediaItem]) -> tuple[AuditFinding
             )
         )
     return tuple(findings)
+
+
+def _tvdb_season_episode_numbers(
+    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None,
+    series_name: str,
+    season_number: int,
+) -> frozenset[int] | None:
+    """Return TheTVDB's known episode numbers for one series' season, if any."""
+    if not aired_positions:
+        return None
+    series_positions = aired_positions.get(series_name)
+    if not series_positions:
+        return None
+    season_episode_numbers = frozenset(
+        episode_number
+        for position_season, episode_number in series_positions
+        if position_season == season_number
+    )
+    return season_episode_numbers or None
+
+
+def _tvdb_series_season_numbers(
+    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None,
+    series_name: str,
+) -> frozenset[int] | None:
+    """Return TheTVDB's known season numbers for one series, if any."""
+    if not aired_positions:
+        return None
+    series_positions = aired_positions.get(series_name)
+    if not series_positions:
+        return None
+    series_season_numbers = frozenset(position_season for position_season, _ in series_positions)
+    return series_season_numbers or None
+
+
+def _missing_numbers(
+    local_numbers: Iterable[int],
+    tvdb_numbers: frozenset[int] | None,
+) -> tuple[int, ...]:
+    """Return missing numbers (season or episode) for one series or season.
+
+    Without TheTVDB data (``tvdb_numbers`` is ``None``), only gaps between
+    the lowest and highest locally-present numbers are reported. With
+    TheTVDB data, every TVDB-listed number absent locally is reported,
+    including ones after the last local number.
+    """
+    if tvdb_numbers is None:
+        return _missing_sequence_numbers(local_numbers)
+    return tuple(sorted(tvdb_numbers - set(local_numbers)))
 
 
 def audit_episode_ordering(

@@ -109,7 +109,7 @@ RequestParamValue = str | bytes | int | float | list[str] | tuple[str, ...] | No
 SEASON_NAME_NUMBER_PATTERN = re.compile(r"^\s*season\s+(\d+)\s*$", re.IGNORECASE)
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_PAGE_SIZE = 200
-DEFAULT_MAX_RETRIES = 3
+DEFAULT_MAX_RETRIES = 5
 DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
 
 LOGGER = logging.getLogger("jellyfin")
@@ -671,6 +671,12 @@ class JellyfinClient:
         is also fetched, since apply_episode_numbers.py needs it to identify
         each episode in its output.
 
+        Each episode's IndexNumber is re-checked with a per-item lookup
+        (see _lookup_index_number) rather than trusted from this listing, so
+        a number just cleared or set outside a library scan is reflected
+        immediately. A season's episode count is small enough that the extra
+        per-item requests are worth the accuracy.
+
         Args:
             series_id: Jellyfin Series item identifier.
             season_number: Season number to match against each episode's
@@ -701,12 +707,13 @@ class JellyfinClient:
                 if self._resolved_season_number(raw_item) != season_number:
                     continue
                 raw_path = self._get_optional_str(raw_item, "Path")
+                episode_id = self._get_required_str(raw_item, "Id", "episode item")
                 episodes.append(
                     SeasonEpisodeSummary(
-                        id=self._get_required_str(raw_item, "Id", "episode item"),
+                        id=episode_id,
                         name=self._get_optional_str(raw_item, "Name") or "",
                         path=Path(raw_path) if raw_path else None,
-                        episode_number=self._get_optional_int(raw_item, "IndexNumber"),
+                        episode_number=self._lookup_index_number(episode_id),
                     )
                 )
 
@@ -1062,18 +1069,28 @@ class JellyfinClient:
 
         return media_items
 
+    def _lookup_index_number(self, item_id: str) -> int | None:
+        """Return one item's current IndexNumber via a direct per-item lookup.
+
+        Jellyfin's /Items listing endpoint (whole-library or scoped to a
+        ParentId) can lag behind a field edit made outside a normal library
+        scan - a direct API PATCH (as apply_episode_numbers.py and
+        apply_dvd_metadata.py do) or a manual edit in the Jellyfin UI - in
+        either direction: it can omit an IndexNumber that is actually set,
+        or keep showing a value that was since cleared. A per-item GET reads
+        the current value directly and isn't affected by this lag.
+        """
+        detail = self.get_item(item_id)
+        return self._get_optional_int(detail, "IndexNumber")
+
     def _resolve_missing_episode_number(self, item: MediaItem) -> MediaItem:
         """Re-check one episode's IndexNumber with a per-item lookup.
 
-        Jellyfin's broad, whole-library recursive /Items listing silently
-        omits IndexNumber for episodes whose number was set by a direct API
-        PATCH (as apply_episode_numbers.py and apply_dvd_metadata.py do)
-        rather than assigned at normal library-scan time - the value is
-        genuinely saved and reads back correctly from a query scoped to the
-        item's own series/season, just not from the whole-library query
-        this method's caller relies on. Without this fallback, an audit run
-        misreports those episodes as missing a number even though Jellyfin
-        (and its own UI) has it.
+        Only used for the whole-library listing, where re-checking every
+        episode individually would be too expensive - so this only covers
+        the listing-says-missing-but-isn't direction, which is the one that
+        matters for an audit run (it would otherwise misreport an episode as
+        missing a number even though Jellyfin has it).
 
         Args:
             item: A media item just parsed from the whole-library listing.
@@ -1086,8 +1103,7 @@ class JellyfinClient:
         if not item.is_episode or item.episode_number is not None:
             return item
 
-        detail = self.get_item(item.id)
-        episode_number = self._get_optional_int(detail, "IndexNumber")
+        episode_number = self._lookup_index_number(item.id)
         if episode_number is None:
             return item
         return replace(item, episode_number=episode_number)
