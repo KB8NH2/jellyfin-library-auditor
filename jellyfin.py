@@ -439,22 +439,33 @@ class JellyfinClient:
         library = self._get_library_by_id(library_id)
         return self._get_library_items_for_library(library)
 
-    def get_series_tvdb_ids(self, library_id: str) -> dict[str, str]:
-        """Return each TV series' TheTVDB id, keyed by series name.
+    def get_series_tvdb_ids(self, library_id: str) -> dict[str, tuple[str, ...]]:
+        """Return each TV series' TheTVDB id(s), keyed by series name.
 
         Used by the optional aired/DVD episode-ordering check, which needs
         TheTVDB's series id but has no reason to fetch anything else about
         the Series item itself.
 
+        Returns every distinct TheTVDB id found for a series name, not just
+        one - a Jellyfin library can have more than one Series item sharing
+        the exact same display name (e.g. TheTVDB splitting a long-running
+        show into a separate entry for a newer era while the old entry keeps
+        the earlier episodes, with both still titled the same in Jellyfin).
+        Collapsing that to a single id per name would silently keep whichever
+        one happened to be returned last and drop the other, which then makes
+        every TheTVDB-backed check for that name compare local episodes
+        against only half the real data. Callers combine data from every id
+        returned for a name instead.
+
         Args:
             library_id: Jellyfin library identifier.
 
         Returns:
-            A mapping of series display name to TheTVDB provider id, for
-            series that have one. Series without a "Tvdb" provider id are
-            omitted.
+            A mapping of series display name to the distinct TheTVDB provider
+            id(s) found for it, in first-seen order. A name with no series
+            reporting a "Tvdb" provider id is omitted.
         """
-        series_tvdb_ids: dict[str, str] = {}
+        series_tvdb_ids: dict[str, list[str]] = {}
         start_index = 0
 
         while True:
@@ -475,7 +486,9 @@ class JellyfinClient:
                 name = self._get_optional_str(raw_item, "Name")
                 tvdb_id = self._get_string_dict(raw_item, "ProviderIds").get("Tvdb")
                 if name and tvdb_id:
-                    series_tvdb_ids[name] = tvdb_id
+                    ids = series_tvdb_ids.setdefault(name, [])
+                    if tvdb_id not in ids:
+                        ids.append(tvdb_id)
 
             total_count = self._get_optional_int(payload, "TotalRecordCount")
             start_index += len(raw_items)
@@ -487,7 +500,7 @@ class JellyfinClient:
             if len(raw_items) < self._page_size:
                 break
 
-        return series_tvdb_ids
+        return {name: tuple(ids) for name, ids in series_tvdb_ids.items()}
 
     def find_series(
         self,

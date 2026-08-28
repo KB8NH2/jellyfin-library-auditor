@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from collections.abc import Mapping
+import logging
 import re
 
 from audit_types import AuditCategory
@@ -35,6 +36,15 @@ _ROMAN_NUMERAL_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "
 _MISMATCHED_TVDB_SERIES_MIN_EPISODES = 5
 _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO = 0.5
 _GOOD_TVDB_MATCH_MAX_UNMATCHED_RATIO = 0.1
+
+# Dedicated logger for mismatched_tvdb_series()'s per-series matching data, so
+# a user auditing a false positive/negative can see exactly which local
+# episodes did and didn't line up with TheTVDB. Kept off the root logger's
+# console handler (propagate=False) since this is per-episode-verbose - it
+# only produces output once auditor.py attaches a file handler for it, kept
+# in mismatched_tvdb_series.log.
+LOGGER = logging.getLogger("mismatched_tvdb_series")
+LOGGER.propagate = False
 
 
 def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
@@ -606,15 +616,38 @@ def mismatched_tvdb_series(
     for series_name, grouped_items in sorted(series_items.items(), key=lambda entry: entry[0].casefold()):
         series_aired_positions = aired_positions.get(series_name)
         if not series_aired_positions:
+            LOGGER.info(
+                "Series %r: no TheTVDB aired-order data available; skipping mismatch check.",
+                series_name,
+            )
             continue
         if len(grouped_items) < _MISMATCHED_TVDB_SERIES_MIN_EPISODES:
+            LOGGER.info(
+                "Series %r: only %d local numbered episode(s) found (minimum %d required); "
+                "skipping mismatch check.",
+                series_name,
+                len(grouped_items),
+                _MISMATCHED_TVDB_SERIES_MIN_EPISODES,
+            )
             continue
 
         series_dvd_positions = dvd_positions.get(series_name) if dvd_positions else None
         unmatched_count, total_count = _unmatched_episode_count(
             grouped_items, series_aired_positions, series_dvd_positions
         )
-        if unmatched_count / total_count < _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO:
+        ratio = unmatched_count / total_count
+        is_mismatched = ratio >= _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO
+        _log_mismatch_evaluation(
+            series_name,
+            grouped_items,
+            series_aired_positions,
+            series_dvd_positions,
+            unmatched_count=unmatched_count,
+            total_count=total_count,
+            ratio=ratio,
+            is_mismatched=is_mismatched,
+        )
+        if not is_mismatched:
             continue
 
         representative = min(grouped_items, key=_episode_sort_key)
@@ -632,6 +665,62 @@ def mismatched_tvdb_series(
             )
         )
     return tuple(findings)
+
+
+def _log_mismatch_evaluation(
+    series_name: str,
+    grouped_items: Iterable[MediaItem],
+    series_aired_positions: Mapping[tuple[int, int], TvdbEpisode],
+    series_dvd_positions: Mapping[tuple[int, int], TvdbEpisode] | None,
+    *,
+    unmatched_count: int,
+    total_count: int,
+    ratio: float,
+    is_mismatched: bool,
+) -> None:
+    """Log one series' mismatched_tvdb_series evaluation: per-episode matches and the resulting score.
+
+    Written to ``LOGGER`` at INFO, which only reaches disk when
+    auditor.py has attached a file handler for it (``mismatched_tvdb_series.log``) -
+    this is diagnostic detail for manually checking a specific finding, not
+    something meant to appear on the console.
+    """
+    LOGGER.info(
+        "Series %r: checking %d local episode(s) against %d TheTVDB aired-order and %d "
+        "DVD-order position(s).",
+        series_name,
+        total_count,
+        len(series_aired_positions),
+        len(series_dvd_positions) if series_dvd_positions is not None else 0,
+    )
+    for item in sorted(grouped_items, key=_episode_sort_key):
+        position = (item.season_number, item.episode_number)
+        in_aired = position in series_aired_positions
+        in_dvd = series_dvd_positions is not None and position in series_dvd_positions
+        if in_aired and in_dvd:
+            status = "matched (aired + dvd)"
+        elif in_aired:
+            status = "matched (aired)"
+        elif in_dvd:
+            status = "matched (dvd)"
+        else:
+            status = "unmatched"
+        LOGGER.info(
+            "  S%02dE%02d %r -> %s",
+            item.season_number,
+            item.episode_number,
+            item.title,
+            status,
+        )
+    LOGGER.info(
+        "Series %r: score %d/%d unmatched (%.2f, threshold %.2f) -> %s",
+        series_name,
+        unmatched_count,
+        total_count,
+        ratio,
+        _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO,
+        "MISMATCH FLAGGED" if is_mismatched else "ok",
+    )
 
 
 def _local_numbered_episodes_by_series(items: Iterable[MediaItem]) -> dict[str, list[MediaItem]]:
