@@ -70,6 +70,7 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
 def audit_library_items(
     items: Iterable[MediaItem],
     aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+    dvd_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
 ) -> tuple[AuditFinding, ...]:
     """Run library-level audits that require multiple media items.
 
@@ -85,13 +86,17 @@ def audit_library_items(
             itself unreliable, so those two checks fall back to local-gap
             detection for it instead of reporting a wall of nonsense
             missing seasons/episodes on top of the mismatch finding.
+        dvd_positions: TheTVDB DVD-order episodes for each series name, in
+            the same shape as ``aired_positions``. Passed through to
+            :func:`mismatched_tvdb_series` so a series numbered in DVD order
+            on disk isn't flagged as a wrong TheTVDB match.
 
     Returns:
         A tuple containing findings derived from gaps across TV episodes.
     """
     items_tuple = tuple(items)
     findings: list[AuditFinding] = []
-    mismatched_series_findings = mismatched_tvdb_series(items_tuple, aired_positions)
+    mismatched_series_findings = mismatched_tvdb_series(items_tuple, aired_positions, dvd_positions)
     mismatched_series_names = frozenset(
         finding.media_item.series_name
         for finding in mismatched_series_findings
@@ -553,6 +558,7 @@ def _missing_numbers(
 def mismatched_tvdb_series(
     items: Iterable[MediaItem],
     aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+    dvd_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
 ) -> tuple[AuditFinding, ...]:
     """Return findings for series whose matched TheTVDB entry looks wrong.
 
@@ -566,6 +572,11 @@ def mismatched_tvdb_series(
     any one episode, needs fixing (typically via Jellyfin's "Identify"
     dialog on that series).
 
+    A local episode is considered matched when its (season, episode)
+    position exists in either TheTVDB's aired order or its DVD order, since
+    some series are numbered on disk in DVD order - checking aired order
+    alone would otherwise flag those correctly-matched series as wrong.
+
     Only series with at least ``_MISMATCHED_TVDB_SERIES_MIN_EPISODES`` local
     episodes are considered, so a newly added series with only a couple of
     episodes on disk doesn't trigger a finding on thin evidence. Season 0
@@ -578,6 +589,9 @@ def mismatched_tvdb_series(
             keyed by (season_number, episode_number). A series absent here
             (no TheTVDB match, or the lookup failed) is skipped - this check
             needs TheTVDB data to have something to compare against.
+        dvd_positions: TheTVDB DVD-order episodes for each series name, in
+            the same shape as ``aired_positions``. A local episode matching
+            either ordering counts as matched.
 
     Returns:
         One finding per TV series whose local episodes mostly don't match
@@ -590,13 +604,16 @@ def mismatched_tvdb_series(
 
     findings: list[AuditFinding] = []
     for series_name, grouped_items in sorted(series_items.items(), key=lambda entry: entry[0].casefold()):
-        series_positions = aired_positions.get(series_name)
-        if not series_positions:
+        series_aired_positions = aired_positions.get(series_name)
+        if not series_aired_positions:
             continue
         if len(grouped_items) < _MISMATCHED_TVDB_SERIES_MIN_EPISODES:
             continue
 
-        unmatched_count, total_count = _unmatched_episode_count(grouped_items, series_positions)
+        series_dvd_positions = dvd_positions.get(series_name) if dvd_positions else None
+        unmatched_count, total_count = _unmatched_episode_count(
+            grouped_items, series_aired_positions, series_dvd_positions
+        )
         if unmatched_count / total_count < _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO:
             continue
 
@@ -640,13 +657,24 @@ def _local_numbered_episodes_by_series(items: Iterable[MediaItem]) -> dict[str, 
 def _unmatched_episode_count(
     local_items: Iterable[MediaItem],
     series_positions: Mapping[tuple[int, int], TvdbEpisode],
+    secondary_series_positions: Mapping[tuple[int, int], TvdbEpisode] | None = None,
 ) -> tuple[int, int]:
-    """Return (unmatched_count, total_count) of local items against TheTVDB positions."""
+    """Return (unmatched_count, total_count) of local items against TheTVDB positions.
+
+    An item counts as matched when its (season, episode) position is found
+    in either ``series_positions`` or, when given, ``secondary_series_positions``
+    - used to check a local episode against both TheTVDB's aired and DVD
+    orderings.
+    """
     local_items_tuple = tuple(local_items)
     unmatched_count = sum(
         1
         for item in local_items_tuple
         if (item.season_number, item.episode_number) not in series_positions
+        and (
+            secondary_series_positions is None
+            or (item.season_number, item.episode_number) not in secondary_series_positions
+        )
     )
     return unmatched_count, len(local_items_tuple)
 

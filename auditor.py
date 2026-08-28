@@ -587,14 +587,15 @@ def _audit_library_result(
         findings.extend(audit_media_item(item))
 
     aired_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
+    dvd_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
     series_tvdb_ids: dict[str, str] = {}
     if tvdb_client is not None and library.is_tv_library:
         aired_positions, dvd_positions, series_tvdb_ids = _fetch_tvdb_episode_positions(
-            client, tvdb_client, library, items, fetch_dvd_positions=check_episode_order
+            client, tvdb_client, library, items
         )
         if check_episode_order:
             findings.extend(audit_episode_ordering(items, aired_positions, dvd_positions))
-    findings.extend(audit_library_items(items, aired_positions))
+    findings.extend(audit_library_items(items, aired_positions, dvd_positions))
 
     result_findings = tuple(findings)
     if tvdb_client is not None:
@@ -724,8 +725,6 @@ def _fetch_tvdb_episode_positions(
     tvdb_client: TvdbClient,
     library: MediaLibrary,
     items: Iterable[MediaItem],
-    *,
-    fetch_dvd_positions: bool = True,
 ) -> tuple[
     dict[str, dict[tuple[int, int], TvdbEpisode]],
     dict[str, dict[tuple[int, int], TvdbEpisode]],
@@ -733,16 +732,16 @@ def _fetch_tvdb_episode_positions(
 ]:
     """Return TheTVDB aired-/DVD-order episode positions and each series' matched id.
 
-    Looks up each series' TheTVDB id once per library, then fetches aired-
-    order positions for every series present in this library's items, since
-    missing-season and missing-episode detection need it whenever a TheTVDB
-    api_key is configured, not just with ``--check-episode-order``. DVD-order
-    positions - needed only for aired/DVD episode-ordering findings - are
-    fetched too when ``fetch_dvd_positions`` is set, skipping an unneeded
-    TheTVDB call otherwise. A lookup failure for one series is logged and
-    skipped rather than failing the whole audit run. The matched TheTVDB id
-    per series is returned too, so a later mismatched-series suggestion
-    lookup knows which candidate to exclude as "the one already tried".
+    Looks up each series' TheTVDB id once per library, then fetches both
+    aired-order and DVD-order positions for every series present in this
+    library's items. Both orderings are always fetched - not just with
+    ``--check-episode-order`` - because :func:`audit.mismatched_tvdb_series`
+    needs to check a local episode against both orderings so a series simply
+    numbered on disk in DVD order isn't flagged as a wrong TheTVDB match. A
+    lookup failure for one series is logged and skipped rather than failing
+    the whole audit run. The matched TheTVDB id per series is returned too,
+    so a later mismatched-series suggestion lookup knows which candidate to
+    exclude as "the one already tried".
     """
     series_names = {item.series_name for item in items if item.is_episode and item.series_name}
     if not series_names:
@@ -767,11 +766,7 @@ def _fetch_tvdb_episode_positions(
             aired_episodes = tvdb_client.get_series_episodes(
                 tvdb_id, "official", series_name=series_name
             )
-            dvd_episodes = (
-                tvdb_client.get_series_episodes(tvdb_id, "dvd", series_name=series_name)
-                if fetch_dvd_positions
-                else ()
-            )
+            dvd_episodes = tvdb_client.get_series_episodes(tvdb_id, "dvd", series_name=series_name)
         except TvdbError as error:
             LOGGER.warning("Skipping TheTVDB episode lookup for %r: %s", series_name, error)
             continue
@@ -779,10 +774,9 @@ def _fetch_tvdb_episode_positions(
         aired_positions[series_name] = {
             (episode.season_number, episode.episode_number): episode for episode in aired_episodes
         }
-        if fetch_dvd_positions:
-            dvd_positions[series_name] = {
-                (episode.season_number, episode.episode_number): episode for episode in dvd_episodes
-            }
+        dvd_positions[series_name] = {
+            (episode.season_number, episode.episode_number): episode for episode in dvd_episodes
+        }
 
     return aired_positions, dvd_positions, series_tvdb_ids
 
