@@ -13,13 +13,16 @@ import contextlib
 from datetime import timedelta
 import logging
 from collections.abc import Iterable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
 from audit import audit_episode_ordering
 from audit import audit_library_items
 from audit import audit_media_item
+from audit import best_matching_tvdb_series
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
@@ -62,6 +65,11 @@ import transfer_subtitles
 
 LOGGER = logging.getLogger("auditor")
 AUTO_COMPARE_SENTINEL = "__auto_compare__"
+# Safety cap on how many TheTVDB search candidates get their episode list
+# fetched when suggesting a fix for a mismatched_tvdb_series finding, so a
+# generically-named series with many TheTVDB search hits can't balloon into
+# a large number of TheTVDB calls for one finding.
+_MAX_TVDB_SEARCH_CANDIDATES = 5
 
 # Written alongside the per-transfer-type log files whenever at least one
 # --transfer-metadata/--transfer-images/--transfer-subtitles flag is used, so
@@ -199,6 +207,7 @@ def audit_server(
     *,
     include_configuration_snapshot: bool = False,
     tvdb_client: TvdbClient | None = None,
+    check_episode_order: bool = False,
 ) -> AuditServerResult:
     """Audit all enabled movie and TV libraries on the configured server.
 
@@ -209,7 +218,10 @@ def audit_server(
         include_configuration_snapshot: Whether to include extra server and
             library settings intended for comparison reporting.
         tvdb_client: Optional TheTVDB client. When provided, TV libraries are
-            also checked for aired/DVD episode-ordering mismatches.
+            also checked against TheTVDB's aired-order episode list for
+            missing seasons/episodes.
+        check_episode_order: Whether TV libraries are also checked for
+            aired/DVD episode-ordering mismatches. Requires ``tvdb_client``.
 
     Returns:
         Structured audit results for the server.
@@ -248,7 +260,9 @@ def audit_server(
                 library.name,
                 server_display_name,
             )
-            library_result = _audit_library_result(client, library, tvdb_client=tvdb_client)
+            library_result = _audit_library_result(
+                client, library, tvdb_client=tvdb_client, check_episode_order=check_episode_order
+            )
             library_results.append(library_result)
             media_items_processed += library_result.media_items_processed
             findings.extend(library_result.findings)
@@ -420,7 +434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     force_refresh=options.refresh_tvdb_cache,
                 ),
             )
-            if options.check_episode_order
+            if get_config().tvdb.api_key
             else contextlib.nullcontext(None)
         )
         with tvdb_client_context as tvdb_client:
@@ -430,6 +444,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     options.library_names,
                     include_configuration_snapshot=include_configuration_snapshot,
                     tvdb_client=tvdb_client,
+                    check_episode_order=options.check_episode_order,
                 )
                 for server_key in selected_server_keys
             )
@@ -555,6 +570,7 @@ def _audit_library_result(
     library: MediaLibrary,
     *,
     tvdb_client: TvdbClient | None = None,
+    check_episode_order: bool = False,
 ) -> LibraryAuditResult:
     """Return full audit results for one library."""
     items = client.get_library_items(library.id)
@@ -571,10 +587,23 @@ def _audit_library_result(
         findings.extend(audit_media_item(item))
 
     aired_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
+    series_tvdb_ids: dict[str, str] = {}
     if tvdb_client is not None and library.is_tv_library:
-        aired_positions, dvd_positions = _fetch_tvdb_episode_positions(client, tvdb_client, library, items)
-        findings.extend(audit_episode_ordering(items, aired_positions, dvd_positions))
+        aired_positions, dvd_positions, series_tvdb_ids = _fetch_tvdb_episode_positions(
+            client, tvdb_client, library, items, fetch_dvd_positions=check_episode_order
+        )
+        if check_episode_order:
+            findings.extend(audit_episode_ordering(items, aired_positions, dvd_positions))
     findings.extend(audit_library_items(items, aired_positions))
+
+    result_findings = tuple(findings)
+    if tvdb_client is not None:
+        result_findings = _suggest_better_tvdb_matches(
+            result_findings,
+            items=items,
+            tvdb_client=tvdb_client,
+            series_tvdb_ids=series_tvdb_ids,
+        )
 
     return LibraryAuditResult(
         library=library,
@@ -583,8 +612,111 @@ def _audit_library_result(
         items_with_english_subtitles=items_with_english_subtitles,
         items_with_local_nfo=items_with_local_nfo,
         items_with_local_backdrop=items_with_local_backdrop,
-        findings=tuple(findings),
+        findings=result_findings,
     )
+
+
+def _suggest_better_tvdb_matches(
+    findings: Iterable[AuditFinding],
+    *,
+    items: Iterable[MediaItem],
+    tvdb_client: TvdbClient,
+    series_tvdb_ids: Mapping[str, str],
+) -> tuple[AuditFinding, ...]:
+    """Return ``findings`` with mismatched-TVDB-series findings enriched with a fix suggestion.
+
+    For each ``mismatched_tvdb_series`` finding, searches TheTVDB by series
+    name for a same-named series whose episode list actually fits the local
+    files, and appends a concrete suggestion to the finding's message when
+    one is found. A lookup failure for one series is logged and skipped
+    rather than failing the whole audit run - the original finding is kept
+    unchanged in that case.
+    """
+    items_tuple = tuple(items)
+    updated_findings: list[AuditFinding] = []
+    for finding in findings:
+        if finding.check_name != "mismatched_tvdb_series":
+            updated_findings.append(finding)
+            continue
+
+        series_name = finding.media_item.series_name
+        if not series_name:
+            updated_findings.append(finding)
+            continue
+
+        suggestion = _find_better_tvdb_series_match(
+            series_name,
+            items_tuple,
+            tvdb_client=tvdb_client,
+            current_tvdb_id=series_tvdb_ids.get(series_name),
+        )
+        if suggestion is None:
+            updated_findings.append(finding)
+            continue
+
+        suggested_id, suggested_name = suggestion
+        updated_findings.append(
+            replace(
+                finding,
+                message=(
+                    f"{finding.message} TheTVDB id {suggested_id} ({suggested_name!r}) matches "
+                    "these local episodes much better - consider re-identifying this series to "
+                    "that entry in Jellyfin."
+                ),
+            )
+        )
+    return tuple(updated_findings)
+
+
+def _find_better_tvdb_series_match(
+    series_name: str,
+    items: tuple[MediaItem, ...],
+    *,
+    tvdb_client: TvdbClient,
+    current_tvdb_id: str | None,
+) -> tuple[str, str] | None:
+    """Return a (tvdb_id, name) pair for a better-fitting TheTVDB series, if any.
+
+    Searches TheTVDB by ``series_name``, fetches the aired-order episode
+    list for each of the top ``_MAX_TVDB_SEARCH_CANDIDATES`` same-named
+    candidates other than the one already matched (TheTVDB ranks search
+    results most-relevant first, so this bounds worst-case TheTVDB calls for
+    a generically-named series without likely missing the real match), and
+    hands them to :func:`audit.best_matching_tvdb_series` to pick a
+    confidently-better fit. A candidate whose episode lookup fails is
+    skipped, same as any other TheTVDB lookup failure in this module.
+    """
+    try:
+        search_results = tvdb_client.search_series(series_name)
+    except TvdbError as error:
+        LOGGER.warning("Skipping TheTVDB match suggestion for %r: %s", series_name, error)
+        return None
+
+    candidates: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
+    names_by_id: dict[str, str] = {}
+    considered = 0
+    for result in search_results:
+        if result.id == current_tvdb_id:
+            continue
+        if considered >= _MAX_TVDB_SEARCH_CANDIDATES:
+            break
+        considered += 1
+        try:
+            episodes = tvdb_client.get_series_episodes(result.id, "official", series_name=result.name)
+        except TvdbError as error:
+            LOGGER.warning(
+                "Skipping TheTVDB candidate %s for %r: %s", result.id, series_name, error
+            )
+            continue
+        candidates[result.id] = {
+            (episode.season_number, episode.episode_number): episode for episode in episodes
+        }
+        names_by_id[result.id] = result.name
+
+    best_id = best_matching_tvdb_series(items, series_name, candidates)
+    if best_id is None:
+        return None
+    return best_id, names_by_id[best_id]
 
 
 def _fetch_tvdb_episode_positions(
@@ -592,19 +724,29 @@ def _fetch_tvdb_episode_positions(
     tvdb_client: TvdbClient,
     library: MediaLibrary,
     items: Iterable[MediaItem],
-) -> tuple[dict[str, dict[tuple[int, int], TvdbEpisode]], dict[str, dict[tuple[int, int], TvdbEpisode]]]:
-    """Return TheTVDB aired- and DVD-order episode positions for one TV library.
+    *,
+    fetch_dvd_positions: bool = True,
+) -> tuple[
+    dict[str, dict[tuple[int, int], TvdbEpisode]],
+    dict[str, dict[tuple[int, int], TvdbEpisode]],
+    dict[str, str],
+]:
+    """Return TheTVDB aired-/DVD-order episode positions and each series' matched id.
 
-    Looks up each series' TheTVDB id once per library, then fetches both
-    orderings only for series actually present in this library's items. A
-    lookup failure for one series is logged and skipped rather than failing
-    the whole audit run. The aired-order positions are reused both for
-    aired/DVD episode-ordering findings and for missing-episode detection
-    against TheTVDB's full episode list.
+    Looks up each series' TheTVDB id once per library, then fetches aired-
+    order positions for every series present in this library's items, since
+    missing-season and missing-episode detection need it whenever a TheTVDB
+    api_key is configured, not just with ``--check-episode-order``. DVD-order
+    positions - needed only for aired/DVD episode-ordering findings - are
+    fetched too when ``fetch_dvd_positions`` is set, skipping an unneeded
+    TheTVDB call otherwise. A lookup failure for one series is logged and
+    skipped rather than failing the whole audit run. The matched TheTVDB id
+    per series is returned too, so a later mismatched-series suggestion
+    lookup knows which candidate to exclude as "the one already tried".
     """
     series_names = {item.series_name for item in items if item.is_episode and item.series_name}
     if not series_names:
-        return {}, {}
+        return {}, {}, {}
 
     series_tvdb_ids = client.get_series_tvdb_ids(library.id)
 
@@ -617,13 +759,19 @@ def _fetch_tvdb_episode_positions(
             continue
 
         LOGGER.debug(
-            "Checking TheTVDB episode order for %r (TheTVDB id %s)...",
+            "Checking TheTVDB episode positions for %r (TheTVDB id %s)...",
             series_name,
             tvdb_id,
         )
         try:
-            aired_episodes = tvdb_client.get_series_episodes(tvdb_id, "official")
-            dvd_episodes = tvdb_client.get_series_episodes(tvdb_id, "dvd")
+            aired_episodes = tvdb_client.get_series_episodes(
+                tvdb_id, "official", series_name=series_name
+            )
+            dvd_episodes = (
+                tvdb_client.get_series_episodes(tvdb_id, "dvd", series_name=series_name)
+                if fetch_dvd_positions
+                else ()
+            )
         except TvdbError as error:
             LOGGER.warning("Skipping TheTVDB episode lookup for %r: %s", series_name, error)
             continue
@@ -631,11 +779,12 @@ def _fetch_tvdb_episode_positions(
         aired_positions[series_name] = {
             (episode.season_number, episode.episode_number): episode for episode in aired_episodes
         }
-        dvd_positions[series_name] = {
-            (episode.season_number, episode.episode_number): episode for episode in dvd_episodes
-        }
+        if fetch_dvd_positions:
+            dvd_positions[series_name] = {
+                (episode.season_number, episode.episode_number): episode for episode in dvd_episodes
+            }
 
-    return aired_positions, dvd_positions
+    return aired_positions, dvd_positions, series_tvdb_ids
 
 
 def _log_library_summaries(library_results: Iterable[LibraryAuditResult]) -> None:

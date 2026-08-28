@@ -13,11 +13,12 @@ The current implementation checks:
 - Missing Jellyfin primary images
 - Missing or unknown primary video codecs
 - Missing primary audio codecs
-- Missing numbered TV seasons within a series
-- Missing numbered TV episodes within a season
+- Missing numbered TV seasons within a series (when a TheTVDB `api_key` is configured in `servers.toml`, checked against TheTVDB's full season list, catching seasons missing entirely rather than only gaps between seasons already on disk; season 0/specials is never reported missing, since TheTVDB's specials coverage is too inconsistent across series to treat a missing one as a real gap)
+- Missing numbered TV episodes within a season (same TheTVDB cross-check, so an episode missing after the last one on disk - e.g. episodes 1-9 present but not the season's 10th - is caught too, not just internal gaps)
 - TV episode metadata titles that don't match the title implied by the filename's `SxxExx` naming (including `SxxEyy-Ezz` multi-episode ranges)
 - TV episode metadata titles that don't match the title implied by an embedded video/audio stream title (some rips, e.g. from mkvmerge, preserve the original scene-release filename in a stream's title even after the file itself is renamed - this catches mislabeled episodes a filename-only check can't, since the renamed filename and Jellyfin's metadata can otherwise agree with each other while both being wrong)
 - Movie metadata titles that don't match the title implied by the filename's `(Year)` naming
+- A series matched to the wrong TheTVDB entry (when a TheTVDB `api_key` is configured): if most of a series' local (season, episode) numbers don't correspond to any TheTVDB episode at that position, the match itself - not any one episode - is probably wrong (e.g. a series with the same title as a different show, matched to that other show's TheTVDB id). Flagged only once a series has at least 5 local episodes and at least half of them are unmatched, so a thin or partially-numbered library doesn't trigger it on noise. When this fires for a series, that series' missing-season/-episode checks fall back to internal-gap detection instead of piling on nonsense findings sourced from the wrong show's episode list. The finding then searches TheTVDB by series name for a same-named alternative (e.g. a same-titled show from a different country) and, when one explains at least 90% of the local episodes, names it directly in the finding's message as the entry to re-identify the series to in Jellyfin - checked against up to 5 search candidates per series
 - Optionally (`--check-episode-order`, requires a TheTVDB `api_key` in `servers.toml`): TV episodes whose title disagrees between TheTVDB's aired order and DVD order at the same season/episode position - catches series stored on disk in one ordering but labeled with the other, where the filename, season number, and episode number all still look correct
 
 The filename-title checks tolerate cosmetic differences that don't represent a real mismatch: dot-delimited release names (`Show.S01E02.Episode.Title.mkv`), straight vs. curly quotes and dashes, roman vs. arabic numerals in a parenthetical suffix (`(I)` vs. `(1)`), `&` vs. `and`, `+` vs. `/`, a Unicode ellipsis (`…`) vs. three literal periods (`...`), and leading parenthetical text that's actually part of the title (e.g. `(Dis)Members Only`). Release-quality tags in a filename (`1080p`, `WEB-DL`, `x264`, etc.) are stripped only when they form a genuine trailing run of tags, so an ordinary title word that happens to look like one - an episode called "Spider in the Web," for example - isn't mistaken for one.
@@ -69,7 +70,7 @@ api_key = "your_backup_api_key_here"
 api_key = "your_thetvdb_v4_api_key_here"
 ```
 
-The optional `[tvdb]` table holds the TheTVDB v4 API key used by `--check-episode-order`. Omit the table, or leave `api_key` empty, to leave the feature disabled.
+The optional `[tvdb]` table holds the TheTVDB v4 API key. When `api_key` is set, missing-season and missing-episode detection automatically cross-check TheTVDB's full episode list; `--check-episode-order` additionally enables the aired/DVD title-mismatch check. Omit the table, or leave `api_key` empty, to leave all TheTVDB-backed features disabled.
 
 ### Environment variables
 
@@ -157,7 +158,7 @@ python auditor.py --server main --compare backup --transfer-metadata
 | `--library NAME` | Limit auditing to a library name; repeatable |
 | `--category CATEGORY` | Filter by category: `subtitles`, `artwork`, `metadata`, `episode_order`, `video`, `audio`, `filesystem` |
 | `--severity SEVERITY` | Filter by severity: `info`, `warning`, `error` |
-| `--check-episode-order` | Check TV episodes against TheTVDB's aired and DVD orderings and flag any episode whose title differs between the two at its season/episode position; requires a TheTVDB `api_key` in the `[tvdb]` table of `servers.toml`. Results are cached to `tvdb_cache.json` (see `TVDB_CACHE_TTL_DAYS`) so repeat runs skip TheTVDB entirely for series with a fresh cache entry |
+| `--check-episode-order` | Check TV episodes against TheTVDB's aired and DVD orderings and flag any episode whose title differs between the two at its season/episode position; requires a TheTVDB `api_key` in the `[tvdb]` table of `servers.toml`. (Missing-season/-episode detection uses TheTVDB whenever `api_key` is set, with or without this flag.) Results are cached to `tvdb_cache.json` (see `TVDB_CACHE_TTL_DAYS`) so repeat runs skip TheTVDB entirely for series with a fresh cache entry |
 | `--refresh-tvdb-cache` | With `--check-episode-order`, ignore cached TheTVDB lookups and fetch fresh data for every series this run (still updates the cache) |
 | `--transfer-metadata` | Transfer metadata for every mismatched item from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing metadata between servers](#synchronizing-metadata-between-servers)) |
 | `--transfer-images` | Transfer cached images (Primary, Backdrop, Thumb) for every item with an artwork difference from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing images between servers](#synchronizing-images-between-servers)) |

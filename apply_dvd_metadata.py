@@ -569,7 +569,9 @@ def run_apply_dvd_metadata(
                     season_type,
                     match.tvdb_id,
                 )
-                target_episodes = tvdb_client.get_series_episodes(match.tvdb_id, season_type)
+                target_episodes = tvdb_client.get_series_episodes(
+                    match.tvdb_id, season_type, series_name=series_name
+                )
 
                 target_positions = {
                     (target_episode.season_number, target_episode.episode_number): target_episode

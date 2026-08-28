@@ -34,6 +34,7 @@ from results import LibraryComparisonSettings
 DEFAULT_COMPARISON_OUTPUT_DIR = Path("audit_results") / "comparison_results"
 MISSING_SEASONS_CHECK_NAME = "missing_seasons"
 MISSING_EPISODES_CHECK_NAME = "missing_episodes"
+MISMATCHED_TVDB_SERIES_CHECK_NAME = "mismatched_tvdb_series"
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +472,14 @@ def _build_comparison(
         right_result,
         check_name=MISSING_EPISODES_CHECK_NAME,
     )
+    left_mismatched_tvdb_series = _sequence_gap_findings(
+        left_result,
+        check_name=MISMATCHED_TVDB_SERIES_CHECK_NAME,
+    )
+    right_mismatched_tvdb_series = _sequence_gap_findings(
+        right_result,
+        check_name=MISMATCHED_TVDB_SERIES_CHECK_NAME,
+    )
     server_settings: list[tuple[str, str, str]] = _server_settings_rows(
         left_result,
         right_result,
@@ -529,6 +538,8 @@ def _build_comparison(
         "right_missing_seasons": right_missing_seasons,
         "left_missing_episodes": left_missing_episodes,
         "right_missing_episodes": right_missing_episodes,
+        "left_mismatched_tvdb_series": left_mismatched_tvdb_series,
+        "right_mismatched_tvdb_series": right_mismatched_tvdb_series,
         "server_settings": tuple(server_settings),
         "library_settings": tuple(library_settings),
     }
@@ -1017,6 +1028,7 @@ def _index_page(
             _summary_card("Right Server", right_result.server_name or right_result.server_key or "Right"),
             _summary_card("Missing Libraries", str(len(comparison["missing_left_libraries"]) + len(comparison["missing_right_libraries"]))),
             _summary_card("Missing Media", str(len(comparison["missing_left_media"]) + len(comparison["missing_right_media"]))),
+            _summary_card("Mismatched TheTVDB Series", str(len(comparison["left_mismatched_tvdb_series"]) + len(comparison["right_mismatched_tvdb_series"]))),
             _summary_card("Missing Seasons", str(len(comparison["left_missing_seasons"]) + len(comparison["right_missing_seasons"]))),
             _summary_card("Missing Episodes", str(len(comparison["left_missing_episodes"]) + len(comparison["right_missing_episodes"]))),
             _summary_card("Mismatched Metadata", str(len(comparison["mismatched_metadata"]))),
@@ -1073,6 +1085,10 @@ def _libraries_page(
             key=lambda entry: _missing_media_sort_key(entry[0], entry[1]),
         )
     )
+    mismatched_tvdb_series_rows = _paired_mismatched_tvdb_series_rows(
+        comparison["left_mismatched_tvdb_series"],
+        comparison["right_mismatched_tvdb_series"],
+    )
     missing_seasons_rows = _paired_missing_seasons_rows(
         comparison["left_missing_seasons"],
         comparison["right_missing_seasons"],
@@ -1096,15 +1112,21 @@ def _libraries_page(
         ),
         _simple_table_section(
             f"Media Missing From {escape(left_server_name)}",
-            ("Library", "Title", "Series", "Season", "Episode"),
+            ("Library", "Series", "Season", "Episode", "Title"),
             missing_left_rows,
             include_hide_same=False,
         ),
         _simple_table_section(
             f"Media Missing From {escape(right_server_name)}",
-            ("Library", "Title", "Series", "Season", "Episode"),
+            ("Library", "Series", "Season", "Episode", "Title"),
             missing_right_rows,
             include_hide_same=False,
+        ),
+        _simple_table_section(
+            "Mismatched TheTVDB Series",
+            ("Library", "Series", left_server_name, right_server_name),
+            mismatched_tvdb_series_rows,
+            include_hide_same=True,
         ),
         _simple_table_section(
             "Missing Seasons",
@@ -1143,7 +1165,7 @@ def _libraries_page(
 
     return _page_shell(
         "Libraries Comparison",
-        "Library lists, missing media items, and missing TV seasons or episodes between both servers.",
+        "Library lists, missing media items, mismatched TheTVDB series matches, and missing TV seasons or episodes between both servers.",
         "\n".join(sections),
         current_nav="Libraries",
         include_search=True,
@@ -1681,9 +1703,10 @@ def _media_missing_row(library_name: str, item) -> str:
     ).lower()
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(library_name)}</td>'
-        f'<td{_filename_title_attribute(item)}>{escape(item.title)}</td><td>{escape(item.series_name or "")}</td>'
+        f'<td>{escape(item.series_name or "")}</td>'
         f'{_table_cell(_display_season(item), sort_value=_season_sort_value(item))}'
-        f'{_table_cell("" if item.episode_number is None else item.episode_number, sort_value=_episode_sort_value(item))}</tr>'
+        f'{_table_cell("" if item.episode_number is None else item.episode_number, sort_value=_episode_sort_value(item))}'
+        f'<td{_filename_title_attribute(item)}>{escape(item.title)}</td></tr>'
     )
 
 
@@ -1791,10 +1814,26 @@ def _paired_missing_seasons_rows(
     paired_findings = _pair_sequence_gap_findings(
         left_findings,
         right_findings,
-        key_builder=_missing_seasons_key,
+        key_builder=_series_level_finding_key,
     )
     return tuple(
-        _paired_missing_seasons_row(library_name, left_finding, right_finding)
+        _paired_series_level_finding_row(library_name, left_finding, right_finding)
+        for _, library_name, left_finding, right_finding in paired_findings
+    )
+
+
+def _paired_mismatched_tvdb_series_rows(
+    left_findings: tuple[tuple[str, AuditFinding], ...],
+    right_findings: tuple[tuple[str, AuditFinding], ...],
+) -> tuple[str, ...]:
+    """Return side-by-side TheTVDB-series-mismatch rows for both servers."""
+    paired_findings = _pair_sequence_gap_findings(
+        left_findings,
+        right_findings,
+        key_builder=_series_level_finding_key,
+    )
+    return tuple(
+        _paired_series_level_finding_row(library_name, left_finding, right_finding)
         for _, library_name, left_finding, right_finding in paired_findings
     )
 
@@ -1846,12 +1885,12 @@ def _pair_sequence_gap_findings(
     return tuple(paired_rows)
 
 
-def _paired_missing_seasons_row(
+def _paired_series_level_finding_row(
     library_name: str,
     left_finding: AuditFinding | None,
     right_finding: AuditFinding | None,
 ) -> str:
-    """Return one aligned missing-seasons comparison row."""
+    """Return one aligned comparison row for a per-series message finding."""
     item = _sequence_gap_item(left_finding, right_finding)
     series_name = "" if item is None else (item.series_name or item.title)
     left_message = "" if left_finding is None else left_finding.message
@@ -1939,8 +1978,8 @@ def _sequence_gap_sort_key(
     )
 
 
-def _missing_seasons_key(library_name: str, finding: AuditFinding) -> tuple[str, str]:
-    """Return the alignment key for missing-seasons findings."""
+def _series_level_finding_key(library_name: str, finding: AuditFinding) -> tuple[str, str]:
+    """Return the alignment key for a per-series message finding (e.g. missing seasons)."""
     item = finding.media_item
     return (
         library_name.casefold(),

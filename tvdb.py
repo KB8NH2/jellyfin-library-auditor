@@ -24,6 +24,7 @@ import requests
 LOGGER = logging.getLogger("tvdb")
 TVDB_BASE_URL = "https://api4.thetvdb.com/v4"
 LOGIN_ENDPOINT = "/login"
+SEARCH_ENDPOINT = "/search"
 SERIES_EPISODES_ENDPOINT_TEMPLATE = "/series/{series_id}/episodes/{season_type}"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 # Safety cap on pagination so a misbehaving/looping response can't hang a run;
@@ -69,14 +70,26 @@ class TvdbEpisode:
     image_url: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TvdbSeriesSearchResult:
+    """Represents one normalized TheTVDB series-search result."""
+
+    id: str
+    name: str
+    year: str | None
+    overview: str | None
+
+
 class TvdbEpisodeCache:
-    """Disk-backed cache of TheTVDB episode-ordering lookups.
+    """Disk-backed cache of TheTVDB episode-ordering and series-search lookups.
 
     Fetching every series' aired and DVD episode lists on every audit run is
     the dominant cost of ``--check-episode-order`` (two HTTP round-trips per
     series), even though that data almost never changes for anything except a
-    currently-airing season. This persists each (series, ordering) lookup to
-    a JSON file with a fetch timestamp, so subsequent runs within the TTL
+    currently-airing season. This persists each (series, ordering) lookup,
+    and each series-name search performed while looking for a better
+    TheTVDB match for a :func:`audit.mismatched_tvdb_series` finding, to a
+    JSON file with a fetch timestamp, so subsequent runs within the TTL
     window can skip the network entirely.
     """
 
@@ -100,9 +113,10 @@ class TvdbEpisodeCache:
         self._path = path
         self._ttl = ttl
         self._force_refresh = force_refresh
-        self._entries: dict[tuple[str, str], tuple[datetime, tuple[TvdbEpisode, ...]]] = (
-            self._load()
-        )
+        self._entries: dict[tuple[str, str], tuple[datetime, tuple[TvdbEpisode, ...]]] = {}
+        self._search_entries: dict[str, tuple[datetime, tuple[TvdbSeriesSearchResult, ...]]] = {}
+        self._series_names: dict[str, str] = {}
+        self._entries, self._search_entries, self._series_names = self._load()
 
     def get(self, series_id: str, season_type: str) -> tuple[TvdbEpisode, ...] | None:
         """Return a cached episode list, or ``None`` on a miss or forced refresh.
@@ -143,20 +157,83 @@ class TvdbEpisodeCache:
         self._entries[(series_id, season_type)] = (datetime.now(timezone.utc), episodes)
         self._save()
 
-    def _load(self) -> dict[tuple[str, str], tuple[datetime, tuple[TvdbEpisode, ...]]]:
-        """Return cache entries loaded from disk, or an empty cache on any problem."""
+    def get_search(self, name: str) -> tuple[TvdbSeriesSearchResult, ...] | None:
+        """Return a cached series-search result list, or ``None`` on a miss or forced refresh.
+
+        Args:
+            name: Series name that was searched for.
+
+        Returns:
+            The cached search results, or ``None`` when there is no fresh
+            entry.
+        """
+        if self._force_refresh:
+            return None
+
+        entry = self._search_entries.get(self._normalized_search_key(name))
+        if entry is None:
+            return None
+
+        fetched_at, results = entry
+        if datetime.now(timezone.utc) - fetched_at > self._ttl:
+            return None
+
+        return results
+
+    def set_search(self, name: str, results: tuple[TvdbSeriesSearchResult, ...]) -> None:
+        """Store freshly-fetched series-search results and persist them immediately.
+
+        Args:
+            name: Series name that was searched for.
+            results: The search results to cache.
+        """
+        self._search_entries[self._normalized_search_key(name)] = (
+            datetime.now(timezone.utc),
+            results,
+        )
+        self._save()
+
+    def get_series_name(self, series_id: str) -> str | None:
+        """Return the cached display name for one TheTVDB series id, if known."""
+        return self._series_names.get(series_id)
+
+    def set_series_name(self, series_id: str, name: str) -> None:
+        """Store a series' display name and persist it immediately.
+
+        Purely descriptive, recorded whenever a caller happens to know a
+        series' name while fetching its episodes - lets a human skim
+        ``tvdb_cache.json`` and tell which id is which without cross-
+        referencing episode titles. Never expires and is never used to make
+        a caching decision, unlike the episode and search entries.
+        """
+        self._series_names[series_id] = name
+        self._save()
+
+    @staticmethod
+    def _normalized_search_key(name: str) -> str:
+        """Return a case/whitespace-insensitive cache key for a search query."""
+        return " ".join(name.split()).casefold()
+
+    def _load(
+        self,
+    ) -> tuple[
+        dict[tuple[str, str], tuple[datetime, tuple[TvdbEpisode, ...]]],
+        dict[str, tuple[datetime, tuple[TvdbSeriesSearchResult, ...]]],
+        dict[str, str],
+    ]:
+        """Return (episode entries, search entries, series names) loaded from disk, or empty on any problem."""
         if not self._path.is_file():
-            return {}
+            return {}, {}, {}
 
         try:
             raw_document = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             LOGGER.warning("Ignoring unreadable TheTVDB cache at %s: %s", self._path, error)
-            return {}
+            return {}, {}, {}
 
         if not isinstance(raw_document, dict):
             LOGGER.warning("Ignoring malformed TheTVDB cache at %s.", self._path)
-            return {}
+            return {}, {}, {}
 
         if raw_document.get("version") != CACHE_SCHEMA_VERSION:
             LOGGER.info(
@@ -164,22 +241,85 @@ class TvdbEpisodeCache:
                 "it will be refetched.",
                 self._path,
             )
-            return {}
-
-        raw_series = raw_document.get("series")
-        if not isinstance(raw_series, dict):
-            return {}
+            return {}, {}, {}
 
         entries: dict[tuple[str, str], tuple[datetime, tuple[TvdbEpisode, ...]]] = {}
-        for series_id, orderings in raw_series.items():
-            if not isinstance(orderings, dict):
-                continue
-            for season_type, entry_document in orderings.items():
-                entry = self._entry_from_json(entry_document)
-                if entry is not None:
-                    entries[(series_id, season_type)] = entry
+        series_names: dict[str, str] = {}
+        raw_series = raw_document.get("series")
+        if isinstance(raw_series, dict):
+            for series_id, series_document in raw_series.items():
+                if not isinstance(series_document, dict):
+                    continue
+                raw_name = series_document.get("name")
+                if isinstance(raw_name, str) and raw_name.strip():
+                    series_names[series_id] = raw_name
+                for season_type, entry_document in series_document.items():
+                    if season_type == "name":
+                        continue
+                    entry = self._entry_from_json(entry_document)
+                    if entry is not None:
+                        entries[(series_id, season_type)] = entry
 
-        return entries
+        search_entries: dict[str, tuple[datetime, tuple[TvdbSeriesSearchResult, ...]]] = {}
+        raw_searches = raw_document.get("searches")
+        if isinstance(raw_searches, dict):
+            for search_key, entry_document in raw_searches.items():
+                search_entry = self._search_entry_from_json(entry_document)
+                if search_entry is not None:
+                    search_entries[search_key] = search_entry
+
+        return entries, search_entries, series_names
+
+    @classmethod
+    def _search_entry_from_json(
+        cls, entry_document: Any
+    ) -> tuple[datetime, tuple[TvdbSeriesSearchResult, ...]] | None:
+        """Return one parsed search-cache entry, or ``None`` when it's malformed."""
+        if not isinstance(entry_document, dict):
+            return None
+
+        fetched_at_text = entry_document.get("fetched_at")
+        raw_results = entry_document.get("results")
+        if not isinstance(fetched_at_text, str) or not isinstance(raw_results, list):
+            return None
+
+        try:
+            fetched_at = datetime.fromisoformat(fetched_at_text)
+        except ValueError:
+            return None
+
+        results: list[TvdbSeriesSearchResult] = []
+        for raw_result in raw_results:
+            result = cls._search_result_from_cache_json(raw_result)
+            if result is not None:
+                results.append(result)
+
+        return fetched_at, tuple(results)
+
+    @staticmethod
+    def _search_result_from_cache_json(raw_result: Any) -> TvdbSeriesSearchResult | None:
+        """Return one cached series-search result parsed from its stored JSON shape."""
+        if not isinstance(raw_result, dict):
+            return None
+        try:
+            return TvdbSeriesSearchResult(
+                id=raw_result["id"],
+                name=raw_result["name"],
+                year=raw_result.get("year"),
+                overview=raw_result.get("overview"),
+            )
+        except (KeyError, TypeError):
+            return None
+
+    @staticmethod
+    def _search_result_to_cache_json(result: TvdbSeriesSearchResult) -> dict[str, Any]:
+        """Return one series-search result's stored JSON shape."""
+        return {
+            "id": result.id,
+            "name": result.name,
+            "year": result.year,
+            "overview": result.overview,
+        }
 
     @classmethod
     def _entry_from_json(
@@ -246,8 +386,18 @@ class TvdbEpisodeCache:
                 "fetched_at": fetched_at.isoformat(),
                 "episodes": [self._episode_to_cache_json(episode) for episode in episodes],
             }
+        for series_id, name in self._series_names.items():
+            series.setdefault(series_id, {})["name"] = name
 
-        document = {"version": CACHE_SCHEMA_VERSION, "series": series}
+        searches: dict[str, dict[str, Any]] = {
+            search_key: {
+                "fetched_at": fetched_at.isoformat(),
+                "results": [self._search_result_to_cache_json(result) for result in results],
+            }
+            for search_key, (fetched_at, results) in self._search_entries.items()
+        }
+
+        document = {"version": CACHE_SCHEMA_VERSION, "series": series, "searches": searches}
 
         try:
             self._path.write_text(json.dumps(document, indent=2), encoding="utf-8")
@@ -294,6 +444,8 @@ class TvdbClient:
         self,
         series_id: str,
         season_type: SeasonType,
+        *,
+        series_name: str | None = None,
     ) -> tuple[TvdbEpisode, ...]:
         """Return every episode of one series in the requested ordering.
 
@@ -302,6 +454,10 @@ class TvdbClient:
                 ``ProviderIds["Tvdb"]``).
             season_type: Which episode ordering to fetch - ``"official"`` for
                 aired order, ``"dvd"`` for DVD order.
+            series_name: Optional display name to record in the cache for
+                this series id, purely for readability when inspecting
+                ``tvdb_cache.json`` by hand - has no effect on the episodes
+                returned or on caching behavior.
 
         Returns:
             Every episode TheTVDB reports for the series in that ordering.
@@ -310,6 +466,13 @@ class TvdbClient:
             TvdbRequestError: If the HTTP request fails.
             TvdbResponseError: If the response body is missing expected data.
         """
+        if (
+            self._cache is not None
+            and series_name
+            and self._cache.get_series_name(series_id) != series_name
+        ):
+            self._cache.set_series_name(series_id, series_name)
+
         if self._cache is not None:
             cached_episodes = self._cache.get(series_id, season_type)
             if cached_episodes is not None:
@@ -345,6 +508,69 @@ class TvdbClient:
             self._cache.set(series_id, season_type, result)
 
         return result
+
+    def search_series(self, name: str) -> tuple[TvdbSeriesSearchResult, ...]:
+        """Return TheTVDB series matching a name search.
+
+        Used to look for a better-fitting TheTVDB match for a series flagged
+        by :func:`audit.mismatched_tvdb_series` - a same-named series whose
+        episode list actually explains the local files.
+
+        Args:
+            name: Series name to search for.
+
+        Returns:
+            Every series TheTVDB's search returns for this query, in the
+            order TheTVDB ranks them (most relevant first).
+
+        Raises:
+            TvdbRequestError: If the HTTP request fails.
+            TvdbResponseError: If the response body is missing expected data.
+        """
+        if self._cache is not None:
+            cached_results = self._cache.get_search(name)
+            if cached_results is not None:
+                return cached_results
+
+        self._ensure_token()
+
+        payload = self._request(SEARCH_ENDPOINT, params={"query": name, "type": "series"})
+        raw_results = self._get_optional_list(payload, "data", "search response")
+
+        results: list[TvdbSeriesSearchResult] = []
+        for raw_result in raw_results:
+            result = self._search_result_from_json(raw_result)
+            if result is not None:
+                results.append(result)
+
+        result = tuple(results)
+        if self._cache is not None:
+            self._cache.set_search(name, result)
+
+        return result
+
+    def _search_result_from_json(self, result_data: Any) -> TvdbSeriesSearchResult | None:
+        """Convert one TheTVDB search-result object into a normalized model."""
+        if not isinstance(result_data, Mapping):
+            return None
+
+        series_id = self._get_optional_str(result_data, "tvdb_id")
+        if series_id is None:
+            raw_id = self._get_optional_str(result_data, "id")
+            if raw_id is None:
+                return None
+            series_id = raw_id.rsplit("-", 1)[-1]
+
+        name = self._get_optional_str(result_data, "name")
+        if name is None:
+            return None
+
+        return TvdbSeriesSearchResult(
+            id=series_id,
+            name=name,
+            year=self._get_optional_str(result_data, "year"),
+            overview=self._get_optional_str(result_data, "overview"),
+        )
 
     def _ensure_token(self) -> None:
         """Log in and cache a bearer token, if not already cached."""
@@ -565,4 +791,5 @@ __all__ = [
     "TvdbError",
     "TvdbRequestError",
     "TvdbResponseError",
+    "TvdbSeriesSearchResult",
 ]

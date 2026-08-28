@@ -70,6 +70,8 @@ def _table_headers(check_name: str) -> tuple[str, ...]:
         return ("Library", "Series", "Season", "Title", "Details")
     if check_name == "missing_seasons":
         return ("Library", "Series", "Title", "Details")
+    if check_name == "mismatched_tvdb_series":
+        return ("Library", "Series", "Title", "Details")
     if check_name == "mismatched_episode_filename_title":
         return ("Library", "Series", "Season", "Episode", "Title", "Suggested Title (Filename)")
     if check_name == "mismatched_episode_stream_title":
@@ -186,11 +188,11 @@ def _mismatched_movie_filename_title_row(
 def _optional_row_cells(check_name: str, item: templates.MediaItem) -> tuple[str, ...]:
     """Return any season and episode cells needed for the current check page."""
     cells: list[str] = []
-    if check_name != "missing_seasons":
+    if check_name not in {"missing_seasons", "mismatched_tvdb_series"}:
         cells.append(
             f'            <td data-sort-value="{templates.escape(templates.season_sort_value(item))}">{templates.escape(item.season_name or "")}</td>'
         )
-    if check_name not in {"missing_episodes", "missing_seasons"}:
+    if check_name not in {"missing_episodes", "missing_seasons", "mismatched_tvdb_series"}:
         cells.append(
             f'            <td data-sort-value="{templates.escape(templates.episode_sort_value(item))}">{"" if item.episode_number is None else item.episode_number}</td>'
         )

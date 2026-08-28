@@ -542,7 +542,9 @@ def run_apply_episode_numbers(
                     "Fetching TheTVDB aired-order episodes for series id %s...",
                     match.tvdb_id,
                 )
-                aired_episodes = tvdb_client.get_series_episodes(match.tvdb_id, "official")
+                aired_episodes = tvdb_client.get_series_episodes(
+                    match.tvdb_id, "official", series_name=series_name
+                )
 
             season_aired_episodes = sorted(
                 (
