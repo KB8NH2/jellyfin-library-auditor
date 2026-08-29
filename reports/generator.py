@@ -42,6 +42,8 @@ CSV_HEADER = (
     "Mismatched Stream Title",
     "Unknown Audio Codec",
     "Unknown Video Codec",
+    "Mismatched TheTVDB Series",
+    "Aired/DVD Order Mismatch",
 )
 MISMATCHED_FILENAME_TITLE_CHECKS = frozenset(
     {"mismatched_episode_filename_title", "mismatched_movie_filename_title"}
@@ -245,6 +247,8 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 _yes_no("mismatched_episode_stream_title" in check_names),
                 _yes_no("unknown_audio_codec" in check_names),
                 _yes_no("unknown_video_codec" in check_names),
+                _yes_no("mismatched_tvdb_series" in check_names),
+                _yes_no("aired_dvd_order_mismatch" in check_names),
             )
         )
     return tuple(rows)

@@ -329,6 +329,69 @@ def expected_episode_title_from_filename(item: MediaItem) -> str | None:
     )
 
 
+def expected_episode_numbers_from_filename(item: MediaItem) -> tuple[int, ...] | None:
+    """Return every episode number a multi-episode filename's marker implies.
+
+    Jellyfin's multi-episode naming convention, e.g.
+    ``Show S01E05-E07 Title.mkv``, names one video file spanning several
+    consecutive episodes by giving the marker's first and last episode
+    number - this returns the full inclusive range those two numbers imply
+    (5, 6, 7 here), not just the two numbers actually written in the
+    filename, since the file's content covers every episode in between. A
+    filename with no trailing ``-Exx`` segment (an ordinary single-episode
+    file) returns a single-element tuple holding just the item's own
+    episode number.
+
+    Args:
+        item: Media item to inspect.
+
+    Returns:
+        The inclusive range of episode numbers the filename's marker
+        implies, or ``None`` when the filename has no recognizable
+        ``SxxExx`` marker at the item's known season/episode position.
+    """
+    if not item.is_episode or item.season_number is None or item.episode_number is None:
+        return None
+
+    return _expected_episode_numbers_from_text(
+        item.path.stem, item.season_number, item.episode_number
+    )
+
+
+def _expected_episode_numbers_from_text(
+    text: str,
+    season_number: int,
+    episode_number: int,
+) -> tuple[int, ...] | None:
+    """Return the inclusive episode-number range a filename-style marker implies.
+
+    Args:
+        text: Filename-like text to search, e.g. a filename stem.
+        season_number: The item's known season number.
+        episode_number: The item's known starting episode number.
+
+    Returns:
+        The inclusive range of episode numbers the marker implies, or
+        ``None`` when the text has no recognizable ``SxxExx`` marker at
+        that position.
+    """
+    marker_pattern = re.compile(
+        rf"(?i)s0*{season_number}e0*{episode_number}(?:-?e0*(\d+))*(?!\d)"
+    )
+    marker_match = marker_pattern.search(text)
+    if marker_match is None:
+        return None
+
+    last_episode_text = marker_match.group(1)
+    if last_episode_text is None:
+        return (episode_number,)
+
+    last_episode_number = int(last_episode_text)
+    if last_episode_number < episode_number:
+        return (episode_number,)
+    return tuple(range(episode_number, last_episode_number + 1))
+
+
 def expected_episode_title_from_stream_titles(item: MediaItem) -> str | None:
     """Return the episode title implied by an embedded video/audio stream title.
 

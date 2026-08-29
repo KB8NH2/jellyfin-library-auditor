@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from collections.abc import Mapping
+import itertools
 import logging
 import re
+import unicodedata
 
 from audit_types import AuditCategory
 from audit_types import AuditFinding
 from audit_types import AuditSeverity
+from media import expected_episode_numbers_from_filename
 from media import expected_episode_title_from_filename
 from media import expected_episode_title_from_stream_titles
 from media import expected_movie_title_from_filename
@@ -525,6 +528,14 @@ def mismatched_movie_filename_title(item: MediaItem) -> AuditFinding | None:
 def normalized_title(value: str) -> str:
     """Return a normalized title for filename/metadata comparison.
 
+    An accented letter (e.g. "é", "ü", "ñ") is folded to its plain-letter
+    equivalent ("e", "u", "n"), since Jellyfin metadata and filenames don't
+    always agree on whether a title is spelled with its original diacritics
+    or a plain-ASCII approximation (e.g. "Café" versus "Cafe", "Degüello"
+    versus "Deguello"). Unicode decomposes an accented letter into the plain
+    letter plus a separate combining-mark character for exactly this reason;
+    dropping that mark is enough, no per-character accent table needed.
+
     Any punctuation (commas, periods, dashes, exclamation points, double
     quotes, parentheses, and so on) is treated as word-separating whitespace
     rather than deleted outright, so e.g. an abbreviated title like
@@ -563,7 +574,11 @@ def normalized_title(value: str) -> str:
     "/" as different, but equivalent, ways to join a multi-episode file's
     individual episode titles, and that also ignores "a"/"an"/"the".
     """
-    normalized_value = _ROMAN_NUMERAL_PAREN_PATTERN.sub(_roman_numeral_paren_to_arabic, value)
+    decomposed_value = unicodedata.normalize("NFKD", value)
+    normalized_value = "".join(
+        character for character in decomposed_value if not unicodedata.combining(character)
+    )
+    normalized_value = _ROMAN_NUMERAL_PAREN_PATTERN.sub(_roman_numeral_paren_to_arabic, normalized_value)
     normalized_value = _PART_NUMBER_PATTERN.sub("", normalized_value)
     normalized_value = _NUMERIC_PAREN_PATTERN.sub("", normalized_value)
     normalized_value = normalized_value.replace("&", " and ")
@@ -601,6 +616,16 @@ def titles_match(first: str, second: str) -> bool:
     compared both as literally normalized and with its commas swapped for
     slashes first.
 
+    Each of those readings is also compared both as-is and with every period
+    deleted outright rather than turned into a space by
+    :func:`normalized_title` - an abbreviation like "A.M." needs to
+    collapse into "am" to match an unpunctuated "AM" on the other side, the
+    same way :func:`normalized_title` already collapses "S.W.A.T." into
+    separately-spaced letters to match a filename's own dot-delimited "S W
+    A T". Both readings are kept since which one lines up depends on
+    whether the *other* side spells the abbreviation with spaces (needs the
+    space reading) or runs it together (needs the deleted reading).
+
     Each of those readings is in turn compared both as-is, with every
     "a"/"an"/"the" dropped, and with any British spelling rewritten to its
     American equivalent (e.g. "encyclopaedia" reads the same as
@@ -624,7 +649,12 @@ def titles_match(first: str, second: str) -> bool:
 
 def _title_comparison_variants(value: str) -> frozenset[str]:
     """Return every normalized reading of ``value`` that :func:`titles_match` allows."""
-    normalized_forms = {normalized_title(value), normalized_title(value.replace(",", "/"))}
+    raw_variants: set[str] = set()
+    for comma_variant in (value, value.replace(",", "/")):
+        raw_variants.add(comma_variant)
+        raw_variants.add(comma_variant.replace(".", ""))
+
+    normalized_forms = {normalized_title(raw_variant) for raw_variant in raw_variants}
     variants: set[str] = set()
     for form in normalized_forms:
         for with_or_without_articles in (form, _without_articles(form)):
@@ -1095,14 +1125,33 @@ def audit_episode_ordering(
     own metadata title against TheTVDB's aired-order title at that
     (season, episode) position.
 
+    A single video file can span more than one episode, e.g.
+    ``Show S01E05-E07 Title.mkv`` (see
+    :func:`media.expected_episode_numbers_from_filename`) - Jellyfin's own
+    ``IndexNumber`` for such an item is just the range's first episode (5
+    here), so comparing only that one position's title against the item's
+    combined metadata title would be comparing a single episode's title
+    against three episodes' worth of text and calling the difference a
+    mismatch. When the filename implies a range, every position in it (5, 6,
+    and 7) is required to have data, and each ordering's expected title is
+    every one of those positions' titles joined with "/", mirroring
+    Jellyfin's own convention for combining a multi-episode item's title
+    (see :func:`titles_match`, which already treats "/" and "," as
+    equivalent joiners) - a local title matching that joined title counts as
+    a match for the whole range. An ordinary single-episode file is just the
+    ``len(episode_numbers) == 1`` case of the same logic, unchanged.
+
     A name can carry more than one candidate episode at the same position -
     e.g. TheTVDB splitting a franchise into more than one series entry, each
     independently numbering its own "Season 1, Episode 1" (see
-    :func:`auditor._fetch_tvdb_episode_positions`). A local title matching
-    any one candidate counts as a match; only when it matches none of them,
-    for both orderings, is it flagged - and the message lists every distinct
-    candidate title actually on offer at that position, since with more than
-    one candidate there's no single "the" aired-order title to quote.
+    :func:`auditor._fetch_tvdb_episode_positions`). Combined with a
+    multi-episode range, this means there can be more than one way to join
+    a range's positions into an expected title (one per candidate at each
+    position) - every combination is generated, and a local title matching
+    any one of them counts as a match; only when it matches none of them,
+    for both orderings, is it flagged - and the message lists every
+    distinct combined title actually on offer, since there's no single
+    "the" aired-order title to quote once more than one combination exists.
 
     A mismatch is only reported when DVD-order data is available for that
     position too - without it there's no second ordering to confirm a real
@@ -1130,9 +1179,9 @@ def audit_episode_ordering(
             name, keyed by (season_number, episode_number).
 
     Returns:
-        One finding per local episode whose title doesn't match any
-        English-titled candidate's TheTVDB title at its (season, episode)
-        position, in either ordering.
+        One finding per local episode (or multi-episode range) whose title
+        doesn't match any English-titled candidate combination's TheTVDB
+        title at its (season, episode(s)) position, in either ordering.
     """
     findings: list[AuditFinding] = []
 
@@ -1142,30 +1191,40 @@ def audit_episode_ordering(
         if item.season_number is None or item.episode_number is None:
             continue
 
-        position = (item.season_number, item.episode_number)
-        aired_candidates = _english_titled_candidates(
-            aired_positions.get(item.series_name, {}).get(position)
+        episode_numbers = expected_episode_numbers_from_filename(item) or (item.episode_number,)
+
+        aired_per_position = _candidates_for_episode_range(
+            aired_positions.get(item.series_name, {}), item.season_number, episode_numbers
         )
-        if not aired_candidates:
+        if aired_per_position is None:
             continue
 
-        if any(titles_match(item.title, candidate.name) for candidate in aired_candidates):
+        aired_combined_titles = _combined_candidate_titles(aired_per_position)
+        if any(titles_match(item.title, combined) for combined in aired_combined_titles):
             continue
 
-        dvd_candidates = _english_titled_candidates(
-            dvd_positions.get(item.series_name, {}).get(position)
+        dvd_per_position = _candidates_for_episode_range(
+            dvd_positions.get(item.series_name, {}), item.season_number, episode_numbers
         )
-        if not dvd_candidates:
+        if dvd_per_position is None:
             continue
 
-        if any(titles_match(item.title, candidate.name) for candidate in dvd_candidates):
+        dvd_combined_titles = _combined_candidate_titles(dvd_per_position)
+        if any(titles_match(item.title, combined) for combined in dvd_combined_titles):
             continue
 
-        position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
+        if len(episode_numbers) > 1:
+            position_label = (
+                f"S{item.season_number:02d}E{episode_numbers[0]:02d}-"
+                f"E{episode_numbers[-1]:02d}"
+            )
+        else:
+            position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
+
         message = (
             f'{position_label} is titled "{item.title}", which matches neither TheTVDB\'s '
-            f"aired-order title {_format_candidate_titles(aired_candidates)} nor its "
-            f"DVD-order title {_format_candidate_titles(dvd_candidates)} at that position. "
+            f"aired-order title {_format_combined_titles(aired_combined_titles)} nor its "
+            f"DVD-order title {_format_combined_titles(dvd_combined_titles)} at that position. "
             "Verify the video content before trusting Jellyfin's metadata."
         )
 
@@ -1196,14 +1255,53 @@ def _english_titled_candidates(
     )
 
 
-def _format_candidate_titles(candidates: Iterable[TvdbEpisode]) -> str:
-    """Return every distinct candidate title, quoted and joined for a finding message.
+def _candidates_for_episode_range(
+    positions: Mapping[tuple[int, int], tuple[TvdbEpisode, ...]],
+    season_number: int,
+    episode_numbers: tuple[int, ...],
+) -> tuple[tuple[TvdbEpisode, ...], ...] | None:
+    """Return each position's English-titled candidates across a multi-episode range.
 
-    More than one candidate at a position (see :func:`audit_episode_ordering`)
+    Returns ``None`` when any position in the range has no data at all (no
+    candidates, or only non-English ones) - a combined title can't be
+    confidently built with one of the range's episodes missing, and treating
+    a partial range as if it fully matched (or fully mismatched) would be
+    guessing.
+    """
+    per_position_candidates: list[tuple[TvdbEpisode, ...]] = []
+    for episode_number in episode_numbers:
+        candidates = _english_titled_candidates(positions.get((season_number, episode_number)))
+        if not candidates:
+            return None
+        per_position_candidates.append(candidates)
+    return tuple(per_position_candidates)
+
+
+def _combined_candidate_titles(
+    per_position_candidates: tuple[tuple[TvdbEpisode, ...], ...],
+) -> tuple[str, ...]:
+    """Return every way of joining one candidate title per position into one combined title.
+
+    More than one position (a multi-episode range) or more than one
+    candidate at a position (see :func:`audit_episode_ordering`) each
+    multiply the number of ways the range's expected title could read -
+    every combination is generated here so the caller can treat a match
+    against any one of them as a match for the whole range.
+    """
+    return tuple(
+        " / ".join(candidate.name for candidate in combination)
+        for combination in itertools.product(*per_position_candidates)
+    )
+
+
+def _format_combined_titles(combined_titles: Iterable[str]) -> str:
+    """Return every distinct combined title, quoted and joined for a finding message.
+
+    More than one combined title (see :func:`_combined_candidate_titles`)
     means there's no single title to quote, so every distinct one is listed.
     """
-    distinct_names = dict.fromkeys(candidate.name for candidate in candidates)
-    return " or ".join(f'"{name}"' for name in distinct_names)
+    distinct_titles = dict.fromkeys(combined_titles)
+    return " or ".join(f'"{title}"' for title in distinct_titles)
 
 
 def _missing_sequence_numbers(numbers: Iterable[int]) -> tuple[int, ...]:
