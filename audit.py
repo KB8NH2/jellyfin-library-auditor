@@ -616,19 +616,8 @@ def mismatched_tvdb_series(
     for series_name, grouped_items in sorted(series_items.items(), key=lambda entry: entry[0].casefold()):
         series_aired_positions = aired_positions.get(series_name)
         if not series_aired_positions:
-            LOGGER.info(
-                "Series %r: no TheTVDB aired-order data available; skipping mismatch check.",
-                series_name,
-            )
             continue
         if len(grouped_items) < _MISMATCHED_TVDB_SERIES_MIN_EPISODES:
-            LOGGER.info(
-                "Series %r: only %d local numbered episode(s) found (minimum %d required); "
-                "skipping mismatch check.",
-                series_name,
-                len(grouped_items),
-                _MISMATCHED_TVDB_SERIES_MIN_EPISODES,
-            )
             continue
 
         series_dvd_positions = dvd_positions.get(series_name) if dvd_positions else None
@@ -637,6 +626,9 @@ def mismatched_tvdb_series(
         )
         ratio = unmatched_count / total_count
         is_mismatched = ratio >= _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO
+        if not is_mismatched:
+            continue
+
         _log_mismatch_evaluation(
             series_name,
             grouped_items,
@@ -645,10 +637,7 @@ def mismatched_tvdb_series(
             unmatched_count=unmatched_count,
             total_count=total_count,
             ratio=ratio,
-            is_mismatched=is_mismatched,
         )
-        if not is_mismatched:
-            continue
 
         representative = min(grouped_items, key=_episode_sort_key)
         findings.append(
@@ -676,11 +665,13 @@ def _log_mismatch_evaluation(
     unmatched_count: int,
     total_count: int,
     ratio: float,
-    is_mismatched: bool,
 ) -> None:
-    """Log one series' mismatched_tvdb_series evaluation: per-episode matches and the resulting score.
+    """Log one flagged series' mismatched_tvdb_series evaluation: per-episode matches and the score.
 
-    Written to ``LOGGER`` at INFO, which only reaches disk when
+    Only called for a series that actually trips the mismatch threshold - a
+    series that passes the check produces no log output, so this file stays
+    a record of what to investigate rather than a full trace of every check
+    run. Written to ``LOGGER`` at INFO, which only reaches disk when
     auditor.py has attached a file handler for it (``mismatched_tvdb_series.log``) -
     this is diagnostic detail for manually checking a specific finding, not
     something meant to appear on the console.
@@ -713,13 +704,12 @@ def _log_mismatch_evaluation(
             status,
         )
     LOGGER.info(
-        "Series %r: score %d/%d unmatched (%.2f, threshold %.2f) -> %s",
+        "Series %r: score %d/%d unmatched (%.2f, threshold %.2f) -> MISMATCH FLAGGED",
         series_name,
         unmatched_count,
         total_count,
         ratio,
         _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO,
-        "MISMATCH FLAGGED" if is_mismatched else "ok",
     )
 
 

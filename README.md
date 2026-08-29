@@ -318,7 +318,7 @@ By default, reports are written under `audit_results\`.
 - `dvd_metadata_apply.log` - append-only record of every DVD-order metadata apply attempt, written next to wherever `apply_dvd_metadata.py` was run
 - `episode_numbers_apply.log` - append-only record of every episode-number apply attempt, written next to wherever `apply_episode_numbers.py` was run
 - `audit.log` - append-only record of everything else logged during an `auditor.py` run that used at least one `--transfer-*` flag (audit progress, comparison writing, `--verify` output, errors) - the transfer-type log files above only ever contain their own transfer's history, never this. Combine multiple `--transfer-*` flags in one run and each still only writes to its own log file; nothing gets duplicated across them.
-- `mismatched_tvdb_series.log` - append-only, written whenever a TheTVDB `api_key` is configured (no `--transfer-*` flag needed): for every series with enough local episodes to evaluate, lists each local episode's (season, episode) position against TheTVDB's aired and DVD orderings, and the resulting unmatched/total score used to decide the `mismatched_tvdb_series` finding - useful for checking why a series was, or wasn't, flagged. Not shown on the console.
+- `mismatched_tvdb_series.log` - append-only, written whenever a TheTVDB `api_key` is configured (no `--transfer-*` flag needed): for every series that actually trips the `mismatched_tvdb_series` finding, lists each local episode's (season, episode) position against TheTVDB's aired and DVD orderings and the resulting unmatched/total score - useful for checking why a series was flagged. Series that pass the check write nothing. Not shown on the console.
 
 ## Project layout
 
