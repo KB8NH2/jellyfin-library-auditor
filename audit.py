@@ -812,16 +812,25 @@ def audit_episode_ordering(
     aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]],
     dvd_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]],
 ) -> tuple[AuditFinding, ...]:
-    """Return findings for episodes whose aired/DVD order titles disagree.
+    """Return findings for local episodes whose title doesn't match TheTVDB's aired-order title.
 
-    Some series are organized on disk in TheTVDB's DVD order while Jellyfin
-    labels files using aired order (or vice versa), so the filename, season
-    number, and episode number all line up with Jellyfin's own metadata even
-    though the video content is a different episode. Comparing Jellyfin's
-    metadata against a single online ordering can't catch that; this compares
-    each episode's (season, episode) position against both of TheTVDB's
-    orderings and flags positions where they disagree, so the user knows
-    exactly which episodes are worth checking by eye.
+    Some series are organized on disk in TheTVDB's DVD order while Jellyfin's
+    season/episode numbers still follow aired order (or vice versa), so the
+    filename and season/episode numbers all look correct even though the
+    video content is a different episode. This compares each local episode's
+    own metadata title against TheTVDB's aired-order title at that
+    (season, episode) position.
+
+    A mismatch is only reported when DVD-order data is available for that
+    position too - without it there's no second ordering to confirm a real
+    discrepancy against, only that the local title differs from one
+    ordering's, which alone isn't unusual (typos, alternate titles, etc.).
+    When DVD-order data is available and the local title matches it instead,
+    that's still reported, but the message says so explicitly, since a
+    series correctly organized end-to-end in DVD order will disagree with
+    aired order at every single episode - that's expected, not something to
+    individually hunt down by eye. A local title matching neither ordering is
+    flagged as a genuine discrepancy worth checking.
 
     Args:
         items: Media items from one audited library.
@@ -831,8 +840,9 @@ def audit_episode_ordering(
             by (season_number, episode_number).
 
     Returns:
-        One finding per episode whose aired-order and DVD-order titles differ
-        at its (season, episode) position.
+        One finding per local episode whose title doesn't match TheTVDB's
+        aired-order title at its (season, episode) position, when DVD-order
+        data is also available there to compare against.
     """
     findings: list[AuditFinding] = []
 
@@ -844,12 +854,30 @@ def audit_episode_ordering(
 
         position = (item.season_number, item.episode_number)
         aired_episode = aired_positions.get(item.series_name, {}).get(position)
-        dvd_episode = dvd_positions.get(item.series_name, {}).get(position)
-        if aired_episode is None or dvd_episode is None:
+        if aired_episode is None:
             continue
 
-        if normalized_title(aired_episode.name) == normalized_title(dvd_episode.name):
+        if normalized_title(item.title) == normalized_title(aired_episode.name):
             continue
+
+        dvd_episode = dvd_positions.get(item.series_name, {}).get(position)
+        if dvd_episode is None:
+            continue
+
+        position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
+        if normalized_title(item.title) == normalized_title(dvd_episode.name):
+            message = (
+                f'{position_label} is titled "{item.title}", which matches TheTVDB\'s DVD-order '
+                f'title at that position rather than its aired-order title "{aired_episode.name}" '
+                "- this episode appears to be organized in DVD order."
+            )
+        else:
+            message = (
+                f'{position_label} is titled "{item.title}", which matches neither TheTVDB\'s '
+                f'aired-order title "{aired_episode.name}" nor its DVD-order title '
+                f'"{dvd_episode.name}" at that position. Verify the video content before trusting '
+                "Jellyfin's metadata."
+            )
 
         findings.append(
             _finding(
@@ -857,12 +885,7 @@ def audit_episode_ordering(
                 category=AuditCategory.EPISODE_ORDER,
                 severity=AuditSeverity.WARNING,
                 check_name="aired_dvd_order_mismatch",
-                message=(
-                    f'TheTVDB aired order lists S{item.season_number:02d}E{item.episode_number:02d} '
-                    f'as "{aired_episode.name}", but DVD order lists a different episode at that '
-                    f'position: "{dvd_episode.name}". Verify the video content matches the aired-order '
-                    f"title before trusting Jellyfin's metadata."
-                ),
+                message=message,
             )
         )
 
