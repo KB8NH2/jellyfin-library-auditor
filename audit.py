@@ -32,6 +32,16 @@ from tvdb import TvdbEpisode
 
 _APOSTROPHE_PATTERN = re.compile(r"['‘’]")
 _GENERIC_PUNCTUATION_PATTERN = re.compile(r"[^\w\s/]")
+# Periods and dashes are the punctuation marks that commonly appear directly
+# between two letters with no surrounding space, rather than between two
+# separate words - an abbreviation ("A.M.") or a hyphenated compound
+# ("Break-Ups"). Since normalized_title() turns each into a space (needed
+# so e.g. "S.W.A.T." lines up with a filename's own dot-delimited "S W A
+# T"), a title on the other side that instead runs the same word together
+# with no separator at all ("AM", "Breakups") won't match on that reading -
+# so titles_match() also tries deleting these outright, closing the letters
+# back up.
+_COMPOUND_PUNCTUATION_PATTERN = re.compile(r"[.\-‐‑‒–—]")
 _ROMAN_NUMERAL_PAREN_PATTERN = re.compile(r"\(([IVXLCDMivxlcdm]+)\)")
 _ROMAN_NUMERAL_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
 _NUMERIC_PAREN_PATTERN = re.compile(r"\(\s*\d+\s*\)")
@@ -39,8 +49,14 @@ _PART_NUMBER_WORDS = (
     "one|two|three|four|five|six|seven|eight|nine|ten|"
     "eleven|twelve|thirteen|fourteen|fifteen"
 )
+# Longest-first so e.g. "III" can't match as "I" before the engine ever tries
+# the longer alternative - \b after a short match would reject it anyway
+# (mid-word, not a boundary) and backtracking would recover, but ordering
+# this way makes the match unambiguous without relying on that.
+_PART_NUMBER_ROMAN_NUMERALS = "VIII|XIII|III|VII|XII|XIV|II|IV|VI|IX|XI|XV|I|V|X"
 _PART_NUMBER_PATTERN = re.compile(
-    rf"\b(?:part|pt)\.?\s+(?:\d+|{_PART_NUMBER_WORDS})\b", re.IGNORECASE
+    rf"\b(?:part|pt)\.?\s+(?:\d+|{_PART_NUMBER_WORDS}|{_PART_NUMBER_ROMAN_NUMERALS})\b",
+    re.IGNORECASE,
 )
 _ARTICLE_STOPWORD_PATTERN = re.compile(r"\b(?:a|an|the)\b", re.IGNORECASE)
 
@@ -554,7 +570,8 @@ def normalized_title(value: str) -> str:
     disambiguators (a multi-part episode's part number, or a movie's release
     year) rather than title text, and Jellyfin metadata and filenames don't
     agree on whether or how to include them. A "Part 1" / "Pt 1" / "Part One"
-    style suffix is dropped for the same reason, so it lines up with a
+    / "Part I" style suffix (arabic digit, spelled-out word, or roman
+    numeral) is dropped for the same reason, so it lines up with a
     same-numbered parenthetical disambiguator instead of being flagged as a
     mismatch. "&" is treated the same as "and", and "+" the same as "/",
     since Jellyfin sometimes converts between these when deriving filenames
@@ -617,14 +634,16 @@ def titles_match(first: str, second: str) -> bool:
     slashes first.
 
     Each of those readings is also compared both as-is and with every period
-    deleted outright rather than turned into a space by
-    :func:`normalized_title` - an abbreviation like "A.M." needs to
-    collapse into "am" to match an unpunctuated "AM" on the other side, the
-    same way :func:`normalized_title` already collapses "S.W.A.T." into
-    separately-spaced letters to match a filename's own dot-delimited "S W
-    A T". Both readings are kept since which one lines up depends on
-    whether the *other* side spells the abbreviation with spaces (needs the
-    space reading) or runs it together (needs the deleted reading).
+    or dash deleted outright rather than turned into a space by
+    :func:`normalized_title` - an abbreviation like "A.M." needs to collapse
+    into "am" to match an unpunctuated "AM" on the other side, and a
+    hyphenated compound like "Break-Ups" needs to collapse into "breakups"
+    to match "Breakups", the same way :func:`normalized_title` already
+    turns each into a space so e.g. "S.W.A.T." or "Spider-Man" lines up
+    with a filename's own already-spaced "S W A T" or "Spider Man". Both
+    readings are kept since which one lines up depends on whether the
+    *other* side spells the word with a space (needs the space reading) or
+    runs it together (needs the deleted reading).
 
     Each of those readings is in turn compared both as-is, with every
     "a"/"an"/"the" dropped, and with any British spelling rewritten to its
@@ -633,8 +652,19 @@ def titles_match(first: str, second: str) -> bool:
     filenames don't always agree on any of these (unlike
     :func:`normalized_title` itself, which leaves articles and spelling
     alone for callers that need an exact match to win over a
-    same-titled-except-for-this coincidence). Titles are a match if any
-    combination of the two sides' readings agrees.
+    same-titled-except-for-this coincidence).
+
+    Finally, every resulting reading is also tried with all of its
+    remaining spaces removed, so two words split apart on one side but
+    joined into one on the other (e.g. "Doll House" versus "Dollhouse")
+    still match - this is the least targeted of these readings (nothing
+    else about the two sides needs to agree once whitespace is out of the
+    picture), but it only ever adds a match alongside the word-for-word
+    reading, never replaces it, so it can't turn two titles that actually
+    differ into a false match on its own.
+
+    Titles are a match if any combination of the two sides' readings
+    agrees.
 
     Args:
         first: One title to compare, e.g. a filename- or stream-derived
@@ -652,7 +682,7 @@ def _title_comparison_variants(value: str) -> frozenset[str]:
     raw_variants: set[str] = set()
     for comma_variant in (value, value.replace(",", "/")):
         raw_variants.add(comma_variant)
-        raw_variants.add(comma_variant.replace(".", ""))
+        raw_variants.add(_COMPOUND_PUNCTUATION_PATTERN.sub("", comma_variant))
 
     normalized_forms = {normalized_title(raw_variant) for raw_variant in raw_variants}
     variants: set[str] = set()
@@ -660,6 +690,8 @@ def _title_comparison_variants(value: str) -> frozenset[str]:
         for with_or_without_articles in (form, _without_articles(form)):
             variants.add(with_or_without_articles)
             variants.add(_with_american_spellings(with_or_without_articles))
+
+    variants |= {variant.replace(" ", "") for variant in variants}
     return frozenset(variants)
 
 
