@@ -26,6 +26,15 @@ TVDB_BASE_URL = "https://api4.thetvdb.com/v4"
 LOGIN_ENDPOINT = "/login"
 SEARCH_ENDPOINT = "/search"
 SERIES_EPISODES_ENDPOINT_TEMPLATE = "/series/{series_id}/episodes/{season_type}"
+# Requests TheTVDB's crowd-sourced English translation of each episode's name
+# and overview, where one has been recorded, instead of the series' original-
+# language default (e.g. Japanese for anime) - the local library and its
+# filenames are compared against this data assuming an English title, so an
+# untranslated original-language default reads as a false mismatch. TheTVDB
+# silently falls back to the original-language text for any episode without
+# an English translation on file, so this is a strict improvement with no
+# downside.
+EPISODE_LANGUAGE = "eng"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 # Safety cap on pagination so a misbehaving/looping response can't hang a run;
 # no real series has anywhere near this many pages of episodes.
@@ -36,9 +45,11 @@ SeasonType = Literal["official", "dvd"]
 DEFAULT_TVDB_CACHE_PATH = Path("tvdb_cache.json")
 DEFAULT_CACHE_TTL = timedelta(days=7)
 # Bump whenever TvdbEpisode's cached shape changes (e.g. a new field is
-# added) so an existing on-disk cache from before the change is discarded
-# and refetched instead of silently loading with the new field missing.
-CACHE_SCHEMA_VERSION = 2
+# added), or whenever a fetch behavior change means previously-cached data no
+# longer reflects what a fresh fetch would return (e.g. EPISODE_LANGUAGE
+# above), so an existing on-disk cache from before the change is discarded
+# and refetched instead of silently loading stale or now-wrong data.
+CACHE_SCHEMA_VERSION = 3
 
 
 class TvdbError(RuntimeError):
@@ -196,6 +207,40 @@ class TvdbEpisodeCache:
     def get_series_name(self, series_id: str) -> str | None:
         """Return the cached display name for one TheTVDB series id, if known."""
         return self._series_names.get(series_id)
+
+    def get_series_ids_by_name(self, name: str) -> tuple[str, ...]:
+        """Return every TheTVDB series id ever recorded under a given display name.
+
+        The reverse of :meth:`get_series_name` - name to every id, rather
+        than id to name. A series id ends up recorded here whenever its
+        episodes were fetched with a ``series_name`` given, whether that's
+        the id Jellyfin currently has assigned to the series, or a candidate
+        episode fetch performed elsewhere (e.g. while searching for a
+        better-fitting TheTVDB match for a series flagged by
+        :func:`audit.mismatched_tvdb_series`) - both leave an entry here
+        under the same name. So this can surface a same-named series id the
+        caller doesn't already know about, e.g. a long-running show TheTVDB
+        splits into more than one id for different eras: a local library
+        whose Jellyfin Series item is only assigned one of those ids would
+        otherwise never see the other's episodes merged in.
+
+        Matching is case/whitespace-insensitive, like :meth:`get_search`'s
+        cache key, since the name being looked up always comes from Jellyfin
+        metadata rather than from TheTVDB itself.
+
+        Args:
+            name: Series display name to look up.
+
+        Returns:
+            Every series id recorded under that name, in no particular
+            order.
+        """
+        normalized_name = self._normalized_search_key(name)
+        return tuple(
+            series_id
+            for series_id, series_name in self._series_names.items()
+            if self._normalized_search_key(series_name) == normalized_name
+        )
 
     def set_series_name(self, series_id: str, name: str) -> None:
         """Store a series' display name and persist it immediately.
@@ -440,6 +485,22 @@ class TvdbClient:
         """Close the HTTP session when leaving a context manager."""
         self.close()
 
+    def get_cached_series_ids_by_name(self, name: str) -> tuple[str, ...]:
+        """Return every TheTVDB series id the cache has recorded under a display name.
+
+        See :meth:`TvdbEpisodeCache.get_series_ids_by_name`. Returns an empty
+        tuple when this client has no cache attached.
+
+        Args:
+            name: Series display name to look up.
+
+        Returns:
+            Every cached series id recorded under that name.
+        """
+        if self._cache is None:
+            return ()
+        return self._cache.get_series_ids_by_name(name)
+
     def get_series_episodes(
         self,
         series_id: str,
@@ -448,6 +509,10 @@ class TvdbClient:
         series_name: str | None = None,
     ) -> tuple[TvdbEpisode, ...]:
         """Return every episode of one series in the requested ordering.
+
+        Each episode's name and overview prefer TheTVDB's English translation
+        (see :data:`EPISODE_LANGUAGE`) over the series' original-language
+        default, falling back to that default for any episode without one.
 
         Args:
             series_id: TheTVDB series identifier (as reported by Jellyfin's
@@ -489,7 +554,7 @@ class TvdbClient:
                     series_id=series_id,
                     season_type=season_type,
                 ),
-                params={"page": page},
+                params={"page": page, "lang": EPISODE_LANGUAGE},
             )
             data = self._get_required_dict(payload, "data", "episodes response")
             raw_episodes = self._get_optional_list(data, "episodes", "episodes response")

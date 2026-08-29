@@ -609,8 +609,8 @@ def _audit_library_result(
         items_with_local_backdrop += int(local_backdrop_exists(item))
         findings.extend(audit_media_item(item))
 
-    aired_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
-    dvd_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
+    aired_positions: dict[str, dict[tuple[int, int], tuple[TvdbEpisode, ...]]] = {}
+    dvd_positions: dict[str, dict[tuple[int, int], tuple[TvdbEpisode, ...]]] = {}
     series_tvdb_ids: dict[str, tuple[str, ...]] = {}
     if tvdb_client is not None and library.is_tv_library:
         aired_positions, dvd_positions, series_tvdb_ids = _fetch_tvdb_episode_positions(
@@ -749,8 +749,8 @@ def _fetch_tvdb_episode_positions(
     library: MediaLibrary,
     items: Iterable[MediaItem],
 ) -> tuple[
-    dict[str, dict[tuple[int, int], TvdbEpisode]],
-    dict[str, dict[tuple[int, int], TvdbEpisode]],
+    dict[str, dict[tuple[int, int], tuple[TvdbEpisode, ...]]],
+    dict[str, dict[tuple[int, int], tuple[TvdbEpisode, ...]]],
     dict[str, tuple[str, ...]],
 ]:
     """Return TheTVDB aired-/DVD-order episode positions and each series' matched id(s).
@@ -762,19 +762,36 @@ def _fetch_tvdb_episode_positions(
     needs to check a local episode against both orderings so a series simply
     numbered on disk in DVD order isn't flagged as a wrong TheTVDB match.
 
-    A series name can map to more than one TheTVDB id (see
-    :meth:`JellyfinClient.get_series_tvdb_ids`) when a Jellyfin library has
-    more than one Series item sharing that name - e.g. TheTVDB splitting a
+    A series name can map to more than one TheTVDB id - either because a
+    Jellyfin library has more than one Series item sharing that name (see
+    :meth:`JellyfinClient.get_series_tvdb_ids`), e.g. TheTVDB splitting a
     long-running show into a new entry for a later era while the old entry
-    keeps the earlier episodes, both still titled the same in Jellyfin.
+    keeps the earlier episodes, both still titled the same in Jellyfin; or
+    because TheTVDB episode cache already knows of another same-named id
+    that was never assigned to a Jellyfin Series item at all (see
+    :meth:`TvdbClient.get_cached_series_ids_by_name`) - e.g. a candidate
+    considered while looking for a better match for a series
+    :func:`audit.mismatched_tvdb_series` had already flagged, which is
+    exactly the situation where the *assigned* id's data is the one not to
+    be trusted.
+
     Positions from every id for a name are merged into one combined position
     map, so local episodes are checked against the union of what all of them
     know instead of only whichever id happened to be picked - comparing
-    against just one half of an intentionally-split show would otherwise
-    flag every episode belonging to the other half as unmatched. Where two
-    ids sharing a name both use the same (season, episode) position, the
-    later id's episode wins; there's no way to tell from the position alone
-    which of the two shows a local file there actually is.
+    against just one of several same-named ids would otherwise flag every
+    episode only the others know about as unmatched. Unlike an earlier
+    version of this function, two ids sharing a name that both use the same
+    (season, episode) position do NOT have one silently overwrite the
+    other's episode there: for an unrelated franchise sharing one name across
+    genuinely distinct TheTVDB entries (e.g. a decades-old show with a
+    from-scratch modern revival, each independently numbered from "Season 1,
+    Episode 1"), that used to mean whichever id happened to be processed
+    last silently won - which could easily be the *wrong* one, discarding an
+    earlier-processed id's actually-correct episode and reintroducing
+    exactly the false mismatch this merging was meant to fix. Every
+    position instead keeps every candidate episode from every id, and
+    :func:`audit.audit_episode_ordering` treats a local title as matched
+    when it agrees with any one of them.
 
     A lookup failure for one series/id pair is logged and skipped rather
     than failing the whole audit run. The matched TheTVDB id(s) per series
@@ -785,18 +802,23 @@ def _fetch_tvdb_episode_positions(
     if not series_names:
         return {}, {}, {}
 
-    series_tvdb_ids = client.get_series_tvdb_ids(library.id)
+    assigned_series_tvdb_ids = client.get_series_tvdb_ids(library.id)
 
-    aired_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
-    dvd_positions: dict[str, dict[tuple[int, int], TvdbEpisode]] = {}
+    aired_positions: dict[str, dict[tuple[int, int], tuple[TvdbEpisode, ...]]] = {}
+    dvd_positions: dict[str, dict[tuple[int, int], tuple[TvdbEpisode, ...]]] = {}
+    series_tvdb_ids: dict[str, tuple[str, ...]] = {}
 
     for series_name in series_names:
-        tvdb_ids = series_tvdb_ids.get(series_name, ())
+        cached_ids = tvdb_client.get_cached_series_ids_by_name(series_name)
+        tvdb_ids = tuple(
+            dict.fromkeys((*assigned_series_tvdb_ids.get(series_name, ()), *cached_ids))
+        )
         if not tvdb_ids:
             continue
+        series_tvdb_ids[series_name] = tvdb_ids
 
-        series_aired_positions: dict[tuple[int, int], TvdbEpisode] = {}
-        series_dvd_positions: dict[tuple[int, int], TvdbEpisode] = {}
+        series_aired_positions: dict[tuple[int, int], list[TvdbEpisode]] = {}
+        series_dvd_positions: dict[tuple[int, int], list[TvdbEpisode]] = {}
         for tvdb_id in tvdb_ids:
             LOGGER.debug(
                 "Checking TheTVDB episode positions for %r (TheTVDB id %s)...",
@@ -817,17 +839,23 @@ def _fetch_tvdb_episode_positions(
                 )
                 continue
 
-            series_aired_positions.update(
-                {(episode.season_number, episode.episode_number): episode for episode in aired_episodes}
-            )
-            series_dvd_positions.update(
-                {(episode.season_number, episode.episode_number): episode for episode in dvd_episodes}
-            )
+            for episode in aired_episodes:
+                series_aired_positions.setdefault(
+                    (episode.season_number, episode.episode_number), []
+                ).append(episode)
+            for episode in dvd_episodes:
+                series_dvd_positions.setdefault(
+                    (episode.season_number, episode.episode_number), []
+                ).append(episode)
 
         if series_aired_positions:
-            aired_positions[series_name] = series_aired_positions
+            aired_positions[series_name] = {
+                position: tuple(episodes) for position, episodes in series_aired_positions.items()
+            }
         if series_dvd_positions:
-            dvd_positions[series_name] = series_dvd_positions
+            dvd_positions[series_name] = {
+                position: tuple(episodes) for position, episodes in series_dvd_positions.items()
+            }
 
     return aired_positions, dvd_positions, series_tvdb_ids
 

@@ -27,11 +27,184 @@ from models import MediaItem
 from tvdb import TvdbEpisode
 
 
-_EPISODE_TITLE_PUNCTUATION_PATTERN = re.compile(
-    r"""[,:;!\?'"‘’“”·\-‐‑‒–—*<>|]"""
-)
+_APOSTROPHE_PATTERN = re.compile(r"['‘’]")
+_GENERIC_PUNCTUATION_PATTERN = re.compile(r"[^\w\s/]")
 _ROMAN_NUMERAL_PAREN_PATTERN = re.compile(r"\(([IVXLCDMivxlcdm]+)\)")
 _ROMAN_NUMERAL_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+_NUMERIC_PAREN_PATTERN = re.compile(r"\(\s*\d+\s*\)")
+_PART_NUMBER_WORDS = (
+    "one|two|three|four|five|six|seven|eight|nine|ten|"
+    "eleven|twelve|thirteen|fourteen|fifteen"
+)
+_PART_NUMBER_PATTERN = re.compile(
+    rf"\b(?:part|pt)\.?\s+(?:\d+|{_PART_NUMBER_WORDS})\b", re.IGNORECASE
+)
+_ARTICLE_STOPWORD_PATTERN = re.compile(r"\b(?:a|an|the)\b", re.IGNORECASE)
+
+# Matches a character from a script no genuine English title would contain.
+# TheTVDB's English translation (see tvdb.EPISODE_LANGUAGE) silently falls
+# back to a series' original-language name for any episode without one on
+# file - there's no separate flag in the API response saying that happened,
+# so a name in a script like this is the practical signal that it did. Not
+# exhaustive of every non-English script (accented Latin text, e.g. French
+# or German, isn't covered - that's still closely comparable to English and
+# not the source of the false-positive mismatches this guards against), just
+# the common ones for named entities on TheTVDB.
+_NON_ENGLISH_SCRIPT_PATTERN = re.compile(
+    "["
+    "Ͱ-Ͽ"  # Greek
+    "Ѐ-ӿ"  # Cyrillic
+    "֐-׿"  # Hebrew
+    "؀-ۿ"  # Arabic
+    "ऀ-ॿ"  # Devanagari
+    "฀-๿"  # Thai
+    "぀-ヿ"  # Hiragana, Katakana
+    "㐀-䶿"  # CJK Unified Ideographs Extension A
+    "一-鿿"  # CJK Unified Ideographs
+    "가-힣"  # Hangul Syllables
+    "]"
+)
+
+# Maps a British spelling to its American equivalent, for titles_match()'s
+# spelling-insensitive comparison. Deliberately a curated word list rather
+# than a general suffix rule (e.g. blindly rewriting a trailing "-our" to
+# "-or", or "-oe-"/"-ae-" to "-e-") - those rules are attractive for their
+# coverage, but collide with ordinary English words that only coincidentally
+# share the ending ("hour", "tour", "four", "your" all end in "-our" without
+# being spelling variants of anything; "shoe" would become the unrelated word
+# "she" under a blind "-oe-" -> "-e-" rule). A word list only ever touches
+# the specific words it lists, so it can't manufacture a false match between
+# two otherwise-unrelated titles. Keys and lookups are lowercase, matching
+# normalized_title()'s casefolded output.
+_BRITISH_TO_AMERICAN_SPELLINGS: dict[str, str] = {
+    # -our / -or
+    "colour": "color", "colours": "colors", "coloured": "colored", "colouring": "coloring",
+    "favour": "favor", "favours": "favors", "favoured": "favored", "favouring": "favoring",
+    "favourite": "favorite", "favourites": "favorites",
+    "honour": "honor", "honours": "honors", "honoured": "honored", "honouring": "honoring",
+    "honourable": "honorable",
+    "neighbour": "neighbor", "neighbours": "neighbors", "neighbourhood": "neighborhood",
+    "neighbourly": "neighborly",
+    "humour": "humor", "humours": "humors", "humoured": "humored", "humouring": "humoring",
+    "rumour": "rumor", "rumours": "rumors", "rumoured": "rumored", "rumouring": "rumoring",
+    "labour": "labor", "labours": "labors", "laboured": "labored", "labouring": "laboring",
+    "behaviour": "behavior", "behaviours": "behaviors",
+    "endeavour": "endeavor", "endeavours": "endeavors", "endeavoured": "endeavored",
+    "harbour": "harbor", "harbours": "harbors", "harboured": "harbored",
+    "armour": "armor", "armoured": "armored", "armoury": "armory",
+    "valour": "valor", "vapour": "vapor", "vapours": "vapors",
+    "saviour": "savior", "saviours": "saviors",
+    "flavour": "flavor", "flavours": "flavors", "flavoured": "flavored", "flavouring": "flavoring",
+    "glamour": "glamor", "parlour": "parlor", "parlours": "parlors",
+    "rigour": "rigor", "vigour": "vigor", "ardour": "ardor", "candour": "candor",
+    "clamour": "clamor", "splendour": "splendor", "tumour": "tumor", "tumours": "tumors",
+    "odour": "odor", "odours": "odors", "demeanour": "demeanor",
+    "misdemeanour": "misdemeanor", "misdemeanours": "misdemeanors",
+    # -re / -er
+    "theatre": "theater", "theatres": "theaters",
+    "centre": "center", "centres": "centers", "centred": "centered", "centring": "centering",
+    "metre": "meter", "metres": "meters", "litre": "liter", "litres": "liters",
+    "fibre": "fiber", "fibres": "fibers", "calibre": "caliber",
+    "sombre": "somber", "spectre": "specter", "spectres": "specters",
+    "lustre": "luster", "sabre": "saber", "mitre": "miter",
+    "sceptre": "scepter", "manoeuvre": "maneuver", "manoeuvres": "maneuvers",
+    "manoeuvring": "maneuvering", "manoeuvred": "maneuvered",
+    # -ise / -ize (and -isation / -ization)
+    "organise": "organize", "organised": "organized", "organising": "organizing",
+    "organisation": "organization", "organisations": "organizations",
+    "realise": "realize", "realised": "realized", "realising": "realizing",
+    "realisation": "realization",
+    "recognise": "recognize", "recognised": "recognized", "recognising": "recognizing",
+    "apologise": "apologize", "apologised": "apologized", "apologising": "apologizing",
+    "analyse": "analyze", "analysed": "analyzed", "analysing": "analyzing",
+    "criticise": "criticize", "criticised": "criticized", "criticising": "criticizing",
+    "capitalise": "capitalize", "capitalised": "capitalized",
+    "characterise": "characterize", "characterised": "characterized",
+    "memorise": "memorize", "memorised": "memorized",
+    "categorise": "categorize", "categorised": "categorized",
+    "emphasise": "emphasize", "emphasised": "emphasized",
+    "familiarise": "familiarize", "familiarised": "familiarized",
+    "finalise": "finalize", "finalised": "finalized",
+    "generalise": "generalize", "generalised": "generalized",
+    "idolise": "idolize", "idolised": "idolized",
+    "legalise": "legalize", "legalised": "legalized",
+    "localise": "localize", "localised": "localized",
+    "mobilise": "mobilize", "mobilised": "mobilized",
+    "modernise": "modernize", "modernised": "modernized",
+    "moralise": "moralize", "moralised": "moralized",
+    "neutralise": "neutralize", "neutralised": "neutralized",
+    "normalise": "normalize", "normalised": "normalized",
+    "patronise": "patronize", "patronised": "patronized",
+    "penalise": "penalize", "penalised": "penalized",
+    "personalise": "personalize", "personalised": "personalized",
+    "prioritise": "prioritize", "prioritised": "prioritized",
+    "privatise": "privatize", "privatised": "privatized",
+    "publicise": "publicize", "publicised": "publicized",
+    "randomise": "randomize", "randomised": "randomized",
+    "socialise": "socialize", "socialised": "socialized",
+    "sterilise": "sterilize", "sterilised": "sterilized",
+    "stigmatise": "stigmatize", "stigmatised": "stigmatized",
+    "summarise": "summarize", "summarised": "summarized",
+    "symbolise": "symbolize", "symbolised": "symbolized",
+    "sympathise": "sympathize", "sympathised": "sympathized",
+    "terrorise": "terrorize", "terrorised": "terrorized",
+    "utilise": "utilize", "utilised": "utilized",
+    "victimise": "victimize", "victimised": "victimized",
+    "visualise": "visualize", "visualised": "visualized",
+    # -ce / -se
+    "defence": "defense", "defences": "defenses",
+    "offence": "offense", "offences": "offenses",
+    "licence": "license", "licences": "licenses",
+    "pretence": "pretense", "pretences": "pretenses",
+    "practise": "practice", "practised": "practiced", "practising": "practicing",
+    # ae/oe -> e (academic and medical terms)
+    "encyclopaedia": "encyclopedia", "encyclopaedias": "encyclopedias",
+    "paediatric": "pediatric", "paediatrics": "pediatrics", "paediatrician": "pediatrician",
+    "aesthetic": "esthetic", "aesthetics": "esthetics",
+    "anaesthesia": "anesthesia", "anaesthetic": "anesthetic",
+    "archaeology": "archeology", "archaeologist": "archeologist",
+    "diarrhoea": "diarrhea", "foetus": "fetus", "foetal": "fetal",
+    "gynaecology": "gynecology", "gynaecologist": "gynecologist",
+    "haemoglobin": "hemoglobin", "haemorrhage": "hemorrhage", "haemophilia": "hemophilia",
+    "leukaemia": "leukemia", "oesophagus": "esophagus",
+    "orthopaedic": "orthopedic", "orthopaedics": "orthopedics",
+    "amoeba": "ameba", "amoebas": "amebas",
+    # Standalone spelling differences
+    "grey": "gray", "greys": "grays", "greying": "graying",
+    "mould": "mold", "moulds": "molds", "moulded": "molded", "moulding": "molding",
+    "moult": "molt", "moulting": "molting",
+    "smoulder": "smolder", "smouldering": "smoldering",
+    "sulphur": "sulfur", "sulphate": "sulfate", "tyre": "tire", "tyres": "tires",
+    "kerb": "curb", "kerbs": "curbs",
+    "jewellery": "jewelry", "jeweller": "jeweler", "jewellers": "jewelers",
+    "jewelled": "jeweled",
+    "plough": "plow", "ploughs": "plows", "ploughed": "plowed", "ploughing": "plowing",
+    "draught": "draft", "draughts": "drafts",
+    "storey": "story", "storeys": "stories",
+    "programme": "program", "programmes": "programs",
+    "cheque": "check", "cheques": "checks",
+    "cosy": "cozy", "cosier": "cozier", "cosiest": "coziest",
+    "artefact": "artifact", "artefacts": "artifacts",
+    "doughnut": "donut", "doughnuts": "donuts",
+    "aeroplane": "airplane", "aeroplanes": "airplanes",
+    "aluminium": "aluminum", "yoghurt": "yogurt",
+    "moustache": "mustache", "moustaches": "mustaches",
+    "pyjamas": "pajamas", "omelette": "omelet", "omelettes": "omelets",
+    "catalogue": "catalog", "catalogues": "catalogs",
+    "dialogue": "dialog", "dialogues": "dialogs",
+    "analogue": "analog", "analogues": "analogs",
+    "speciality": "specialty", "specialities": "specialties",
+    "travelling": "traveling", "travelled": "traveled", "traveller": "traveler",
+    "travellers": "travelers",
+    "cancelled": "canceled", "cancelling": "canceling",
+    "labelled": "labeled", "labelling": "labeling", "labeller": "labeler",
+    "modelling": "modeling", "modelled": "modeled",
+    "signalling": "signaling", "signalled": "signaled",
+    "fuelled": "fueled", "fuelling": "fueling",
+    "counsellor": "counselor", "counsellors": "counselors",
+    "marvellous": "marvelous",
+    "woollen": "woolen",
+}
 
 _MISMATCHED_TVDB_SERIES_MIN_EPISODES = 5
 _MISMATCHED_TVDB_SERIES_MIN_UNMATCHED_RATIO = 0.5
@@ -79,8 +252,8 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
 
 def audit_library_items(
     items: Iterable[MediaItem],
-    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
-    dvd_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
+    dvd_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
 ) -> tuple[AuditFinding, ...]:
     """Run library-level audits that require multiple media items.
 
@@ -275,7 +448,7 @@ def mismatched_episode_filename_title(item: MediaItem) -> AuditFinding | None:
     if expected_title is None:
         return None
 
-    if normalized_title(expected_title) == normalized_title(item.title):
+    if titles_match(expected_title, item.title):
         return None
 
     return _finding(
@@ -305,7 +478,7 @@ def mismatched_episode_stream_title(item: MediaItem) -> AuditFinding | None:
     if expected_title is None:
         return None
 
-    if normalized_title(expected_title) == normalized_title(item.title):
+    if titles_match(expected_title, item.title):
         return None
 
     return _finding(
@@ -334,7 +507,7 @@ def mismatched_movie_filename_title(item: MediaItem) -> AuditFinding | None:
     if expected_title is None:
         return None
 
-    if normalized_title(expected_title) == normalized_title(item.title):
+    if titles_match(expected_title, item.title):
         return None
 
     return _finding(
@@ -352,26 +525,124 @@ def mismatched_movie_filename_title(item: MediaItem) -> AuditFinding | None:
 def normalized_title(value: str) -> str:
     """Return a normalized title for filename/metadata comparison.
 
-    Periods are treated as word separators (like filename extraction does for
-    dot-delimited release names) rather than deleted outright, so abbreviated
-    titles such as "S.W.A.T." compare equal to their filename counterpart
-    instead of collapsing into a run-together "swat". Parenthesized roman
-    numerals (e.g. "(I)") are converted to their arabic-numeral equivalent
-    (e.g. "(1)") since Jellyfin metadata and filenames disagree on which form
-    to use for disambiguating same-titled entries. "&" is treated the same as
-    "and", and "+" the same as "/", since Jellyfin sometimes converts between
-    these when deriving filenames from metadata. The single-character
-    ellipsis ("…") is treated the same as three literal periods ("..."),
-    since Jellyfin metadata and filenames disagree on which form to use.
+    Any punctuation (commas, periods, dashes, exclamation points, double
+    quotes, parentheses, and so on) is treated as word-separating whitespace
+    rather than deleted outright, so e.g. an abbreviated title like
+    "S.W.A.T." compares equal to its filename counterpart instead of
+    collapsing into a run-together "swat", and a hyphenated title like
+    "Spider-Man" compares equal to a space-separated "Spider Man". Two
+    exceptions: "/" is exempted, since it's still meaningful as a
+    multi-episode title separator (see below); and an apostrophe is deleted
+    outright rather than spaced, since it's normally part of a contraction or
+    possessive (e.g. "Lover's Walk") where a title on the other side just as
+    often drops it rather than spelling it with a space (e.g. "Lovers Walk"
+    - not "Lover s Walk").
+    Parenthesized roman numerals (e.g. "(I)") are converted to their
+    arabic-numeral equivalent (e.g. "(1)") before being dropped, same as any
+    other purely numeric parenthetical (e.g. "(1)", "(2016)") - these are
+    disambiguators (a multi-part episode's part number, or a movie's release
+    year) rather than title text, and Jellyfin metadata and filenames don't
+    agree on whether or how to include them. A "Part 1" / "Pt 1" / "Part One"
+    style suffix is dropped for the same reason, so it lines up with a
+    same-numbered parenthetical disambiguator instead of being flagged as a
+    mismatch. "&" is treated the same as "and", and "+" the same as "/",
+    since Jellyfin sometimes converts between these when deriving filenames
+    from metadata. Once every "/"-separated segment is normalized, an entry
+    that's an exact repeat of the one right before it is dropped - a
+    multi-part episode whose parts share one underlying title (distinguished
+    only by the part-number disambiguator already stripped above) otherwise
+    stays duplicated on the metadata side, e.g. "Title (1) / Title (2)",
+    while the filename side names it just once.
+
+    A leading article isn't dropped here, unlike :func:`titles_match` -
+    callers needing an exact match to still win over a same-titled-except-
+    for-an-article coincidence (e.g. apply_episode_numbers.py's strict/loose
+    fallback) rely on this function preserving articles as-is.
+
+    See :func:`titles_match` for comparing two titles that may use "," and
+    "/" as different, but equivalent, ways to join a multi-episode file's
+    individual episode titles, and that also ignores "a"/"an"/"the".
     """
     normalized_value = _ROMAN_NUMERAL_PAREN_PATTERN.sub(_roman_numeral_paren_to_arabic, value)
-    normalized_value = normalized_value.replace("…", "...")
+    normalized_value = _PART_NUMBER_PATTERN.sub("", normalized_value)
+    normalized_value = _NUMERIC_PAREN_PATTERN.sub("", normalized_value)
     normalized_value = normalized_value.replace("&", " and ")
     normalized_value = normalized_value.replace("+", "/")
-    normalized_value = normalized_value.replace(".", " ")
-    normalized_value = _EPISODE_TITLE_PUNCTUATION_PATTERN.sub("", normalized_value)
+    normalized_value = _APOSTROPHE_PATTERN.sub("", normalized_value)
+    normalized_value = _GENERIC_PUNCTUATION_PATTERN.sub(" ", normalized_value)
     normalized_value = re.sub(r"\s+", " ", normalized_value)
-    return normalized_value.strip().casefold()
+    normalized_value = normalized_value.strip().casefold()
+    return _collapse_duplicate_segments(normalized_value)
+
+
+def _collapse_duplicate_segments(value: str, *, separator: str = "/") -> str:
+    """Return ``value`` with immediately-repeated ``separator``-joined segments merged."""
+    segments = [segment.strip() for segment in value.split(separator)]
+    segments = [segment for segment in segments if segment]
+
+    deduped: list[str] = []
+    for segment in segments:
+        if not deduped or segment != deduped[-1]:
+            deduped.append(segment)
+
+    return f" {separator} ".join(deduped)
+
+
+def titles_match(first: str, second: str) -> bool:
+    """Return whether two titles are equal for filename/metadata comparison.
+
+    A multi-episode file's combined title joins its individual episodes'
+    titles together, but Jellyfin metadata and filenames don't agree on the
+    separator - metadata typically uses "/" (e.g. "Title A / Title B") while
+    a filename someone hand-named often uses "," instead (e.g.
+    "Title A, Title B"). A comma can't simply be treated as always meaning
+    "/", though, since it's also perfectly ordinary punctuation within a
+    single, un-joined title (e.g. "Poltergeist, Part One") - so each title is
+    compared both as literally normalized and with its commas swapped for
+    slashes first.
+
+    Each of those readings is in turn compared both as-is, with every
+    "a"/"an"/"the" dropped, and with any British spelling rewritten to its
+    American equivalent (e.g. "encyclopaedia" reads the same as
+    "encyclopedia") - in every combination - since Jellyfin metadata and
+    filenames don't always agree on any of these (unlike
+    :func:`normalized_title` itself, which leaves articles and spelling
+    alone for callers that need an exact match to win over a
+    same-titled-except-for-this coincidence). Titles are a match if any
+    combination of the two sides' readings agrees.
+
+    Args:
+        first: One title to compare, e.g. a filename- or stream-derived
+            title.
+        second: The other title to compare, e.g. a metadata title.
+
+    Returns:
+        ``True`` when the titles are equal under any reading.
+    """
+    return not _title_comparison_variants(first).isdisjoint(_title_comparison_variants(second))
+
+
+def _title_comparison_variants(value: str) -> frozenset[str]:
+    """Return every normalized reading of ``value`` that :func:`titles_match` allows."""
+    normalized_forms = {normalized_title(value), normalized_title(value.replace(",", "/"))}
+    variants: set[str] = set()
+    for form in normalized_forms:
+        for with_or_without_articles in (form, _without_articles(form)):
+            variants.add(with_or_without_articles)
+            variants.add(_with_american_spellings(with_or_without_articles))
+    return frozenset(variants)
+
+
+def _without_articles(normalized_value: str) -> str:
+    """Return an already-:func:`normalized_title`-processed value with articles dropped."""
+    without_articles = _ARTICLE_STOPWORD_PATTERN.sub("", normalized_value)
+    return re.sub(r"\s+", " ", without_articles).strip()
+
+
+def _with_american_spellings(normalized_value: str) -> str:
+    """Return an already-:func:`normalized_title`-processed value with British spellings Americanized."""
+    words = normalized_value.split(" ")
+    return " ".join(_BRITISH_TO_AMERICAN_SPELLINGS.get(word, word) for word in words)
 
 
 def _roman_numeral_paren_to_arabic(match: re.Match[str]) -> str:
@@ -400,7 +671,7 @@ def _roman_numeral_to_int(numeral: str) -> int | None:
 
 def missing_tv_series_seasons(
     items: Iterable[MediaItem],
-    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
 ) -> tuple[AuditFinding, ...]:
     """Return findings for series with missing numbered seasons.
 
@@ -458,7 +729,7 @@ def missing_tv_series_seasons(
 
 def missing_tv_season_episodes(
     items: Iterable[MediaItem],
-    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
 ) -> tuple[AuditFinding, ...]:
     """Return findings for seasons with missing numbered episodes.
 
@@ -517,7 +788,7 @@ def missing_tv_season_episodes(
 
 
 def _tvdb_season_episode_numbers(
-    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None,
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None,
     series_name: str,
     season_number: int,
 ) -> frozenset[int] | None:
@@ -536,7 +807,7 @@ def _tvdb_season_episode_numbers(
 
 
 def _tvdb_series_season_numbers(
-    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None,
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None,
     series_name: str,
 ) -> frozenset[int] | None:
     """Return TheTVDB's known season numbers for one series, if any."""
@@ -567,8 +838,8 @@ def _missing_numbers(
 
 def mismatched_tvdb_series(
     items: Iterable[MediaItem],
-    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
-    dvd_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
+    dvd_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
 ) -> tuple[AuditFinding, ...]:
     """Return findings for series whose matched TheTVDB entry looks wrong.
 
@@ -659,8 +930,8 @@ def mismatched_tvdb_series(
 def _log_mismatch_evaluation(
     series_name: str,
     grouped_items: Iterable[MediaItem],
-    series_aired_positions: Mapping[tuple[int, int], TvdbEpisode],
-    series_dvd_positions: Mapping[tuple[int, int], TvdbEpisode] | None,
+    series_aired_positions: Mapping[tuple[int, int], tuple[TvdbEpisode, ...]],
+    series_dvd_positions: Mapping[tuple[int, int], tuple[TvdbEpisode, ...]] | None,
     *,
     unmatched_count: int,
     total_count: int,
@@ -735,15 +1006,18 @@ def _local_numbered_episodes_by_series(items: Iterable[MediaItem]) -> dict[str, 
 
 def _unmatched_episode_count(
     local_items: Iterable[MediaItem],
-    series_positions: Mapping[tuple[int, int], TvdbEpisode],
-    secondary_series_positions: Mapping[tuple[int, int], TvdbEpisode] | None = None,
+    series_positions: Mapping[tuple[int, int], object],
+    secondary_series_positions: Mapping[tuple[int, int], object] | None = None,
 ) -> tuple[int, int]:
     """Return (unmatched_count, total_count) of local items against TheTVDB positions.
 
     An item counts as matched when its (season, episode) position is found
     in either ``series_positions`` or, when given, ``secondary_series_positions``
     - used to check a local episode against both TheTVDB's aired and DVD
-    orderings.
+    orderings. Only position membership matters, so the value type is
+    irrelevant - callers pass a single :class:`TvdbEpisode` per position (one
+    candidate series' own episode list) or a tuple of them (several
+    same-named series merged into one position map) interchangeably.
     """
     local_items_tuple = tuple(local_items)
     unmatched_count = sum(
@@ -809,8 +1083,8 @@ def best_matching_tvdb_series(
 
 def audit_episode_ordering(
     items: Iterable[MediaItem],
-    aired_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]],
-    dvd_positions: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]],
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]],
+    dvd_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]],
 ) -> tuple[AuditFinding, ...]:
     """Return findings for local episodes whose title doesn't match TheTVDB's aired-order title.
 
@@ -821,28 +1095,44 @@ def audit_episode_ordering(
     own metadata title against TheTVDB's aired-order title at that
     (season, episode) position.
 
+    A name can carry more than one candidate episode at the same position -
+    e.g. TheTVDB splitting a franchise into more than one series entry, each
+    independently numbering its own "Season 1, Episode 1" (see
+    :func:`auditor._fetch_tvdb_episode_positions`). A local title matching
+    any one candidate counts as a match; only when it matches none of them,
+    for both orderings, is it flagged - and the message lists every distinct
+    candidate title actually on offer at that position, since with more than
+    one candidate there's no single "the" aired-order title to quote.
+
     A mismatch is only reported when DVD-order data is available for that
     position too - without it there's no second ordering to confirm a real
     discrepancy against, only that the local title differs from one
     ordering's, which alone isn't unusual (typos, alternate titles, etc.).
-    When DVD-order data is available and the local title matches it instead,
-    that's still reported, but the message says so explicitly, since a
-    series correctly organized end-to-end in DVD order will disagree with
-    aired order at every single episode - that's expected, not something to
-    individually hunt down by eye. A local title matching neither ordering is
-    flagged as a genuine discrepancy worth checking.
+    A local title matching DVD order instead of aired order is not reported
+    at all - a series correctly organized end-to-end in DVD order would
+    otherwise disagree with aired order, and so get "flagged", at every
+    single episode. Only a local title matching neither ordering is a
+    genuine discrepancy worth flagging.
+
+    A candidate whose title is still in its original, non-English language
+    (see :data:`_NON_ENGLISH_SCRIPT_PATTERN`) is ignored entirely at a
+    position, same as if it weren't there at all - there's no crowd-sourced
+    English translation on file for it, so there's no way to tell whether it
+    actually matches the local title or not, and reporting it as a mismatch
+    on the strength of a comparison that can't mean anything would itself be
+    the false positive.
 
     Args:
         items: Media items from one audited library.
-        aired_positions: TheTVDB aired-order episodes for each series name,
-            keyed by (season_number, episode_number).
-        dvd_positions: TheTVDB DVD-order episodes for each series name, keyed
-            by (season_number, episode_number).
+        aired_positions: TheTVDB aired-order candidate episodes for each
+            series name, keyed by (season_number, episode_number).
+        dvd_positions: TheTVDB DVD-order candidate episodes for each series
+            name, keyed by (season_number, episode_number).
 
     Returns:
-        One finding per local episode whose title doesn't match TheTVDB's
-        aired-order title at its (season, episode) position, when DVD-order
-        data is also available there to compare against.
+        One finding per local episode whose title doesn't match any
+        English-titled candidate's TheTVDB title at its (season, episode)
+        position, in either ordering.
     """
     findings: list[AuditFinding] = []
 
@@ -853,31 +1143,31 @@ def audit_episode_ordering(
             continue
 
         position = (item.season_number, item.episode_number)
-        aired_episode = aired_positions.get(item.series_name, {}).get(position)
-        if aired_episode is None:
+        aired_candidates = _english_titled_candidates(
+            aired_positions.get(item.series_name, {}).get(position)
+        )
+        if not aired_candidates:
             continue
 
-        if normalized_title(item.title) == normalized_title(aired_episode.name):
+        if any(titles_match(item.title, candidate.name) for candidate in aired_candidates):
             continue
 
-        dvd_episode = dvd_positions.get(item.series_name, {}).get(position)
-        if dvd_episode is None:
+        dvd_candidates = _english_titled_candidates(
+            dvd_positions.get(item.series_name, {}).get(position)
+        )
+        if not dvd_candidates:
+            continue
+
+        if any(titles_match(item.title, candidate.name) for candidate in dvd_candidates):
             continue
 
         position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
-        if normalized_title(item.title) == normalized_title(dvd_episode.name):
-            message = (
-                f'{position_label} is titled "{item.title}", which matches TheTVDB\'s DVD-order '
-                f'title at that position rather than its aired-order title "{aired_episode.name}" '
-                "- this episode appears to be organized in DVD order."
-            )
-        else:
-            message = (
-                f'{position_label} is titled "{item.title}", which matches neither TheTVDB\'s '
-                f'aired-order title "{aired_episode.name}" nor its DVD-order title '
-                f'"{dvd_episode.name}" at that position. Verify the video content before trusting '
-                "Jellyfin's metadata."
-            )
+        message = (
+            f'{position_label} is titled "{item.title}", which matches neither TheTVDB\'s '
+            f"aired-order title {_format_candidate_titles(aired_candidates)} nor its "
+            f"DVD-order title {_format_candidate_titles(dvd_candidates)} at that position. "
+            "Verify the video content before trusting Jellyfin's metadata."
+        )
 
         findings.append(
             _finding(
@@ -890,6 +1180,30 @@ def audit_episode_ordering(
         )
 
     return tuple(findings)
+
+
+def _english_titled_candidates(
+    candidates: tuple[TvdbEpisode, ...] | None,
+) -> tuple[TvdbEpisode, ...]:
+    """Return only the candidates whose title isn't still in a non-English script.
+
+    See :data:`_NON_ENGLISH_SCRIPT_PATTERN`.
+    """
+    if not candidates:
+        return ()
+    return tuple(
+        candidate for candidate in candidates if not _NON_ENGLISH_SCRIPT_PATTERN.search(candidate.name)
+    )
+
+
+def _format_candidate_titles(candidates: Iterable[TvdbEpisode]) -> str:
+    """Return every distinct candidate title, quoted and joined for a finding message.
+
+    More than one candidate at a position (see :func:`audit_episode_ordering`)
+    means there's no single title to quote, so every distinct one is listed.
+    """
+    distinct_names = dict.fromkeys(candidate.name for candidate in candidates)
+    return " or ".join(f'"{name}"' for name in distinct_names)
 
 
 def _missing_sequence_numbers(numbers: Iterable[int]) -> tuple[int, ...]:
@@ -993,6 +1307,7 @@ __all__ = [
     "missing_tv_series_seasons",
     "missing_primary_image",
     "normalized_title",
+    "titles_match",
     "unknown_audio_codec",
     "unknown_video_codec",
 ]
