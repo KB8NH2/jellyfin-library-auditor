@@ -264,6 +264,18 @@ python transfer_subtitles.py --from-server main --from-item <id> --to-server bac
 
 It prints both items' names before writing, then re-reads the destination item's `MediaStreams` after the upload to show how many subtitle tracks it has. Skip the confirmation prompt with `--yes`. Transfers append to `subtitle_transfer.log`, mirroring `metadata_transfer.log`/`image_transfer.log`.
 
+## Picking the right TheTVDB series when a name matches more than one
+
+`apply_dvd_metadata.py`, `apply_episode_titles.py`, and `apply_episode_numbers.py` all look up a series by name in Jellyfin, then use whatever TheTVDB id Jellyfin has assigned to it - but that assigned id can itself be wrong, since TheTVDB sometimes has more than one series entry sharing the exact same name (e.g. a decades-old show and a from-scratch modern revival, each independently numbering their own "Season 1"). Jellyfin's automatic matching has no way to know which one actually explains a given local library, and a wrong match here wouldn't just go uncorrected - it would actively overwrite episode metadata, rename titles, or assign episode numbers using some *other* show's episode list.
+
+All three tools guard against this the same way: they search TheTVDB by name for up to 5 same-named candidates, add the Jellyfin-assigned id itself as a candidate if it isn't already among them, and pick whichever one's aired-order (season, episode) positions best overlap the series' full local episode set - across every season, not just the one being acted on, since a wrong id can still coincidentally explain a single season while failing everywhere else. When the winner isn't the id Jellyfin had assigned, that's logged before continuing, e.g.:
+
+```
+TheTVDB id '78804' assigned in Jellyfin for 'Doctor Who' doesn't best explain its local episodes across every season - using TheTVDB id '449991' instead.
+```
+
+When Jellyfin has no id assigned at all, this can still find and use a matching TheTVDB series purely by name and local episode overlap, instead of failing outright.
+
 ## Applying TheTVDB DVD-order metadata
 
 `--check-episode-order` only flags a season whose title disagrees between TheTVDB's aired order and DVD order at the same position - it doesn't fix it. `apply_dvd_metadata.py` fixes one series/season in place: for every episode currently in that season, it looks up TheTVDB's DVD-order episode at that same season/episode position and overwrites the episode's `Name` and `Overview` with the DVD-order values. Episode and season numbers are never touched, so this only corrects what an episode is called, not where it lives.

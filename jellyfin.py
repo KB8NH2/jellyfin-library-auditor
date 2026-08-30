@@ -751,6 +751,63 @@ class JellyfinClient:
             return (False, episode.episode_number, "")
         return (True, 0, str(episode.path).casefold() if episode.path else "")
 
+    def get_series_episode_positions(self, series_id: str) -> frozenset[tuple[int, int]]:
+        """Return every (season_number, episode_number) position with a local episode.
+
+        Unlike get_series_season_episodes/get_series_season_episodes_all,
+        this spans every season of the series in one call, since it exists
+        to answer a different question - not "what episodes does this one
+        season have" but "which TheTVDB series id actually explains this
+        series' local episodes overall". apply_episode_titles.py and
+        apply_dvd_metadata.py use it for exactly that: when more than one
+        TheTVDB series shares this series' name, whichever one's positions
+        overlap this set best is the one to trust, since Jellyfin's own
+        assigned TheTVDB id can itself be the wrong one.
+
+        An episode missing either its season or episode number is omitted -
+        it can't contribute a position to compare against TheTVDB with.
+
+        Args:
+            series_id: Jellyfin Series item identifier.
+
+        Returns:
+            Every distinct (season_number, episode_number) position found
+            locally for this series.
+        """
+        positions: set[tuple[int, int]] = set()
+        start_index = 0
+
+        while True:
+            payload = self._request(
+                ITEMS_ENDPOINT,
+                params={
+                    "ParentId": series_id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": EPISODE_ITEM_TYPE,
+                    "StartIndex": start_index,
+                    "Limit": self._page_size,
+                },
+            )
+            raw_items = self._get_required_list(payload, "Items", "episodes response")
+
+            for raw_item in raw_items:
+                season_number = self._resolved_season_number(raw_item)
+                episode_number = self._get_optional_int(raw_item, "IndexNumber")
+                if season_number is not None and episode_number is not None:
+                    positions.add((season_number, episode_number))
+
+            total_count = self._get_optional_int(payload, "TotalRecordCount")
+            start_index += len(raw_items)
+
+            if not raw_items:
+                break
+            if total_count is not None and start_index >= total_count:
+                break
+            if len(raw_items) < self._page_size:
+                break
+
+        return frozenset(positions)
+
     def get_item(self, item_id: str) -> dict[str, Any]:
         """Return the full Jellyfin metadata document for one item.
 
