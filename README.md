@@ -162,6 +162,8 @@ python auditor.py --server main --compare backup --transfer-metadata
 | `--check-episode-order` | Check each TV episode's title against TheTVDB's aired-order title at its season/episode position, flagging a mismatch only when DVD-order data is also available there and the local title matches neither ordering (a title matching DVD order instead of aired order isn't flagged); requires a TheTVDB `api_key` in the `[tvdb]` table of `servers.toml`. (Missing-season/-episode detection uses TheTVDB whenever `api_key` is set, with or without this flag.) Results are cached to `tvdb_cache.json` (see `TVDB_CACHE_TTL_DAYS`) so repeat runs skip TheTVDB entirely for series with a fresh cache entry |
 | `--refresh-tvdb-cache` | With `--check-episode-order`, ignore cached TheTVDB lookups and fetch fresh data for every series this run (still updates the cache) |
 | `--transfer-metadata` | Transfer metadata for every mismatched item from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing metadata between servers](#synchronizing-metadata-between-servers)) |
+| `--series-name NAME` | With `--transfer-metadata`, limit the transfer to episodes of this TV series (case-insensitive match against the base server's series name; movies never match). Without it, every mismatched item - TV or movie - is transferred, as before |
+| `--season-number N` | With `--series-name`, further limit the transfer to this one season number |
 | `--transfer-images` | Transfer cached images (Primary, Backdrop, Thumb) for every item with an artwork difference from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing images between servers](#synchronizing-images-between-servers)) |
 | `--transfer-subtitles` | Transfer the English subtitle track for every item with a subtitle difference from the base `--server` to the `--compare` server; requires `--compare` (see [Synchronizing subtitles between servers](#synchronizing-subtitles-between-servers)) |
 | `--dry-run` | With `--transfer-metadata`/`--transfer-images`/`--transfer-subtitles`, preview planned transfers without writing anything |
@@ -196,6 +198,14 @@ The comparison report gains a "Transfer Results" table (Libraries page) whenever
 Both the one-off command and the bulk flag append a record of every transfer to `metadata_transfer.log` in the working directory, so a scheduled/unattended run leaves an audit trail even if nobody was watching the console.
 
 Add `--limit N` to only attempt the first N items found - handy for quickly testing a code change against a large library without waiting for a full run.
+
+Add `--series-name NAME` to limit the batch to one TV series (matched case-insensitively against the base server's series name; movies are never included when this is used), and optionally `--season-number N` (requires `--series-name`) to further limit it to one season:
+
+```powershell
+python auditor.py --server main --compare backup --transfer-metadata --series-name "Show Name" --season-number 2
+```
+
+Without `--series-name`, every mismatched item - TV or movie - is transferred, exactly as before.
 
 **Given this writes to a live Jellyfin server, run `--dry-run` first and review the diff before trusting it on a real library, especially unattended.**
 
@@ -308,7 +318,17 @@ python apply_episode_titles.py --series-name "Show Name" --season-number 2
 python apply_episode_titles.py --series-name "Show Name" --season-number 2 --dvd-order
 ```
 
-It takes the same `--server`/`--library`/`--yes`/`--debug` options as `apply_dvd_metadata.py`, uses the same `servers.toml` and `tvdb_cache.json`, and follows the same plan-then-confirm-then-apply flow: it prints every episode's planned outcome - the old and new title, "already matches aired-order title" (or DVD-order) when there's nothing to change, or "no TheTVDB aired-order match at this position" when TheTVDB has nothing there - then asks for one confirmation covering the whole season (skip it with `--yes`). Before an actual rename, the current `Name` is backed up into `OriginalTitle`, the same convention `apply_dvd_metadata.py` uses (and `apply_dvd_metadata.py --aired`'s `OriginalTitle`-preferring restore can still recover it later, the same as after a DVD-order apply). The renamed `Name` field is locked the same way the other apply tools lock what they change, and each write is re-read and reported as "update did not take effect" instead of "renamed" if Jellyfin still shows the old value - the same safeguards `apply_dvd_metadata.py` and `apply_episode_numbers.py` use. Attempts append to `episode_titles_apply.log`, mirroring `dvd_metadata_apply.log`.
+It takes the same `--server`/`--library`/`--yes`/`--debug` options as `apply_dvd_metadata.py`, uses the same `servers.toml` and `tvdb_cache.json`, and follows the same plan-then-confirm-then-apply flow: it prints every episode's planned outcome - the old and new title, "already matches aired-order title" (or DVD-order) when there's nothing to change, or "no TheTVDB aired-order match at this position" when TheTVDB has nothing there - then asks for one confirmation covering the whole season (skip it with `--yes`). Before an actual rename, the current `Name` is backed up into `OriginalTitle`, the same convention `apply_dvd_metadata.py` uses (and `--restore`, below, can recover it later). The renamed `Name` field is locked the same way the other apply tools lock what they change, and each write is re-read and reported as "update did not take effect" instead of "renamed" if Jellyfin still shows the old value - the same safeguards `apply_dvd_metadata.py` and `apply_episode_numbers.py` use. Attempts append to `episode_titles_apply.log`, mirroring `dvd_metadata_apply.log`.
+
+### Undoing a rename
+
+Add `--restore` to reverse a previous rename: it sets each episode's `Name` back to its own `OriginalTitle` backup instead of renaming toward TheTVDB.
+
+```powershell
+python apply_episode_titles.py --series-name "Show Name" --season-number 2 --restore
+```
+
+This is a purely local operation - it needs no TheTVDB `api_key` and never contacts TheTVDB at all, unlike every other mode of this tool. An episode with no `OriginalTitle` backup (never renamed by this tool) is left alone and reported as "no OriginalTitle backup to restore from". `--restore` cannot be combined with `--dvd-order`, since it doesn't consult TheTVDB in the first place.
 
 ## Filling in missing episode numbers
 
@@ -353,7 +373,7 @@ By default, reports are written under `audit_results\`.
 - `transfer_images.py` - standalone CLI to transfer one item's cached image between two servers; also provides the plan/apply functions the bulk `--transfer-images` run uses
 - `transfer_subtitles.py` - standalone CLI to transfer one item's English subtitle track between two servers, entirely through the Jellyfin API; also provides the plan/apply functions the bulk `--transfer-subtitles` run uses
 - `apply_dvd_metadata.py` - standalone CLI to overwrite one series/season's episode Name/Overview with TheTVDB's DVD-order values
-- `apply_episode_titles.py` - standalone CLI to rename one series/season's episode titles to TheTVDB's aired- (or DVD-, with `--dvd-order`) order titles, skipping episodes that already match under `audit.titles_match()`'s lenient comparison
+- `apply_episode_titles.py` - standalone CLI to rename one series/season's episode titles to TheTVDB's aired- (or DVD-, with `--dvd-order`) order titles, skipping episodes that already match under `audit.titles_match()`'s lenient comparison; `--restore` reverses a rename locally from each episode's own `OriginalTitle` backup, without contacting TheTVDB
 - `apply_episode_numbers.py` - standalone CLI to fill in missing episode numbers for one series/season from TheTVDB's aired order, with interactive fuzzy title matching for episodes with no exact title match
 - `config.py` - application and server configuration
 - `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use, plus series/episode lookups by name for `apply_dvd_metadata.py`/`apply_episode_titles.py`/`apply_episode_numbers.py`)

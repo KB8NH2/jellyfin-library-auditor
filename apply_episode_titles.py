@@ -19,6 +19,11 @@ exact spelling for no practical benefit. Before an actual rename, the
 episode's current Name is backed up into OriginalTitle, the same convention
 apply_dvd_metadata.py uses, so the pre-rename title isn't lost.
 
+--restore reverses a previous rename: it sets each episode's Name back to
+its own OriginalTitle backup, purely locally - it needs no TheTVDB api_key
+and never contacts TheTVDB. An episode with no OriginalTitle backup (never
+renamed by this tool) is left alone.
+
 Jellyfin's own assigned TheTVDB id for the series isn't trusted blindly:
 when TheTVDB has more than one series entry sharing the exact same name
 (e.g. a decades-old show and a from-scratch modern revival, each
@@ -157,6 +162,36 @@ def build_title_merged_item_dto(
     merged_dto["Name"] = target_name
 
     _lock_changed_fields(destination_dto, merged_dto, ["OriginalTitle", "Name"])
+    return merged_dto
+
+
+def build_title_restore_merged_item_dto(
+    destination_dto: Mapping[str, Any],
+    original_title: str,
+) -> dict[str, Any]:
+    """Return the destination episode document with its Name restored from OriginalTitle.
+
+    Sets Name back to the episode's own OriginalTitle - the backup
+    build_title_merged_item_dto writes there before an earlier rename -
+    undoing that rename. OriginalTitle itself is left untouched: there is
+    nothing further to preserve once Name is already back to what it held
+    before.
+
+    Args:
+        destination_dto: Full episode item document read from Jellyfin.
+        original_title: The episode's own OriginalTitle backup value.
+
+    Returns:
+        A new item document ready to send back to the server.
+    """
+    merged_dto = {
+        field: value
+        for field, value in destination_dto.items()
+        if field not in NON_EDITABLE_ITEM_FIELDS
+    }
+    merged_dto["Name"] = original_title
+
+    _lock_changed_fields(destination_dto, merged_dto, ["Name"])
     return merged_dto
 
 
@@ -312,6 +347,73 @@ def plan_episode_title_update(
     )
 
 
+def plan_episode_title_restore(
+    client: JellyfinClient,
+    episode: EpisodeSummary,
+    season_number: int,
+) -> EpisodeTitlePlan:
+    """Compute one episode's title restore from its own OriginalTitle backup.
+
+    Unlike plan_episode_title_update(), this needs no TheTVDB data at all -
+    OriginalTitle is this tool's own backup, written the last time this
+    episode's title was changed by a (non-restore) run, so restoring from it
+    is a purely local operation.
+
+    Args:
+        client: Client for the server the episode lives on.
+        episode: The Jellyfin episode to plan a restore for.
+        season_number: The season this episode belongs to.
+
+    Returns:
+        A plan describing what would change and whether it's safe to apply.
+        ``no_target_match`` is set when the episode has no OriginalTitle
+        backup to restore from.
+    """
+    position = (season_number, episode.episode_number)
+    destination_dto = client.get_item(episode.id)
+    current_name = str(destination_dto.get("Name", episode.name))
+    original_title = destination_dto.get("OriginalTitle") or None
+
+    if not original_title:
+        return EpisodeTitlePlan(
+            episode_id=episode.id,
+            position=position,
+            current_name=current_name,
+            target_name=None,
+            merged_dto=None,
+            changes=(),
+            rejected_reason=None,
+            no_target_match=True,
+            already_matches=False,
+        )
+
+    if original_title == current_name:
+        return EpisodeTitlePlan(
+            episode_id=episode.id,
+            position=position,
+            current_name=current_name,
+            target_name=original_title,
+            merged_dto=None,
+            changes=(),
+            rejected_reason=None,
+            no_target_match=False,
+            already_matches=True,
+        )
+
+    merged_dto = build_title_restore_merged_item_dto(destination_dto, original_title)
+    return EpisodeTitlePlan(
+        episode_id=episode.id,
+        position=position,
+        current_name=current_name,
+        target_name=original_title,
+        merged_dto=merged_dto,
+        changes=_changed_fields(destination_dto, merged_dto),
+        rejected_reason=_rejected_reason(merged_dto),
+        no_target_match=False,
+        already_matches=False,
+    )
+
+
 def apply_episode_title_plan(client: JellyfinClient, plan: EpisodeTitlePlan) -> None:
     """Write a previously computed, actionable plan to the server.
 
@@ -353,17 +455,23 @@ def _format_position(position: tuple[int, int]) -> str:
     return f"S{season_number:02d}E{episode_number:02d}"
 
 
-def _describe_plan(plan: EpisodeTitlePlan, *, order_label: str) -> None:
+def _describe_plan(plan: EpisodeTitlePlan, *, order_label: str, restore: bool = False) -> None:
     """Log one episode's planned outcome."""
     label = _format_position(plan.position)
     if plan.no_target_match:
-        _log_line(f"  {label}: no TheTVDB {order_label} match at this position - skipped.")
+        if restore:
+            _log_line(f"  {label}: no OriginalTitle backup to restore from - skipped.")
+        else:
+            _log_line(f"  {label}: no TheTVDB {order_label} match at this position - skipped.")
         return
     if plan.is_rejected:
         _log_line(f"  {label}: rejected: {plan.rejected_reason}", error=True)
         return
     if plan.already_matches:
-        _log_line(f"  {label}: already matches {order_label} title {plan.target_name!r}.")
+        if restore:
+            _log_line(f"  {label}: already matches its backed-up title {plan.target_name!r}.")
+        else:
+            _log_line(f"  {label}: already matches {order_label} title {plan.target_name!r}.")
         return
     for field, old_value, new_value in plan.changes:
         _log_line(f"  {label} {field}: {old_value!r} -> {new_value!r}")
@@ -480,8 +588,10 @@ def run_apply_episode_titles(
     library_name: str | None,
     assume_yes: bool,
     use_dvd_order: bool = False,
+    restore: bool = False,
 ) -> int:
-    """Rename one series/season's episode titles to TheTVDB's aired/DVD order.
+    """Rename one series/season's episode titles to TheTVDB's aired/DVD order,
+    or restore them from each episode's own OriginalTitle backup.
 
     Args:
         series_name: Series display name to match in Jellyfin.
@@ -492,7 +602,11 @@ def run_apply_episode_titles(
             ``None`` to search every TV library.
         assume_yes: Skip the interactive confirmation prompt when ``True``.
         use_dvd_order: Rename toward TheTVDB's DVD order instead of aired
-            order (the default).
+            order (the default). Ignored when ``restore`` is ``True``.
+        restore: Restore each episode's Name from its own OriginalTitle
+            backup instead of renaming toward TheTVDB - a purely local
+            operation that needs no TheTVDB api_key and never contacts
+            TheTVDB. An episode with no OriginalTitle backup is left alone.
 
     Returns:
         A process exit code: ``0`` on success (including "nothing to do"),
@@ -511,7 +625,7 @@ def run_apply_episode_titles(
         _log_line(str(error), error=True)
         return 2
 
-    if not app_config.tvdb.api_key:
+    if not restore and not app_config.tvdb.api_key:
         _log_line(
             "apply_episode_titles requires api_key to be set in the [tvdb] "
             "table of servers.toml.",
@@ -521,6 +635,8 @@ def run_apply_episode_titles(
 
     order_label = "DVD-order" if use_dvd_order else "aired-order"
     season_type = "dvd" if use_dvd_order else "official"
+    verb = "restore" if restore else "rename"
+    past_participle = "restored" if restore else "renamed"
 
     try:
         with JellyfinClient(server) as client:
@@ -559,65 +675,83 @@ def run_apply_episode_titles(
                 )
                 return 0
 
-            with TvdbClient(
-                app_config.tvdb.api_key,
-                cache=TvdbEpisodeCache(ttl=timedelta(days=app_config.tvdb.cache_ttl_days)),
-            ) as tvdb_client:
-                LOGGER.debug(
-                    "Resolving the TheTVDB series id that best explains %r's local episodes...",
-                    series_name,
-                )
-                tvdb_id = resolve_series_tvdb_id(
-                    client, tvdb_client, series_name, match.series_id, match.tvdb_id
-                )
-                if tvdb_id is None:
-                    _log_line(
-                        f"{series_name!r} in library {match.library_name!r} has no "
-                        "TheTVDB provider id, and no matching TheTVDB series could be "
-                        "found by name.",
-                        error=True,
+            if restore:
+                plans = []
+                for episode in episodes:
+                    LOGGER.debug(
+                        "Checking %s %r (item %s)...",
+                        _format_position((season_number, episode.episode_number)),
+                        episode.name,
+                        episode.id,
                     )
-                    return 1
-                if tvdb_id != match.tvdb_id:
-                    _log_line(
-                        f"TheTVDB id {match.tvdb_id!r} assigned in Jellyfin for "
-                        f"{series_name!r} doesn't best explain its local episodes across "
-                        f"every season - using TheTVDB id {tvdb_id!r} instead."
+                    plans.append(plan_episode_title_restore(client, episode, season_number))
+                plans = tuple(plans)
+            else:
+                with TvdbClient(
+                    app_config.tvdb.api_key,
+                    cache=TvdbEpisodeCache(ttl=timedelta(days=app_config.tvdb.cache_ttl_days)),
+                ) as tvdb_client:
+                    LOGGER.debug(
+                        "Resolving the TheTVDB series id that best explains %r's local episodes...",
+                        series_name,
+                    )
+                    tvdb_id = resolve_series_tvdb_id(
+                        client, tvdb_client, series_name, match.series_id, match.tvdb_id
+                    )
+                    if tvdb_id is None:
+                        _log_line(
+                            f"{series_name!r} in library {match.library_name!r} has no "
+                            "TheTVDB provider id, and no matching TheTVDB series could be "
+                            "found by name.",
+                            error=True,
+                        )
+                        return 1
+                    if tvdb_id != match.tvdb_id:
+                        _log_line(
+                            f"TheTVDB id {match.tvdb_id!r} assigned in Jellyfin for "
+                            f"{series_name!r} doesn't best explain its local episodes across "
+                            f"every season - using TheTVDB id {tvdb_id!r} instead."
+                        )
+
+                    LOGGER.debug(
+                        "Fetching TheTVDB %s-order episodes for series id %s...",
+                        season_type,
+                        tvdb_id,
+                    )
+                    target_episodes = tvdb_client.get_series_episodes(
+                        tvdb_id, season_type, series_name=series_name
                     )
 
-                LOGGER.debug(
-                    "Fetching TheTVDB %s-order episodes for series id %s...",
-                    season_type,
-                    tvdb_id,
-                )
-                target_episodes = tvdb_client.get_series_episodes(
-                    tvdb_id, season_type, series_name=series_name
-                )
+                target_positions = {
+                    (target_episode.season_number, target_episode.episode_number): target_episode
+                    for target_episode in target_episodes
+                }
 
-            target_positions = {
-                (target_episode.season_number, target_episode.episode_number): target_episode
-                for target_episode in target_episodes
-            }
+                plans = []
+                for episode in episodes:
+                    LOGGER.debug(
+                        "Checking %s %r (item %s)...",
+                        _format_position((season_number, episode.episode_number)),
+                        episode.name,
+                        episode.id,
+                    )
+                    plans.append(
+                        plan_episode_title_update(client, episode, season_number, target_positions)
+                    )
+                plans = tuple(plans)
 
-            plans = []
-            for episode in episodes:
-                LOGGER.debug(
-                    "Checking %s %r (item %s)...",
-                    _format_position((season_number, episode.episode_number)),
-                    episode.name,
-                    episode.id,
+            if restore:
+                _log_line(
+                    f"Episode titles restore: {series_name!r} "
+                    f"season {season_number} on {server.name}"
                 )
-                plans.append(
-                    plan_episode_title_update(client, episode, season_number, target_positions)
+            else:
+                _log_line(
+                    f"Episode titles rename ({order_label}): {series_name!r} "
+                    f"season {season_number} on {server.name}"
                 )
-            plans = tuple(plans)
-
-            _log_line(
-                f"Episode titles rename ({order_label}): {series_name!r} "
-                f"season {season_number} on {server.name}"
-            )
             for plan in plans:
-                _describe_plan(plan, order_label=order_label)
+                _describe_plan(plan, order_label=order_label, restore=restore)
 
             actionable_plans = tuple(plan for plan in plans if plan.is_actionable)
             rejected_plans = tuple(plan for plan in plans if plan.is_rejected)
@@ -627,14 +761,17 @@ def run_apply_episode_titles(
                 return 1 if rejected_plans else 0
 
             if not assume_yes:
-                response = (
-                    input(
+                if restore:
+                    prompt = (
+                        f"Restore {len(actionable_plans)} episode(s) to their "
+                        "backed-up title? [y/N] "
+                    )
+                else:
+                    prompt = (
                         f"Rename {len(actionable_plans)} episode(s) to their "
                         f"{order_label} title? [y/N] "
                     )
-                    .strip()
-                    .lower()
-                )
+                response = input(prompt).strip().lower()
                 if response not in {"y", "yes"}:
                     _log_line("Aborted.")
                     return 1
@@ -663,15 +800,16 @@ def run_apply_episode_titles(
                         error=True,
                     )
                 else:
-                    _log_line(f"  {_format_position(plan.position)}: renamed.")
+                    _log_line(f"  {_format_position(plan.position)}: {past_participle}.")
 
             already_matching_count = sum(1 for plan in plans if plan.already_matches)
             no_match_count = sum(1 for plan in plans if plan.no_target_match)
+            no_match_label = "no OriginalTitle backup" if restore else f"no {order_label} match"
             _log_line(
-                f"Episode titles rename complete: {len(actionable_plans) - failed} renamed, "
+                f"Episode titles {verb} complete: {len(actionable_plans) - failed} {past_participle}, "
                 f"{failed} failed, {len(rejected_plans)} rejected, "
                 f"{already_matching_count} already matching, "
-                f"{no_match_count} with no {order_label} match."
+                f"{no_match_count} with {no_match_label}."
             )
 
             return 1 if failed or rejected_plans else 0
@@ -693,7 +831,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "articles, accents, US/UK spelling, and more are all treated as "
             "equivalent), not an exact string match. Episode/season numbers and "
             "Overview are never changed. Before an actual rename, the episode's "
-            "current Name is backed up into OriginalTitle."
+            "current Name is backed up into OriginalTitle. --restore reverses "
+            "this: it sets each episode's Name back to its own OriginalTitle "
+            "backup, purely locally - it needs no TheTVDB api_key and never "
+            "contacts TheTVDB."
         ),
         exit_on_error=False,
     )
@@ -727,6 +868,17 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--dvd-order",
         action="store_true",
         help="Rename toward TheTVDB's DVD order instead of aired order (the default).",
+    )
+    parser.add_argument(
+        "--restore",
+        action="store_true",
+        help=(
+            "Restore each episode's Name from its own OriginalTitle backup - "
+            "the title backed up there before an earlier rename - instead of "
+            "renaming toward TheTVDB. Needs no TheTVDB api_key and never "
+            "contacts TheTVDB. An episode with no OriginalTitle backup is left "
+            "alone. Cannot be combined with --dvd-order."
+        ),
     )
     parser.add_argument(
         "--yes",
@@ -763,6 +915,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOGGER.error("--season-number must not be negative.")
         return 2
 
+    if args.restore and args.dvd_order:
+        LOGGER.error("--dvd-order cannot be used with --restore.")
+        return 2
+
     return run_apply_episode_titles(
         series_name=args.series_name,
         season_number=args.season_number,
@@ -770,6 +926,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         library_name=args.library,
         assume_yes=args.yes,
         use_dvd_order=args.dvd_order,
+        restore=args.restore,
     )
 
 

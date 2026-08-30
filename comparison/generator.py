@@ -50,7 +50,17 @@ class MatchedPair:
 
 @dataclass(frozen=True, slots=True)
 class MetadataTransferTarget:
-    """One item pair whose metadata can be transferred from left to right."""
+    """One item pair whose metadata can be transferred from left to right.
+
+    Attributes:
+        series_name: The left item's series name, or ``None`` for a movie or
+            an episode with no series name - lets a caller filter bulk
+            transfer down to one TV series (e.g. auditor.py's
+            ``--series-name``).
+        season_number: The left item's season number, or ``None`` for a
+            movie - lets a caller further filter down to one season (e.g.
+            auditor.py's ``--season-number``).
+    """
 
     library: str
     display_name: str
@@ -58,6 +68,8 @@ class MetadataTransferTarget:
     left_item_id: str
     right_server_key: str
     right_item_id: str
+    series_name: str | None = None
+    season_number: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,20 +180,26 @@ def mismatched_metadata_transfer_targets(
         One target per mismatched-metadata item pair, in the same order the
         report displays them.
     """
+    left_server_key = left_result.server_key
+    right_server_key = right_result.server_key
+    if not left_server_key or not right_server_key:
+        return ()
+
     comparison = _build_comparison(left_result, right_result)
     targets: list[MetadataTransferTarget] = []
-    for entry in comparison["mismatched_metadata"]:
-        library_name, filename, left_item_id, right_item_id, left_server_key, right_server_key = entry[:6]
-        if not left_server_key or not right_server_key:
+    for pair in comparison["matched_pairs"]:
+        if _mismatched_metadata_row(pair, left_server_key, right_server_key) is None:
             continue
         targets.append(
             MetadataTransferTarget(
-                library=library_name,
-                display_name=filename,
+                library=pair.library,
+                display_name=pair.left.path.stem,
                 left_server_key=left_server_key,
-                left_item_id=left_item_id,
+                left_item_id=pair.left.id,
                 right_server_key=right_server_key,
-                right_item_id=right_item_id,
+                right_item_id=pair.right.id,
+                series_name=pair.left.series_name if pair.left.is_episode else None,
+                season_number=pair.left.season_number if pair.left.is_episode else None,
             )
         )
     return tuple(targets)
@@ -528,6 +546,7 @@ def _build_comparison(
             mismatched_metadata.append(mismatch_row)
 
     return {
+        "matched_pairs": tuple(matched_pairs),
         "missing_left_libraries": missing_left_libraries,
         "missing_right_libraries": missing_right_libraries,
         "missing_left_media": tuple(missing_left_media),

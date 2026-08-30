@@ -118,6 +118,8 @@ class AuditRunOptions:
     transfer_metadata: bool
     transfer_metadata_dry_run: bool
     transfer_metadata_yes: bool
+    transfer_metadata_series_name: str | None
+    transfer_metadata_season_number: int | None
     transfer_images: bool
     transfer_subtitles: bool
     transfer_limit: int | None
@@ -380,6 +382,12 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         raise CommandLineUsageError(
             "--refresh-tvdb-cache requires --check-episode-order."
         )
+    if args.series_name is not None and not args.transfer_metadata:
+        raise CommandLineUsageError("--series-name requires --transfer-metadata.")
+    if args.season_number is not None and args.series_name is None:
+        raise CommandLineUsageError("--season-number requires --series-name.")
+    if args.season_number is not None and args.season_number < 0:
+        raise CommandLineUsageError("--season-number must not be negative.")
 
     report_flags_selected = args.csv or args.html
     return AuditRunOptions(
@@ -396,6 +404,8 @@ def parse_args(argv: Sequence[str] | None = None) -> AuditRunOptions:
         transfer_metadata=bool(args.transfer_metadata),
         transfer_metadata_dry_run=bool(args.dry_run),
         transfer_metadata_yes=bool(args.yes),
+        transfer_metadata_series_name=_normalize_optional_series_name(args.series_name),
+        transfer_metadata_season_number=args.season_number,
         transfer_images=bool(args.transfer_images),
         transfer_subtitles=bool(args.transfer_subtitles),
         transfer_limit=args.limit,
@@ -517,6 +527,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 compare_result,
                 dry_run=options.transfer_metadata_dry_run,
                 assume_yes=options.transfer_metadata_yes,
+                series_name=options.transfer_metadata_series_name,
+                season_number=options.transfer_metadata_season_number,
                 limit=options.transfer_limit,
             )
         image_transfer_exit_code = 0
@@ -1028,6 +1040,22 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--series-name",
+        metavar="NAME",
+        help=(
+            "With --transfer-metadata, limit the transfer to episodes of this TV "
+            "series (matched case-insensitively against the base --server's series "
+            "name). Without it, every mismatched item - TV or movie - is "
+            "transferred, same as before."
+        ),
+    )
+    parser.add_argument(
+        "--season-number",
+        type=int,
+        metavar="N",
+        help="With --series-name, further limit the transfer to this season number only.",
+    )
+    parser.add_argument(
         "--transfer-images",
         action="store_true",
         help=(
@@ -1142,6 +1170,16 @@ def _normalize_optional_compare_server_key(server_key: str | None) -> str | None
     return normalized_key
 
 
+def _normalize_optional_series_name(series_name: str | None) -> str | None:
+    """Normalize an optional --series-name filter value."""
+    if series_name is None:
+        return None
+    normalized_name = series_name.strip()
+    if not normalized_name:
+        raise CommandLineUsageError("--series-name requires a non-empty series name.")
+    return normalized_name
+
+
 def _select_server(config, server_key: str | None) -> ServerConfig:
     """Return the configured server selected for this audit run."""
     if server_key is None:
@@ -1248,6 +1286,8 @@ def _run_bulk_metadata_transfer(
     *,
     dry_run: bool,
     assume_yes: bool,
+    series_name: str | None = None,
+    season_number: int | None = None,
     limit: int | None = None,
 ) -> tuple[int, tuple[MetadataTransferResult, ...]]:
     """Transfer metadata for every mismatched-metadata item pair between two servers.
@@ -1262,6 +1302,12 @@ def _run_bulk_metadata_transfer(
         right_result: Completed audit results for the destination server.
         dry_run: Preview planned transfers without writing anything.
         assume_yes: Skip the batch confirmation prompt.
+        series_name: When given, only transfer items belonging to this TV
+            series (matched case-insensitively against the source item's
+            series name; movies never match). Without it, every mismatched
+            item - TV or movie - is transferred, as before.
+        season_number: When given (requires ``series_name``), further limit
+            to this one season number.
         limit: When given, only attempt the first N items found, regardless
             of outcome - for quickly testing bulk-mode changes.
 
@@ -1272,6 +1318,14 @@ def _run_bulk_metadata_transfer(
     """
     logger = transfer_metadata.LOGGER
     targets = mismatched_metadata_transfer_targets(left_result, right_result)
+    if series_name is not None:
+        targets = tuple(
+            target
+            for target in targets
+            if target.series_name is not None and target.series_name.casefold() == series_name.casefold()
+        )
+    if season_number is not None:
+        targets = tuple(target for target in targets if target.season_number == season_number)
     if limit is not None:
         targets = targets[:limit]
     left_label = left_result.server_name or left_result.server_key or "left"
