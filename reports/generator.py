@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from config import get_config
 from media import get_display_episode_number
 from media import get_display_path
+from models import MediaItem
 from output_layout import audit_results_root
 from output_layout import comparison_output_dir
 from output_layout import server_csv_filename
@@ -228,6 +229,26 @@ def _write_check_pages(
         )
 
 
+def _csv_episode_number(item: MediaItem) -> str:
+    """Return an item's Episode column value, guarded against Excel misreading it as a date.
+
+    A combined-episode range like "19-20" is exactly the shape Excel's
+    automatic type detection likes to reinterpret as a date (e.g. "5-6"
+    commonly becomes "Jun-05") when a CSV is opened by double-clicking it -
+    the underlying cell value on disk is unaffected, but the column
+    displays wrong until the user manually reformats it, and a re-save
+    from Excel would bake the wrong value in for good. A leading apostrophe
+    is the standard fix: Excel's plain-text CSV import treats it as "force
+    this cell to text" and doesn't display the apostrophe itself, while it
+    has no such meaning to a plain CSV reader (e.g. compare_csv_files.py
+    strips it back off on read - see its _without_excel_text_guard). A
+    single episode number (no hyphen) is never ambiguous this way, so it's
+    left as plain digits.
+    """
+    display_value = get_display_episode_number(item)
+    return f"'{display_value}" if "-" in display_value else display_value
+
+
 def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     """Return one CSV row per audited media item."""
     checks_by_item = _check_names_by_item(result.findings)
@@ -241,7 +262,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 item.series_name if item.is_episode and item.series_name else "",
                 item.title,
                 str(item.season_number) if item.is_episode and item.season_number is not None else "",
-                get_display_episode_number(item) if item.is_episode else "",
+                _csv_episode_number(item) if item.is_episode else "",
                 _yes_no("missing_english_subtitles" in check_names),
                 _yes_no("missing_primary_image" in check_names),
                 _yes_no(bool(MISMATCHED_FILENAME_TITLE_CHECKS & check_names)),

@@ -348,7 +348,8 @@ def expected_episode_numbers_from_filename(item: MediaItem) -> tuple[int, ...] |
     Returns:
         The inclusive range of episode numbers the filename's marker
         implies, or ``None`` when the filename has no recognizable
-        ``SxxExx`` marker at the item's known season/episode position.
+        ``SxxExx`` marker that this item's own season/episode number is
+        actually part of.
     """
     if not item.is_episode or item.season_number is None or item.episode_number is None:
         return None
@@ -365,31 +366,48 @@ def _expected_episode_numbers_from_text(
 ) -> tuple[int, ...] | None:
     """Return the inclusive episode-number range a filename-style marker implies.
 
+    Doesn't assume ``episode_number`` is the first (leftmost) number in the
+    marker - Jellyfin's own ``IndexNumber`` for a multi-episode file isn't
+    always the marker's first number (e.g. a file named
+    ``S01E37-E38 - Title.mkv`` can end up with an item whose IndexNumber is
+    38, not 37, depending on how it was matched to metadata). This instead
+    finds the marker generically for the given season, reads off every
+    number it lists, and only then checks whether ``episode_number`` is one
+    of them - so a query for either 37 or 38 against that same marker both
+    resolve to the same (37, 38) range.
+
     Args:
         text: Filename-like text to search, e.g. a filename stem.
         season_number: The item's known season number.
-        episode_number: The item's known starting episode number.
+        episode_number: One of the item's known episode numbers - not
+            necessarily the marker's first one.
 
     Returns:
-        The inclusive range of episode numbers the marker implies, or
-        ``None`` when the text has no recognizable ``SxxExx`` marker at
-        that position.
+        The inclusive range of episode numbers implied by whichever marker
+        in the text actually lists ``episode_number``, or ``None`` when no
+        such marker is found.
     """
     marker_pattern = re.compile(
-        rf"(?i)s0*{season_number}e0*{episode_number}(?:-?e0*(\d+))*(?!\d)"
+        rf"(?i)s0*{season_number}e0*(\d+)((?:-?e0*\d+)*)(?!\d)"
     )
-    marker_match = marker_pattern.search(text)
-    if marker_match is None:
-        return None
+    trailing_number_pattern = re.compile(r"(?i)e0*(\d+)")
 
-    last_episode_text = marker_match.group(1)
-    if last_episode_text is None:
-        return (episode_number,)
+    for marker_match in marker_pattern.finditer(text):
+        first_episode_number = int(marker_match.group(1))
+        trailing_numbers = [
+            int(trailing_match.group(1))
+            for trailing_match in trailing_number_pattern.finditer(marker_match.group(2))
+        ]
+        marker_numbers = [first_episode_number, *trailing_numbers]
+        if episode_number not in marker_numbers:
+            continue
 
-    last_episode_number = int(last_episode_text)
-    if last_episode_number < episode_number:
-        return (episode_number,)
-    return tuple(range(episode_number, last_episode_number + 1))
+        last_episode_number = marker_numbers[-1]
+        if last_episode_number < first_episode_number:
+            return (episode_number,)
+        return tuple(range(first_episode_number, last_episode_number + 1))
+
+    return None
 
 
 def get_display_episode_number(item: MediaItem) -> str:

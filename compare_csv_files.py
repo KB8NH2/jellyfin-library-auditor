@@ -30,7 +30,8 @@ from collections import defaultdict
 from pathlib import Path
 
 PATH_COLUMN_NAME = "Path"
-IDENTITY_COLUMNS = frozenset({"Library", "Series", "Title", "Season", "Episode"})
+EPISODE_COLUMN_NAME = "Episode"
+IDENTITY_COLUMNS = frozenset({"Library", "Series", "Title", "Season", EPISODE_COLUMN_NAME})
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -53,7 +54,28 @@ def read_rows(csv_path: Path) -> tuple[tuple[str, ...], tuple[tuple[str, ...], .
         rows = [tuple(row) for row in reader]
     if not rows:
         raise SystemExit(f"{csv_path} is empty")
-    return rows[0], tuple(rows[1:])
+
+    header, data_rows = rows[0], rows[1:]
+    if EPISODE_COLUMN_NAME in header:
+        episode_index = header.index(EPISODE_COLUMN_NAME)
+        data_rows = [_without_excel_text_guard(row, episode_index) for row in data_rows]
+    return header, tuple(data_rows)
+
+
+def _without_excel_text_guard(row: tuple[str, ...], column_index: int) -> tuple[str, ...]:
+    """Return ``row`` with a leading Excel text-guard apostrophe removed from one column.
+
+    The audit CSV writer (reports/generator.py's _csv_episode_number)
+    prefixes a hyphenated Episode range like "19-20" with a leading
+    apostrophe so Excel's automatic type detection doesn't reinterpret it
+    as a date - that apostrophe means nothing to this tool's own plain CSV
+    reading, so it's stripped back off here before the value is compared or
+    written to this tool's own output.
+    """
+    value = row[column_index]
+    if not value.startswith("'"):
+        return row
+    return row[:column_index] + (value[1:],) + row[column_index + 1 :]
 
 
 def without_column(row: tuple[str, ...], index: int) -> tuple[str, ...]:
@@ -83,6 +105,20 @@ def yn(value: str) -> str:
     if normalized in ("no", "n", "false", "0"):
         return "n"
     return value
+
+
+def _with_excel_text_guard(value: str) -> str:
+    """Return ``value`` prefixed with a leading apostrophe when it's a hyphenated range.
+
+    Mirrors reports/generator.py's _csv_episode_number: a value like
+    "19-20" is exactly the shape Excel's automatic type detection likes to
+    reinterpret as a date when this diff CSV is opened by double-clicking
+    it. read_rows() already strips this same guard off the two input
+    files' Episode columns, so it needs to be re-applied here to whatever
+    ends up in the *output* Episode column. A plain single number is never
+    ambiguous this way and is left alone.
+    """
+    return f"'{value}" if "-" in value else value
 
 
 def build_header(header: tuple[str, ...]) -> tuple[str, ...]:
@@ -116,6 +152,8 @@ def combine_row(
                 and row_a[index].casefold() != row_b[index].casefold()
             ):
                 combined.append(f"{row_a[index]}|{row_b[index]}")
+            elif column == EPISODE_COLUMN_NAME:
+                combined.append(_with_excel_text_guard(identity_source[index]))
             else:
                 combined.append(identity_source[index])
         else:
