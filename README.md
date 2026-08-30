@@ -387,7 +387,7 @@ By default, reports are written under `audit_results\`.
 - `output_layout.py` - shared output directory and site-index layout helpers
 - `report_filters.py` - shared category/severity filtering for report output
 - `report_theme.py` - shared dark/light theme toggle markup and script
-- `tests\` - unit tests
+- `tests\` - unit tests, one `test_<module>.py` file per corresponding project module (e.g. `test_audit_rules.py` for `audit.py`, `test_apply_episode_titles.py` for `apply_episode_titles.py`), plus `helpers.py` for fixture builders (`_make_item`, `_make_library`, etc.) shared across them
 
 ## Development
 
