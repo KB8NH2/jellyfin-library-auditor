@@ -333,7 +333,7 @@ By default, reports are written under `audit_results\`.
 
 - `audit_results\index.html` - top-level report index
 - `audit_results\<server>\index.html` - per-server HTML dashboard
-- `audit_results\<server>\<ServerName>_audit.csv` - per-server CSV findings, one row per audited media item (columns: Library, Path, Series, Title, Season, Episode, Missing Subtitles, Missing Primary, Mismatched Filename Title, Mismatched Stream Title, Unknown Audio Codec, Unknown Video Codec, Mismatched TheTVDB Series, Aired/DVD Order Mismatch), named with the server so CSVs from different servers don't collide when downloaded to the same folder
+- `audit_results\<server>\<ServerName>_audit.csv` - per-server CSV findings, one row per audited media item (columns: Library, Path, Series, Title, Season, Episode, Missing Subtitles, Missing Primary, Mismatched Filename Title, Mismatched Stream Title, Unknown Audio Codec, Unknown Video Codec, Mismatched TheTVDB Series, Aired/DVD Order Mismatch), named with the server so CSVs from different servers don't collide when downloaded to the same folder. The Episode column (here and in every HTML report table with one) shows a range like `5-7` instead of just `5` when the filename's own `SxxEyy-Ezz` marker says the file covers more than one episode
 - `audit_results\comparison_results\index.html` - comparison dashboard when `--compare` is used
 - `metadata_transfer.log` - append-only record of every metadata transfer, written next to wherever `auditor.py --transfer-metadata` or `transfer_metadata.py` was run
 - `image_transfer.log` - append-only record of every image transfer, written next to wherever `auditor.py --transfer-images` or `transfer_images.py` was run

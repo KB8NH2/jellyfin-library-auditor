@@ -392,6 +392,34 @@ def _expected_episode_numbers_from_text(
     return tuple(range(episode_number, last_episode_number + 1))
 
 
+def get_display_episode_number(item: MediaItem) -> str:
+    """Return the display text for an item's episode number column.
+
+    A filename naming a multi-episode range, e.g. ``S01E05-E07``, implies
+    the video file covers episodes 5 through 7 (see
+    expected_episode_numbers_from_filename) - showing only the item's own
+    ``episode_number`` (just "5") in a report table or CSV would silently
+    drop that the file is really episodes 5-7, not only 5. This returns
+    "5-7" for such an item instead, falling back to the bare episode number
+    whenever the filename gives no recognizable multi-episode marker (e.g.
+    metadata-only numbering with no ``SxxExx`` text in the filename at all).
+
+    Args:
+        item: Media item to format.
+
+    Returns:
+        The episode number(s) as display text (e.g. "5" or "5-7"), or ""
+        when the item has no episode number at all.
+    """
+    if item.episode_number is None:
+        return ""
+
+    episode_numbers = expected_episode_numbers_from_filename(item)
+    if episode_numbers is None or len(episode_numbers) <= 1:
+        return str(item.episode_number)
+    return f"{episode_numbers[0]}-{episode_numbers[-1]}"
+
+
 def expected_episode_title_from_stream_titles(item: MediaItem) -> str | None:
     """Return the episode title implied by an embedded video/audio stream title.
 

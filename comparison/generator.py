@@ -13,6 +13,7 @@ import shutil
 from audit_types import AuditFinding
 from compare_csv_files import write_diff_csv
 from config import get_config
+from media import get_display_episode_number
 from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
@@ -825,8 +826,8 @@ def _mismatched_metadata_row(
     right_title = _metadata_title(pair.right)
     left_season = _display_value(pair.left.season_number)
     right_season = _display_value(pair.right.season_number)
-    left_episode_number = _display_value(pair.left.episode_number)
-    right_episode_number = _display_value(pair.right.episode_number)
+    left_episode_number = get_display_episode_number(pair.left)
+    right_episode_number = get_display_episode_number(pair.right)
     left_episode_name = _metadata_episode_name(pair.left)
     right_episode_name = _metadata_episode_name(pair.right)
     left_year = _display_value(pair.left.year)
@@ -1698,14 +1699,14 @@ def _media_missing_row(library_name: str, item) -> str:
             item.title,
             item.series_name or "",
             item.season_name or "",
-            str(item.episode_number or ""),
+            get_display_episode_number(item),
         ) if part
     ).lower()
     return (
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(library_name)}</td>'
         f'<td>{escape(item.series_name or "")}</td>'
         f'{_table_cell(_display_season(item), sort_value=_season_sort_value(item))}'
-        f'{_table_cell("" if item.episode_number is None else item.episode_number, sort_value=_episode_sort_value(item))}'
+        f'{_table_cell(get_display_episode_number(item), sort_value=_episode_sort_value(item))}'
         f'<td{_filename_title_attribute(item)}>{escape(item.title)}</td></tr>'
     )
 
@@ -2054,7 +2055,7 @@ def _subtitle_row(left_result: AuditServerResult, right_result: AuditServerResul
         f'<tr data-diff-row data-search-row data-search="{escape(search_text)}"><td>{escape(pair.library)}</td>'
         f'<td{_filename_title_attribute(pair.left)}>{escape(pair.left.title)}</td><td>{escape(pair.left.series_name or "")}</td>'
         f'{_table_cell(_display_season(pair.left), sort_value=_season_sort_value(pair.left))}'
-        f'{_table_cell("" if pair.left.episode_number is None else pair.left.episode_number, sort_value=_episode_sort_value(pair.left))}'
+        f'{_table_cell(get_display_episode_number(pair.left), sort_value=_episode_sort_value(pair.left))}'
         f'{_diff_cell(left_subtitles, is_different=left_subtitles != right_subtitles)}'
         f'{_subtitle_transfer_cell(left_result.server_key, pair.left.id, left_has_subtitles, right_result.server_key, pair.right.id, right_has_subtitles)}'
         f'{_diff_cell(right_subtitles, is_different=left_subtitles != right_subtitles)}</tr>'

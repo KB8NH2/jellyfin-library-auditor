@@ -9,6 +9,7 @@ import shutil
 from urllib.parse import urlsplit
 
 from config import get_config
+from media import get_display_episode_number
 from media import get_display_path
 from output_layout import audit_results_root
 from output_layout import comparison_output_dir
@@ -240,7 +241,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 item.series_name if item.is_episode and item.series_name else "",
                 item.title,
                 str(item.season_number) if item.is_episode and item.season_number is not None else "",
-                str(item.episode_number) if item.is_episode and item.episode_number is not None else "",
+                get_display_episode_number(item) if item.is_episode else "",
                 _yes_no("missing_english_subtitles" in check_names),
                 _yes_no("missing_primary_image" in check_names),
                 _yes_no(bool(MISMATCHED_FILENAME_TITLE_CHECKS & check_names)),
