@@ -15,6 +15,7 @@ from results import AuditServerResult
 
 
 COMPARISON_RESULTS_DIRNAME = "comparison_results"
+AUDIT_RESULTS_XLSX_FILENAME = "audit_results.xlsx"
 
 
 def audit_results_root(configured_path: Path) -> Path:
@@ -75,6 +76,11 @@ def comparison_output_dir(root_dir: Path) -> Path:
     return root_dir / COMPARISON_RESULTS_DIRNAME
 
 
+def audit_results_xlsx_path(root_dir: Path) -> Path:
+    """Return the path of the combined audit-results Excel workbook."""
+    return root_dir / AUDIT_RESULTS_XLSX_FILENAME
+
+
 def shared_css_path(root_dir: Path) -> Path:
     """Return the shared stylesheet path."""
     return root_dir / "css" / "style.css"
@@ -100,7 +106,12 @@ def write_audit_results_index(
         for entry in _discover_server_entries(root_dir)
     )
     comparison_card = _comparison_card() if _comparison_index_exists(root_dir) else ""
-    cards = server_cards + ((comparison_card,) if comparison_card else ())
+    workbook_card = _workbook_card() if audit_results_xlsx_path(root_dir).is_file() else ""
+    cards = (
+        server_cards
+        + ((comparison_card,) if comparison_card else ())
+        + ((workbook_card,) if workbook_card else ())
+    )
     cards_html = "\n".join(cards) or (
         '      <p class="muted-text">No HTML reports were generated.</p>'
     )
@@ -222,6 +233,18 @@ def _comparison_card() -> str:
             f'        <a class="summary-card summary-card-check" href="{escape(f"{COMPARISON_RESULTS_DIRNAME}/index.html")}">',
             "          <h3>Comparison Results</h3>",
             '          <p class="summary-card-subtitle">Cross-server library and media differences.</p>',
+            "        </a>",
+        )
+    )
+
+
+def _workbook_card() -> str:
+    """Return the top-level link card for the combined Excel workbook."""
+    return "\n".join(
+        (
+            f'        <a class="summary-card summary-card-check" href="{escape(AUDIT_RESULTS_XLSX_FILENAME)}">',
+            "          <h3>Excel Workbook</h3>",
+            '          <p class="summary-card-subtitle">All server and comparison data in one spreadsheet.</p>',
             "        </a>",
         )
     )

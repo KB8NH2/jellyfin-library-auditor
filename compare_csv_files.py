@@ -56,10 +56,23 @@ def read_rows(csv_path: Path) -> tuple[tuple[str, ...], tuple[tuple[str, ...], .
         raise SystemExit(f"{csv_path} is empty")
 
     header, data_rows = rows[0], rows[1:]
-    if EPISODE_COLUMN_NAME in header:
-        episode_index = header.index(EPISODE_COLUMN_NAME)
-        data_rows = [_without_excel_text_guard(row, episode_index) for row in data_rows]
-    return header, tuple(data_rows)
+    return header, strip_episode_guard(header, tuple(data_rows))
+
+
+def strip_episode_guard(
+    header: tuple[str, ...], rows: tuple[tuple[str, ...], ...]
+) -> tuple[tuple[str, ...], ...]:
+    """Return ``rows`` with read_rows()'s Excel text-guard removed from the Episode column.
+
+    A no-op when ``header`` has no Episode column. Exposed separately from
+    :func:`read_rows` so callers holding audit rows already in memory (rather
+    than freshly read from a CSV file) can still get diff_header_and_rows()'s
+    expected un-guarded input.
+    """
+    if EPISODE_COLUMN_NAME not in header:
+        return rows
+    episode_index = header.index(EPISODE_COLUMN_NAME)
+    return tuple(_without_excel_text_guard(row, episode_index) for row in rows)
 
 
 def _without_excel_text_guard(row: tuple[str, ...], column_index: int) -> tuple[str, ...]:
@@ -163,25 +176,22 @@ def combine_row(
     return tuple(combined)
 
 
-def write_diff_csv(csv_a: Path, csv_b: Path, output_path: Path) -> int:
-    """Diff two audit CSVs and write the result to output_path.
+def diff_header_and_rows(
+    header_a: tuple[str, ...],
+    rows_a: tuple[tuple[str, ...], ...],
+    header_b: tuple[str, ...],
+    rows_b: tuple[tuple[str, ...], ...],
+) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """Return the diff header and rows for two audit row sets sharing one header shape.
 
-    Returns the number of differing rows written.
+    ``rows_a``/``rows_b`` are expected already un-guarded (see
+    :func:`strip_episode_guard`) - matching what :func:`read_rows` returns.
+    Uses ``header_a`` as the output header shape, same as :func:`write_diff_csv`.
     """
-    header_a, rows_a = read_rows(csv_a)
-    header_b, rows_b = read_rows(csv_b)
-
-    if header_a != header_b:
-        print(
-            f"Warning: headers differ between {csv_a} and {csv_b}; "
-            "using the first file's header for output.",
-            file=sys.stderr,
-        )
-
     try:
         path_index = header_a.index(PATH_COLUMN_NAME)
     except ValueError:
-        raise SystemExit(f"'{PATH_COLUMN_NAME}' column not found in {csv_a}")
+        raise ValueError(f"'{PATH_COLUMN_NAME}' column not found in header") from None
 
     # Bucket file B's rows by base filename so file A's rows can be realigned
     # to their counterpart even when the two files don't have matching row
@@ -210,10 +220,30 @@ def write_diff_csv(csv_a: Path, csv_b: Path, output_path: Path) -> int:
     for key, bucket in remaining_b.items():
         diff_rows.extend(combine_row(header_a, key, None, row_b) for row_b in bucket)
 
+    return build_header(header_a), tuple(diff_rows)
+
+
+def write_diff_csv(csv_a: Path, csv_b: Path, output_path: Path) -> int:
+    """Diff two audit CSVs and write the result to output_path.
+
+    Returns the number of differing rows written.
+    """
+    header_a, rows_a = read_rows(csv_a)
+    header_b, rows_b = read_rows(csv_b)
+
+    if header_a != header_b:
+        print(
+            f"Warning: headers differ between {csv_a} and {csv_b}; "
+            "using the first file's header for output.",
+            file=sys.stderr,
+        )
+
+    header, diff_rows = diff_header_and_rows(header_a, rows_a, header_b, rows_b)
+
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow([f"{csv_a.stem}|{csv_b.stem}"])
-        writer.writerow(build_header(header_a))
+        writer.writerow(header)
         writer.writerows(diff_rows)
 
     return len(diff_rows)

@@ -2,6 +2,8 @@
 rsync -axv *.py servers.toml jellyfin1:auditor/
 rsync -axv reports/*.py jellyfin1:auditor/reports/
 rsync -axv comparison/*.py jellyfin1:auditor/comparison/
+rsync -axv requirements.txt jellyfin1:auditor/
 rsync -axv *.py servers.toml mediaserver:auditor/
 rsync -axv reports/*.py mediaserver:auditor/reports/
 rsync -axv comparison/*.py mediaserver:auditor/comparison/
+rsync -axv requirements.txt mediaserver:auditor/

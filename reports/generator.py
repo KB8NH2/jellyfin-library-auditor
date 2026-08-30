@@ -46,6 +46,9 @@ CSV_HEADER = (
     "Unknown Video Codec",
     "Mismatched TheTVDB Series",
     "Aired/DVD Order Mismatch",
+    "Missing Episode Number",
+    "Missing Seasons",
+    "Missing Episodes",
 )
 MISMATCHED_FILENAME_TITLE_CHECKS = frozenset(
     {"mismatched_episode_filename_title", "mismatched_movie_filename_title"}
@@ -250,7 +253,15 @@ def _csv_episode_number(item: MediaItem) -> str:
 
 
 def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
-    """Return one CSV row per audited media item."""
+    """Return one CSV row per audited media item.
+
+    Every column is a per-item fact except "Missing Seasons"/"Missing
+    Episodes": those two findings are attached by audit.py to a single
+    representative episode for the whole series/season gap they describe
+    (see audit.missing_tv_series_seasons/missing_tv_season_episodes), so
+    "Yes" appears on that one row rather than every episode in the affected
+    season.
+    """
     checks_by_item = _check_names_by_item(result.findings)
     rows = []
     for item in sorted(result.audited_items, key=templates.check_row_sort_key):
@@ -271,6 +282,9 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 _yes_no("unknown_video_codec" in check_names),
                 _yes_no("mismatched_tvdb_series" in check_names),
                 _yes_no("aired_dvd_order_mismatch" in check_names),
+                _yes_no("missing_episode_number" in check_names),
+                _yes_no("missing_seasons" in check_names),
+                _yes_no("missing_episodes" in check_names),
             )
         )
     return tuple(rows)

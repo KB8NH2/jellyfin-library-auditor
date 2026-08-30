@@ -62,6 +62,7 @@ from tvdb import TvdbError
 import transfer_images
 import transfer_metadata
 import transfer_subtitles
+from xlsx_report import write_audit_results_workbook
 
 
 LOGGER = logging.getLogger("auditor")
@@ -493,12 +494,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root = audit_results_root(get_config().reporting.output.audit_html)
             reset_audit_results_root(output_root)
 
+        should_write_diff_sheet = compare_result is not None
         csv_report_paths: tuple[Path, ...] | None = None
         if options.write_csv:
             csv_report_paths = tuple(write_csv_report(result) for result in filtered_results)
         if should_write_html_site:
             for filtered_result in filtered_results:
                 write_html_report(filtered_result)
+        if output_root is not None:
+            write_audit_results_workbook(
+                output_root,
+                filtered_results,
+                diff_results=(filtered_results[0], filtered_results[1])
+                if should_write_diff_sheet
+                else None,
+            )
         transfer_exit_code = 0
         transfer_results: tuple[MetadataTransferResult, ...] | None = None
         if compare_result is not None and options.transfer_metadata:
