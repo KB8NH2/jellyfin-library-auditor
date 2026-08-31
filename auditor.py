@@ -494,6 +494,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if get_config().tvdb.api_key:
             _enable_mismatched_tvdb_series_file_logging()
         selected_server_keys, compare_server_key = _resolve_run_targets(options)
+        if compare_server_key is not None:
+            LOGGER.info(
+                "Comparing %s (base) against %s (compare)...",
+                selected_server_keys[0],
+                compare_server_key,
+            )
         include_configuration_snapshot = compare_server_key is not None
         tvdb_client_context = (
             TvdbClient(

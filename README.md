@@ -134,6 +134,15 @@ Compare the first two configured servers:
 python auditor.py --compare
 ```
 
+Bare `--compare` resolves independently every run - it always means "the
+first two configured servers," never "whichever server a previous run's
+explicit `--compare SERVER` used." Mixing a `--server main --compare backup`
+run with a later bare `--compare` run can silently pair different servers
+than intended if `main`/`backup` aren't actually the first two entries in
+`servers.toml`. Every run logs which two servers it resolved to (`Comparing
+<base> (base) against <compare> (compare)...`) specifically so this is easy
+to catch instead of looking like a report that failed to pick up a fix.
+
 Audit every configured server:
 
 ```powershell
@@ -275,6 +284,8 @@ python auditor.py --server main --compare backup --transfer-metadata --transfer-
 ```
 
 It also logs a one-line summary of what remains (missing media, mismatched metadata, artwork differences, subtitle differences, etc.) right after the re-audit finishes. `--verify` is ignored with `--dry-run`, since a dry run doesn't write anything for a re-audit to pick up, and it's also skipped whenever no item in the batch actually reached `transferred` status - e.g. every flagged item turned out to have no transferable field differences once fully read, or was rejected/failed - since there's nothing a re-audit would show as changed.
+
+Jellyfin's own `/Items` listing can take a while - up to roughly an hour, observed in practice - to reflect a field written moments earlier through a direct API call (as every `--transfer-*`/`apply_*.py` tool here does), even though a single-item lookup (Jellyfin's own item detail page, or `jellyfin.get_item()`) already shows the new value right away. Triggering a Jellyfin metadata refresh doesn't shorten this - it's not a metadata-provider staleness issue, and every locked field (e.g. `Name`, right after a transfer locks it) is explicitly exempt from being changed by a refresh anyway. `jellyfin.py`'s whole-library listing already re-checks a locked `Name` with a fresh per-item lookup to work around exactly this for that one field, but `--verify`'s re-audit runs immediately after the transfer, squarely inside this window, so a field the per-item recheck doesn't cover can still show its pre-transfer value in the "actually still different" table it writes. If `--verify`'s report or a follow-up `--compare` still shows an item as different right after a transfer, re-run `--compare` again later rather than assuming the transfer failed or was mismatched.
 
 ### One item at a time
 

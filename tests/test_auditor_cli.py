@@ -1462,7 +1462,8 @@ class CompareCommandTests(unittest.TestCase):
                                         ),
                                         tvdb=config.TvdbConfig(api_key=None),
                                     )
-                                    exit_code = auditor.main(["--compare"])
+                                    with self.assertLogs("auditor", level="INFO") as logs:
+                                        exit_code = auditor.main(["--compare"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(
@@ -1477,6 +1478,15 @@ class CompareCommandTests(unittest.TestCase):
                     check_episode_order=False, client_request_counts={},
                 ),
             ],
+        )
+        # Regression test: bare --compare silently ignores default_server
+        # (server3 here) and picks the first two *configured* servers
+        # instead - easy to miss, and a mismatch between which two servers
+        # actually got compared and which two a user expects can make a
+        # freshly-fixed difference look like it was never fixed. This must
+        # be visible in the log, not just inferable from the report.
+        self.assertTrue(
+            any("Comparing server1 (base) against server2 (compare)" in message for message in logs.output)
         )
 
     def test_main_with_compare_writes_comparison_reports(self) -> None:
@@ -1536,11 +1546,15 @@ class CompareCommandTests(unittest.TestCase):
                                         ),
                                         tvdb=config.TvdbConfig(api_key=None),
                                     )
-                                    exit_code = auditor.main(
-                                        ["--server", "server1", "--compare", "server2"]
-                                    )
+                                    with self.assertLogs("auditor", level="INFO") as logs:
+                                        exit_code = auditor.main(
+                                            ["--server", "server1", "--compare", "server2"]
+                                        )
 
         self.assertEqual(exit_code, 0)
+        self.assertTrue(
+            any("Comparing server1 (base) against server2 (compare)" in message for message in logs.output)
+        )
         self.assertEqual(mock_audit.call_count, 2)
         self.assertEqual(mock_csv.call_args_list, [((base_result,),), ((compare_result,),)])
         self.assertEqual(mock_html.call_args_list, [((base_result,),), ((compare_result,),)])
