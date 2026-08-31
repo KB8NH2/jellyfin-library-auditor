@@ -78,6 +78,15 @@ def write_audit_results_workbook(
 
     Returns:
         The written workbook's path.
+
+    Raises:
+        PermissionError: If ``output_path`` couldn't be overwritten - most
+            often because it's currently open in Excel or another program,
+            which locks the file. Re-raised with a clearer message; the
+            previous run's xlsx is left in place on disk in that case, even
+            though this run's CSV/HTML reports (written earlier) did get
+            updated - the two can briefly disagree until the xlsx write
+            succeeds on a later run.
     """
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -107,7 +116,15 @@ def write_audit_results_workbook(
 
     output_path = audit_results_xlsx_path(root_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(output_path)
+    try:
+        workbook.save(output_path)
+    except PermissionError as error:
+        raise PermissionError(
+            f"Could not write {output_path} - it may be open in Excel or another "
+            "program. Close it and re-run. The CSV/HTML reports were written "
+            "successfully and reflect this run; only the previous run's xlsx "
+            "file is left in place."
+        ) from error
     return output_path
 
 

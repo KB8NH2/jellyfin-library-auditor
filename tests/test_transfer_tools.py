@@ -128,6 +128,45 @@ class TransferMetadataMergeTests(unittest.TestCase):
         self.assertEqual(merged["Name"], "Only Name")
         self.assertEqual(merged["Overview"], "Kept overview")
 
+    def test_locks_name_when_it_actually_changes(self) -> None:
+        """Regression test: without locking a changed Name, a library with an
+        internet metadata provider enabled can silently revert the transfer
+        on its next refresh, and (separately) a subsequent audit's
+        whole-library listing can keep showing the destination's pre-
+        transfer title for a while even though the transfer succeeded."""
+        source_dto = {"Id": "source-id", "Name": "Correct Title"}
+        destination_dto = {"Id": "dest-id", "Name": "Wrong Title"}
+
+        merged = transfer_metadata.build_merged_item_dto(source_dto, destination_dto)
+
+        self.assertEqual(merged["LockedFields"], ["Name"])
+
+    def test_does_not_lock_name_when_it_already_matches(self) -> None:
+        source_dto = {"Id": "source-id", "Name": "Same Title", "Overview": "New overview"}
+        destination_dto = {"Id": "dest-id", "Name": "Same Title", "Overview": "Old overview"}
+
+        merged = transfer_metadata.build_merged_item_dto(source_dto, destination_dto)
+
+        self.assertNotIn("LockedFields", merged)
+
+    def test_preserves_existing_locked_fields_when_locking_name(self) -> None:
+        source_dto = {"Id": "source-id", "Name": "Correct Title"}
+        destination_dto = {"Id": "dest-id", "Name": "Wrong Title", "LockedFields": ["Genres"]}
+
+        merged = transfer_metadata.build_merged_item_dto(source_dto, destination_dto)
+
+        self.assertEqual(merged["LockedFields"], ["Genres", "Name"])
+
+    def test_never_locks_original_title(self) -> None:
+        """Regression test: Jellyfin's LockedFields enum has no OriginalTitle
+        member - locking it fails the entire update with a 400."""
+        source_dto = {"Id": "source-id", "Name": "Correct Title", "OriginalTitle": "Original"}
+        destination_dto = {"Id": "dest-id", "Name": "Wrong Title", "OriginalTitle": "Different"}
+
+        merged = transfer_metadata.build_merged_item_dto(source_dto, destination_dto)
+
+        self.assertNotIn("OriginalTitle", merged["LockedFields"])
+
 
 class SkippedNullSourceFieldsTests(unittest.TestCase):
     def test_reports_fields_with_no_source_value(self) -> None:

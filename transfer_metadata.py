@@ -93,6 +93,43 @@ NON_EDITABLE_ITEM_FIELDS = frozenset(
     }
 )
 
+# Jellyfin deserializes LockedFields into its own MetadataField enum (Cast,
+# Genres, ProductionLocations, Studios, Tags, Name, Overview, Runtime,
+# OfficialRating) - OriginalTitle is not a member. Sending any value outside
+# that set fails the *entire* update with a 400, not just that one entry, so
+# only ever lock fields known to be valid there. Only Name is ever locked
+# here (not Overview/Genres/etc., even though several of them are also
+# lockable): Name is the one field a stale post-transfer audit read is known
+# to misreport (see jellyfin.py's _resolve_stale_title()), so it's the one
+# this module can back up a correctness claim for.
+LOCKABLE_METADATA_FIELDS = frozenset({"Name"})
+
+
+def lock_changed_fields(
+    destination_dto: Mapping[str, Any],
+    merged_dto: dict[str, Any],
+    changed_fields: list[str],
+) -> None:
+    """Add every changed, lockable field to the item's LockedFields, in place.
+
+    This is the same thing Jellyfin's own "Edit Metadata" dialog does when a
+    field is changed by hand. Without it, a library with an internet
+    metadata provider enabled treats Name as provider-owned and its next
+    scheduled/on-demand metadata refresh silently overwrites the change
+    again, even though the API write itself succeeded. Shared with
+    title_backup.py, which every apply_*_titles.py rename tool uses for the
+    exact same reason.
+    """
+    lockable_changed_fields = [
+        field for field in changed_fields if field in LOCKABLE_METADATA_FIELDS
+    ]
+    if not lockable_changed_fields:
+        return
+    existing_locked_fields = destination_dto.get("LockedFields") or []
+    merged_dto["LockedFields"] = list(
+        dict.fromkeys([*existing_locked_fields, *lockable_changed_fields])
+    )
+
 
 class CommandLineUsageError(ValueError):
     """Raised when command-line arguments are valid syntactically but unusable."""
@@ -143,6 +180,13 @@ def build_merged_item_dto(
     ProductionYear), and a null from the source must not clobber a real
     value already present on the destination.
 
+    When Name actually changes, it's added to the destination item's
+    LockedFields, the same convention the apply_*_titles.py rename tools
+    use - see lock_changed_fields()'s docstring for why. Without it, a
+    subsequent audit's whole-library listing can keep showing the
+    destination's pre-transfer title for a while even though the transfer
+    succeeded and Jellyfin's own UI already shows the new one.
+
     Args:
         source_dto: Full item document read from the source server.
         destination_dto: Full item document read from the destination server.
@@ -159,6 +203,10 @@ def build_merged_item_dto(
         source_value = source_dto.get(field)
         if source_value is not None:
             merged_dto[field] = source_value
+
+    if merged_dto.get("Name") != destination_dto.get("Name"):
+        lock_changed_fields(destination_dto, merged_dto, ["Name"])
+
     return merged_dto
 
 

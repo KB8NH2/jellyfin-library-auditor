@@ -3,9 +3,9 @@
 Both apply_episode_titles.py and apply_titles_from_filename.py rename an
 item's Name and need the exact same LockedFields safety handling to keep the
 rename from being silently reverted by an internet metadata provider's next
-refresh - see _lock_changed_fields below for why. Extracted here so that
-logic, and the OriginalTitle backup/restore convention built on top of it,
-is defined in exactly one place rather than copy-pasted per tool.
+refresh - see transfer_metadata.lock_changed_fields() for why. Extracted
+here so that logic, and the OriginalTitle backup/restore convention built on
+top of it, is defined in exactly one place rather than copy-pasted per tool.
 """
 
 from __future__ import annotations
@@ -14,38 +14,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from transfer_metadata import NON_EDITABLE_ITEM_FIELDS
-
-
-# Jellyfin deserializes LockedFields into its own MetadataField enum
-# (Cast, Genres, ProductionLocations, Studios, Tags, Name, Overview,
-# Runtime, OfficialRating) - OriginalTitle is not a member. Sending any
-# value outside that set fails the *entire* update with a 400, not just
-# that one entry, so only ever lock fields known to be valid there.
-LOCKABLE_METADATA_FIELDS = frozenset({"Name"})
-
-
-def _lock_changed_fields(
-    destination_dto: Mapping[str, Any],
-    merged_dto: dict[str, Any],
-    changed_fields: list[str],
-) -> None:
-    """Add every changed, lockable field to the item's LockedFields, in place.
-
-    This is the same thing Jellyfin's own "Edit Metadata" dialog does when a
-    field is changed by hand. Without it, a library with an internet
-    metadata provider enabled treats Name as provider-owned and its next
-    scheduled/on-demand metadata refresh silently overwrites the rename
-    again, even though the API write itself succeeded.
-    """
-    lockable_changed_fields = [
-        field for field in changed_fields if field in LOCKABLE_METADATA_FIELDS
-    ]
-    if not lockable_changed_fields:
-        return
-    existing_locked_fields = destination_dto.get("LockedFields") or []
-    merged_dto["LockedFields"] = list(
-        dict.fromkeys([*existing_locked_fields, *lockable_changed_fields])
-    )
+from transfer_metadata import lock_changed_fields as _lock_changed_fields
 
 
 def build_title_merged_item_dto(
@@ -112,7 +81,6 @@ def build_title_restore_merged_item_dto(
 
 
 __all__ = [
-    "LOCKABLE_METADATA_FIELDS",
     "build_title_merged_item_dto",
     "build_title_restore_merged_item_dto",
 ]

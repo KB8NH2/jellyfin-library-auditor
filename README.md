@@ -188,6 +188,8 @@ When `--compare` finds items whose metadata differs between the two servers (the
 
 Every transfer - one-off or bulk - reads the full item from both servers, computes what would change, and refuses to write anything if the destination item's identity fields (`Id`, `Path`) would come back empty, since Jellyfin's update endpoint replaces an item's metadata wholesale rather than merging it.
 
+When a transfer actually changes `Name`, it's added to the destination item's `LockedFields`, the same convention `apply_dvd_metadata.py`/`apply_episode_titles.py`/`apply_titles_from_filename.py` use - so a library with an internet metadata provider enabled doesn't silently revert the title on its next refresh, and so a later `auditor.py` run's whole-library listing (which can otherwise keep showing an item's pre-write title for a while after a direct API write like this one - see "Applying TheTVDB DVD-order metadata" above) knows to double-check it with a fresh per-item lookup instead of trusting the listing as-is.
+
 ### One item at a time
 
 Each row in the comparison report's "Mismatched Metadata" table has a → button between the two servers' episode name columns. Clicking it copies a ready-made command to your clipboard:
@@ -308,6 +310,8 @@ Uses the same `servers.toml` (defaulting to `default_server`; override with `--s
 
 Any of `Name`/`Overview` it actually changes is added to the episode's `LockedFields`, the same thing Jellyfin's own "Edit Metadata" dialog does when you change a field by hand - without this, a library with TheTVDB's internet metadata provider enabled treats those fields as provider-owned and its next scheduled/on-demand refresh silently reverts the edit back to aired-order data, even though the write itself succeeded. (`OriginalTitle` is written but never locked - Jellyfin's `LockedFields` deserializes into a fixed server-side enum that has no `OriginalTitle` member, and any unrecognized entry fails the whole update with a 400.) It also re-reads each episode immediately after writing it and reports "update did not take effect" instead of "updated" if Jellyfin still shows the old value - a successful HTTP response only means the write was accepted, not that it stuck.
 
+This same `Name` locking is why a later `auditor.py` run correctly picks up a rename made by this tool (or `apply_episode_titles.py`/`apply_titles_from_filename.py`, below): Jellyfin's whole-library `/Items` listing can keep showing an item's pre-rename title for a while after a direct API write like these tools make, even though Jellyfin's own UI already shows the new one and a direct per-item lookup would too. Rather than re-checking every item's title with an extra per-item request - far too expensive across a whole library - the auditor treats a locked `Name` as the tell that an item's listed title might be stale, and only re-checks those with the same kind of direct per-item lookup, correcting it before anything is audited against it.
+
 ### Undoing an inadvertent reordering
 
 Before changing an episode's `Name`, the tool copies whatever `Name` currently holds into `OriginalTitle` first - this repurposes `OriginalTitle` as this tool's own undo backup, so it will overwrite any genuine original-language title already stored there. Add `--aired` to reverse the process and restore toward aired order:
@@ -403,7 +407,7 @@ Every CLI in this project - `auditor.py` and every standalone `apply_*.py`/`tran
 ## Project layout
 
 - `auditor.py` - CLI entry point and orchestration, including the bulk `--transfer-metadata`, `--transfer-images`, and `--transfer-subtitles` runs
-- `transfer_metadata.py` - standalone CLI to transfer one item's metadata between two servers; also provides the plan/apply functions the bulk run uses, plus `changed_fields()`/`rejected_reason()`, shared by the three `apply_*.py` tools below for their own plan-building
+- `transfer_metadata.py` - standalone CLI to transfer one item's metadata between two servers; also provides the plan/apply functions the bulk run uses, plus `changed_fields()`/`rejected_reason()`/`lock_changed_fields()`, shared by the three `apply_*.py` tools below (via `title_backup.py` for the two rename tools) for their own plan-building
 - `transfer_images.py` - standalone CLI to transfer one item's cached image between two servers; also provides the plan/apply functions the bulk `--transfer-images` run uses
 - `transfer_subtitles.py` - standalone CLI to transfer one item's English subtitle track between two servers, entirely through the Jellyfin API; also provides the plan/apply functions the bulk `--transfer-subtitles` run uses
 - `tvdb_series_resolution.py` - shared TheTVDB series-id resolution (`resolve_series_tvdb_id()`) used by all three TheTVDB-backed `apply_*.py` tools, so a series matched to the wrong TheTVDB entry doesn't silently corrupt data from some other show
@@ -413,7 +417,7 @@ Every CLI in this project - `auditor.py` and every standalone `apply_*.py`/`tran
 - `apply_episode_numbers.py` - standalone CLI to fill in missing episode numbers for one series/season from TheTVDB's aired order, with interactive fuzzy title matching for episodes with no exact title match
 - `apply_titles_from_filename.py` - standalone CLI to rename a single movie (`--movie`) or one series/season's episodes (`--series-name`/`--season-number`) to the title their own on-disk filename implies; never contacts TheTVDB. `--restore` reverses a rename locally from each item's own `OriginalTitle` backup
 - `config.py` - application and server configuration
-- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use, plus series/episode lookups by name for `apply_dvd_metadata.py`/`apply_episode_titles.py`/`apply_episode_numbers.py`/`apply_titles_from_filename.py`, and movie lookups by name for `apply_titles_from_filename.py`)
+- `jellyfin.py` - Jellyfin API client (reads library/item data; also supports the item metadata, image, and subtitle read/upload calls transfers use, plus series/episode lookups by name for `apply_dvd_metadata.py`/`apply_episode_titles.py`/`apply_episode_numbers.py`/`apply_titles_from_filename.py`, and movie lookups by name for `apply_titles_from_filename.py`). Its whole-library listing also re-checks a couple of fields directly per-item when the listing's own value can't be trusted: an episode's `IndexNumber` when the listing shows it missing, and an item's `Name` when `LockedFields` shows it locked - see "Applying TheTVDB DVD-order metadata" above for why a locked `Name` needs this.
 - `models.py` - normalized data models
 - `results.py` - structured per-library/per-server audit result types (`LibraryAuditResult`, `AuditServerResult`) shared across the auditor, reports, and comparison code
 - `media.py` - media and filesystem helpers, including filename-based episode title parsing

@@ -171,6 +171,114 @@ class JellyfinClientMetadataTests(unittest.TestCase):
                 client.upload_item_image("abc", "Primary", b"rawbytes", "image/png")
 
 
+class StaleTitleResolutionTests(unittest.TestCase):
+    def _make_client(self) -> JellyfinClient:
+        server = ServerConfig(key="s", name="S", url="http://s:8096", api_key="token")
+        return JellyfinClient(server)
+
+    @staticmethod
+    def _library_listing_response(item: dict) -> MagicMock:
+        response = MagicMock()
+        response.content = b'{"Items": []}'
+        response.json.return_value = {"Items": [item], "TotalRecordCount": 1}
+        return response
+
+    @staticmethod
+    def _users_response() -> MagicMock:
+        response = MagicMock()
+        response.content = b"[]"
+        response.json.return_value = [{"Id": "admin-user", "Policy": {"IsAdministrator": True}}]
+        return response
+
+    @staticmethod
+    def _item_detail_response(name: str) -> MagicMock:
+        response = MagicMock()
+        response.content = b"{}"
+        response.json.return_value = {"Id": "item1", "Name": name}
+        return response
+
+    def test_locked_name_item_is_refreshed_from_a_per_item_lookup(self) -> None:
+        """Regression test: the /Items listing can still show an item's
+        pre-rename Name for a while after apply_titles_from_filename.py (or
+        apply_episode_titles.py/apply_dvd_metadata.py) locks and changes it,
+        even though Jellyfin's own UI already shows the new title. A locked
+        Name is exactly the signal that the extra per-item request is
+        worth it - unlocked items are never re-checked.
+        """
+        client = self._make_client()
+        library = jellyfin.MediaLibrary(id="lib1", name="Movies", collection_type="movies", locations=())
+        raw_item = {
+            "Id": "item1",
+            "Type": "Movie",
+            "Name": "Stale Title",
+            "Path": "/media/movies/Movie Name (2001).mkv",
+            "LockedFields": ["Name"],
+        }
+
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                self._library_listing_response(raw_item),
+                self._users_response(),
+                self._item_detail_response("Movie Name"),
+            ],
+        ) as mock_request:
+            items = client._get_library_items_for_library(library)
+
+        self.assertEqual(mock_request.call_count, 3)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].title, "Movie Name")
+
+    def test_unlocked_name_item_is_not_refreshed(self) -> None:
+        client = self._make_client()
+        library = jellyfin.MediaLibrary(id="lib1", name="Movies", collection_type="movies", locations=())
+        raw_item = {
+            "Id": "item1",
+            "Type": "Movie",
+            "Name": "Movie Name",
+            "Path": "/media/movies/Movie Name (2001).mkv",
+        }
+
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[self._library_listing_response(raw_item)],
+        ) as mock_request:
+            items = client._get_library_items_for_library(library)
+
+        mock_request.assert_called_once()
+        self.assertEqual(items[0].title, "Movie Name")
+
+    def test_locked_name_item_already_matching_is_not_rewritten(self) -> None:
+        """A locked item still costs one extra per-item request (there's no
+        way to know it's already fresh without checking), but must not be
+        reported as changed when the per-item lookup agrees with the
+        listing."""
+        client = self._make_client()
+        library = jellyfin.MediaLibrary(id="lib1", name="Movies", collection_type="movies", locations=())
+        raw_item = {
+            "Id": "item1",
+            "Type": "Movie",
+            "Name": "Movie Name",
+            "Path": "/media/movies/Movie Name (2001).mkv",
+            "LockedFields": ["Name"],
+        }
+
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                self._library_listing_response(raw_item),
+                self._users_response(),
+                self._item_detail_response("Movie Name"),
+            ],
+        ):
+            items = client._get_library_items_for_library(library)
+
+        self.assertEqual(items[0].title, "Movie Name")
+
+
 class JellyfinClientRetryTests(unittest.TestCase):
     def _make_client(self, *, max_retries: int = 3) -> JellyfinClient:
         server = ServerConfig(key="s", name="S", url="http://s:8096", api_key="token")

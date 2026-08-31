@@ -52,6 +52,10 @@ ITEM_FIELDS = ",".join(
         "RunTimeTicks",
         "ImageTags",
         "MediaStreams",
+        # Also gated behind Fields. Used only to decide which items need a
+        # fresh per-item Name re-check - see _resolve_stale_title() - not
+        # stored on MediaItem itself.
+        "LockedFields",
     ]
 )
 ITEM_DETAIL_FIELDS = ",".join(
@@ -1276,7 +1280,9 @@ class JellyfinClient:
             for raw_item in raw_items:
                 media_item = self._media_item_from_json(raw_item, library)
                 if media_item is not None:
-                    media_items.append(self._resolve_missing_episode_number(media_item))
+                    media_item = self._resolve_missing_episode_number(media_item)
+                    media_item = self._resolve_stale_title(media_item, raw_item)
+                    media_items.append(media_item)
             total_count = self._get_optional_int(payload, "TotalRecordCount")
             start_index += len(raw_items)
 
@@ -1329,6 +1335,42 @@ class JellyfinClient:
         if episode_number is None:
             return item
         return replace(item, episode_number=episode_number)
+
+    def _resolve_stale_title(self, item: MediaItem, raw_item: Mapping[str, Any]) -> MediaItem:
+        """Re-check one item's Name with a per-item lookup if it's locked.
+
+        Mirrors _resolve_missing_episode_number()'s reasoning for the same
+        underlying cause: the /Items listing can lag behind a field edit
+        made outside a normal library scan - a direct API PATCH (as
+        apply_dvd_metadata.py, apply_episode_titles.py, and
+        apply_titles_from_filename.py all do when renaming an item) or a
+        manual edit in the Jellyfin UI. Every one of those tools locks Name
+        immediately after changing it specifically so a metadata provider's
+        next refresh can't silently revert it, so a locked Name is exactly
+        the item this lag would otherwise misreport as still holding its
+        pre-rename title, even though Jellyfin's own UI already shows the
+        new one. Re-checking every item's Name would be too expensive for a
+        whole-library listing, so this only re-checks ones already flagged
+        as locked - a small fraction of a real library.
+
+        Args:
+            item: A media item just parsed from the whole-library listing.
+            raw_item: That same item's raw JSON, for its LockedFields.
+
+        Returns:
+            ``item`` unchanged, unless Name is locked and a per-item lookup
+            finds a different current value - in which case a copy with
+            that title is returned.
+        """
+        locked_fields = self._get_optional_list(raw_item, "LockedFields", "media item")
+        if "Name" not in locked_fields:
+            return item
+
+        detail = self.get_item(item.id)
+        current_name = self._get_optional_str(detail, "Name")
+        if current_name is None or current_name == item.title:
+            return item
+        return replace(item, title=current_name)
 
     def get_all_media(self) -> list[MediaItem]:
         """Return all media items from enabled libraries only.
