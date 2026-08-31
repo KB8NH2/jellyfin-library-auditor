@@ -13,7 +13,6 @@ from audit_types import AuditFinding
 from audit_types import AuditSeverity
 from comparison import write_comparison_reports
 from config import clear_config_cache
-from models import AudioTrack
 from models import SubtitleTrack
 from models import VideoTrack
 import reports
@@ -88,6 +87,7 @@ class ReportGenerationTests(unittest.TestCase):
             items_with_local_nfo=0,
             items_with_local_backdrop=0,
             findings=findings[1:],
+            tvdb_available_series=frozenset({"Show Name"}),
         )
         result = AuditServerResult(
             libraries_audited=2,
@@ -111,7 +111,7 @@ class ReportGenerationTests(unittest.TestCase):
                 "Missing Subtitles",
                 "Missing Primary",
                 "Mismatched Filename Title",
-                "Mismatched Stream Title",
+                "Mismatched TheTVDB Title",
                 "Unknown Audio Codec",
                 "Unknown Video Codec",
                 "Mismatched TheTVDB Series",
@@ -135,10 +135,10 @@ class ReportGenerationTests(unittest.TestCase):
                     "Yes",
                     "No",
                     "No",
+                    "N/A",
                     "No",
                     "No",
-                    "No",
-                    "No",
+                    "N/A",
                     "No",
                     "No",
                     "No",
@@ -203,6 +203,7 @@ class ReportGenerationTests(unittest.TestCase):
             items_with_local_nfo=0,
             items_with_local_backdrop=0,
             findings=findings,
+            tvdb_available_series=frozenset({"Show Name"}),
         )
         result = AuditServerResult(
             libraries_audited=1,
@@ -217,6 +218,94 @@ class ReportGenerationTests(unittest.TestCase):
         header = report_generator.CSV_HEADER
         self.assertEqual(rows[0][header.index("Mismatched TheTVDB Series")], "Yes")
         self.assertEqual(rows[0][header.index("Aired/DVD Order Mismatch")], "Yes")
+        # Once a series is flagged mismatched_tvdb_series, its TheTVDB data
+        # is considered untrustworthy - audit.audit_library_items() never
+        # actually compares titles against it (see trustworthy_aired_positions),
+        # so this reads "N/A" rather than a "No" that would misleadingly
+        # claim the title comparison was made and came back clean.
+        self.assertEqual(rows[0][header.index("Mismatched TheTVDB Title")], "N/A")
+
+    def test_csv_rows_show_na_for_tvdb_columns_when_tvdb_has_no_data(self) -> None:
+        movie_item = _make_item(
+            title="Movie One",
+            library="Movies",
+            path=Path("Movies/Movie One (2024)/Movie One (2024).mkv"),
+        )
+        no_tvdb_episode = _make_item(
+            title="Episode One",
+            item_id="episode-one",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Unlisted Show",
+            season_number=1,
+            episode_number=1,
+            path=Path("TV Shows/Unlisted Show/Season 01/Unlisted Show S01E01.mkv"),
+        )
+        matched_episode = _make_item(
+            title="Episode Two",
+            item_id="episode-two",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Listed Show",
+            season_number=1,
+            episode_number=2,
+            path=Path("TV Shows/Listed Show/Season 01/Listed Show S01E02.mkv"),
+        )
+        library_result_movies = LibraryAuditResult(
+            library=_make_library(library_id="movies", name="Movies", collection_type="movies"),
+            media_items_processed=1,
+            audited_items=(movie_item,),
+            items_with_english_subtitles=0,
+            items_with_local_nfo=0,
+            items_with_local_backdrop=0,
+            findings=(),
+        )
+        library_result_tv = LibraryAuditResult(
+            library=_make_library(library_id="tv", name="TV Shows", collection_type="tv"),
+            media_items_processed=2,
+            audited_items=(no_tvdb_episode, matched_episode),
+            items_with_english_subtitles=0,
+            items_with_local_nfo=0,
+            items_with_local_backdrop=0,
+            findings=(),
+            # Only "Listed Show" has TheTVDB data this run - "Unlisted Show"
+            # is absent entirely (no TheTVDB match found for it at all).
+            tvdb_available_series=frozenset({"Listed Show"}),
+        )
+        result = AuditServerResult(
+            libraries_audited=2,
+            media_items_processed=3,
+            library_results=(library_result_movies, library_result_tv),
+            findings=(),
+        )
+
+        rows = report_generator._csv_rows(result)
+
+        header = report_generator.CSV_HEADER
+        rows_by_title = {row[header.index("Title")]: row for row in rows}
+
+        # A movie never has TheTVDB data to compare against at all.
+        self.assertEqual(rows_by_title["Movie One"][header.index("Mismatched TheTVDB Series")], "N/A")
+        self.assertEqual(rows_by_title["Movie One"][header.index("Mismatched TheTVDB Title")], "N/A")
+
+        # A series TheTVDB has no data for at all - not flagged as a
+        # mismatch (nothing to compare against), just genuinely absent.
+        self.assertEqual(
+            rows_by_title["Episode One"][header.index("Mismatched TheTVDB Series")], "N/A"
+        )
+        self.assertEqual(
+            rows_by_title["Episode One"][header.index("Mismatched TheTVDB Title")], "N/A"
+        )
+
+        # A series TheTVDB does have data for reads a real Yes/No, not N/A.
+        self.assertEqual(
+            rows_by_title["Episode Two"][header.index("Mismatched TheTVDB Series")], "No"
+        )
+        self.assertEqual(
+            rows_by_title["Episode Two"][header.index("Mismatched TheTVDB Title")], "No"
+        )
 
     def test_csv_row_shows_episode_range_for_combined_episode_file(self) -> None:
         """A range value like "5-7" is exactly the shape Excel's automatic
@@ -829,15 +918,20 @@ class ReportGenerationTests(unittest.TestCase):
         self.assertIn(">Ozymandias<", html)
         self.assertNotIn("Filename suggests episode title", html)
 
-    def test_check_page_shows_suggested_title_column_for_mismatched_stream_title(
-        self,
-    ) -> None:
+    def test_check_page_shows_details_column_for_mismatched_tvdb_title(self) -> None:
+        """Unlike mismatched_episode_filename_title (whose suggested title is
+        cheaply recomputable from the item's own path alone),
+        mismatched_tvdb_title's suggested title depends on TheTVDB position
+        data the HTML-rendering layer never sees - so, like
+        mismatched_tvdb_series, it uses the generic Details column (the
+        finding's own message) rather than a dedicated suggested-title one.
+        """
         finding = _make_finding(
             category=AuditCategory.METADATA,
             severity=AuditSeverity.WARNING,
             title="Safe",
-            message='An embedded stream title suggests episode title "Jaynestown" but metadata title is "Safe".',
-            check_name="mismatched_episode_stream_title",
+            message='S01E07 is titled "Safe", but TheTVDB\'s cached aired-order title at that position is "Jaynestown".',
+            check_name="mismatched_tvdb_title",
             media_item=_make_item(
                 title="Safe",
                 library="TV Shows",
@@ -848,14 +942,6 @@ class ReportGenerationTests(unittest.TestCase):
                 season_name="Season 1",
                 season_number=1,
                 episode_number=7,
-                audio_tracks=(
-                    AudioTrack(
-                        language="eng",
-                        codec="ac3",
-                        channels=6,
-                        title="Firefly.S01E07.Jaynestown.1080p.BRRip.AC3.x264-LESS",
-                    ),
-                ),
             ),
         )
         site_links = report_generator._site_links(
@@ -870,7 +956,7 @@ class ReportGenerationTests(unittest.TestCase):
         )
 
         html = report_generator.render_check_page(
-            "mismatched_episode_stream_title",
+            "mismatched_tvdb_title",
             (finding,),
             site_links=site_links,
         )
@@ -880,11 +966,9 @@ class ReportGenerationTests(unittest.TestCase):
         self.assertIn(">Season</button></th>", html)
         self.assertIn(">Episode</button></th>", html)
         self.assertIn(">Title</button></th>", html)
-        self.assertIn(">Suggested Title (Stream)</button></th>", html)
-        self.assertNotIn(">Details</button></th>", html)
+        self.assertIn(">Details</button></th>", html)
         self.assertIn(">Safe<", html)
-        self.assertIn(">Jaynestown<", html)
-        self.assertNotIn("An embedded stream title suggests", html)
+        self.assertIn("TheTVDB&#x27;s cached aired-order title", html)
 
     def test_check_page_orders_multi_library_rows_by_library_then_media(self) -> None:
         movie_finding = _make_finding(

@@ -707,6 +707,7 @@ def _audit_library_result(
         items_with_local_nfo=items_with_local_nfo,
         items_with_local_backdrop=items_with_local_backdrop,
         findings=result_findings,
+        tvdb_available_series=frozenset(aired_positions),
     )
 
 

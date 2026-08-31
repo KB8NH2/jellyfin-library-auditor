@@ -661,6 +661,254 @@ class MismatchedTvdbSeriesTests(unittest.TestCase):
         self.assertNotIn("missing_episodes", check_names)
 
 
+class MismatchedTvdbTitleTests(unittest.TestCase):
+    """Unlike audit_episode_ordering/aired_dvd_order_mismatch (which only
+    flags a local title matching neither aired nor DVD order), this only
+    ever compares against aired order - the ordering tvdb_cache.json and
+    TheTVDB's own default reflect - and runs unconditionally whenever a
+    TheTVDB api_key is configured, not just with --check-episode-order.
+    """
+
+    def test_no_finding_when_local_title_matches_aired_order(self) -> None:
+        item = _make_item(
+            "Aired Title",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=3,
+        )
+        aired_positions = {
+            "Example Series": {
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Aired Title"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(findings, ())
+
+    def test_flags_when_local_title_differs_from_aired_order(self) -> None:
+        item = _make_item(
+            "Something Else Entirely",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=3,
+        )
+        aired_positions = {
+            "Example Series": {
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Aired Title"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding.check_name, "mismatched_tvdb_title")
+        self.assertEqual(finding.category, AuditCategory.METADATA)
+        self.assertEqual(finding.severity, AuditSeverity.WARNING)
+        self.assertIn("Aired Title", finding.message)
+        self.assertIn("Something Else Entirely", finding.message)
+        self.assertIs(finding.media_item, item)
+
+    def test_no_finding_when_no_aired_positions_given(self) -> None:
+        item = _make_item(
+            "Something Else Entirely",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=3,
+        )
+
+        self.assertEqual(audit.mismatched_tvdb_title([item], None), ())
+        self.assertEqual(audit.mismatched_tvdb_title([item], {}), ())
+
+    def test_no_finding_when_position_missing_from_aired_order(self) -> None:
+        item = _make_item(
+            "Unmapped",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=99,
+        )
+        aired_positions = {
+            "Example Series": {
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Aired Title"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(findings, ())
+
+    def test_no_finding_for_non_episode_items(self) -> None:
+        item = _make_item("Movie", is_movie=True, is_episode=False)
+        aired_positions = {"Example Series": {(1, 1): (_make_tvdb_episode(name="X"),)}}
+
+        self.assertEqual(audit.mismatched_tvdb_title([item], aired_positions), ())
+
+    def test_no_finding_when_title_matches_any_candidate_sharing_a_position(self) -> None:
+        """Regression test: several same-named TheTVDB series can each
+        independently number their own "Season 1, Episode 1" - the local
+        title should match if it agrees with any one of them.
+        """
+        item = _make_item(
+            "Space Babies",
+            is_movie=False,
+            is_episode=True,
+            series_name="Doctor Who",
+            season_number=1,
+            episode_number=1,
+        )
+        aired_positions = {
+            "Doctor Who": {
+                (1, 1): (
+                    _make_tvdb_episode(season_number=1, episode_number=1, name="An Unearthly Child"),
+                    _make_tvdb_episode(season_number=1, episode_number=1, name="Rose"),
+                    _make_tvdb_episode(season_number=1, episode_number=1, name="Space Babies"),
+                ),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(findings, ())
+
+    def test_lists_every_distinct_candidate_title_when_none_match(self) -> None:
+        item = _make_item(
+            "Something Else Entirely",
+            is_movie=False,
+            is_episode=True,
+            series_name="Doctor Who",
+            season_number=1,
+            episode_number=1,
+        )
+        aired_positions = {
+            "Doctor Who": {
+                (1, 1): (
+                    _make_tvdb_episode(season_number=1, episode_number=1, name="An Unearthly Child"),
+                    _make_tvdb_episode(season_number=1, episode_number=1, name="Rose"),
+                ),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(len(findings), 1)
+        message = findings[0].message
+        self.assertIn('"An Unearthly Child"', message)
+        self.assertIn('"Rose"', message)
+
+    def test_no_finding_when_only_candidate_title_is_untranslated(self) -> None:
+        """Regression test: TheTVDB silently falls back to a series'
+        original-language name for an episode with no recorded English
+        translation - there's no way to tell whether that untranslated name
+        matches the local title or not, so it must not be treated as a
+        mismatch.
+        """
+        item = _make_item(
+            "Big Sword",
+            is_movie=False,
+            is_episode=True,
+            series_name="Claymore",
+            season_number=1,
+            episode_number=1,
+        )
+        aired_positions = {
+            "Claymore": {
+                (1, 1): (
+                    _make_tvdb_episode(season_number=1, episode_number=1, name="大剣 -クレイモア-"),
+                ),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(findings, ())
+
+    def test_no_finding_when_combined_title_matches_multi_episode_range(self) -> None:
+        item = _make_item(
+            "Title Five / Title Six / Title Seven",
+            is_movie=False,
+            is_episode=True,
+            path=Path("Show - S01E05-E07 - Combined.mkv"),
+            series_name="Show",
+            season_number=1,
+            episode_number=5,
+        )
+        aired_positions = {
+            "Show": {
+                (1, 5): (_make_tvdb_episode(season_number=1, episode_number=5, name="Title Five"),),
+                (1, 6): (_make_tvdb_episode(season_number=1, episode_number=6, name="Title Six"),),
+                (1, 7): (_make_tvdb_episode(season_number=1, episode_number=7, name="Title Seven"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(findings, ())
+
+    def test_flags_combined_range_with_range_label_and_joined_titles(self) -> None:
+        item = _make_item(
+            "Something Else Entirely",
+            is_movie=False,
+            is_episode=True,
+            path=Path("Show - S01E05-E07 - Combined.mkv"),
+            series_name="Show",
+            season_number=1,
+            episode_number=5,
+        )
+        aired_positions = {
+            "Show": {
+                (1, 5): (_make_tvdb_episode(season_number=1, episode_number=5, name="Title Five"),),
+                (1, 6): (_make_tvdb_episode(season_number=1, episode_number=6, name="Title Six"),),
+                (1, 7): (_make_tvdb_episode(season_number=1, episode_number=7, name="Title Seven"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("S01E05-E07", findings[0].message)
+        self.assertIn("Title Five / Title Six / Title Seven", findings[0].message)
+
+    def test_audit_library_items_suppresses_title_check_for_a_mismatched_series(self) -> None:
+        """Mirrors mismatched_tvdb_series' own suppression test: a series
+        already flagged as matched to the wrong TheTVDB entry shouldn't also
+        get a spurious title-mismatch finding sourced from that same wrong
+        match.
+        """
+        items = tuple(
+            _make_item(
+                f"Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                series_name="Mismatched Show",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(1, 8)
+        )
+        aired_positions = {
+            "Mismatched Show": {
+                (1, 1): (_make_tvdb_episode(season_number=1, episode_number=1, name="Episode 1"),),
+                (1, 2): (_make_tvdb_episode(season_number=1, episode_number=2, name="Episode 2"),),
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Something Else"),),
+            }
+        }
+
+        findings = audit.audit_library_items(items, aired_positions)
+
+        check_names = {finding.check_name for finding in findings}
+        self.assertIn("mismatched_tvdb_series", check_names)
+        self.assertNotIn("mismatched_tvdb_title", check_names)
+
+
 class BestMatchingTvdbSeriesTests(unittest.TestCase):
     def _make_series_items(self, count: int, *, series_name: str = "Mismatched Show") -> tuple:
         return tuple(

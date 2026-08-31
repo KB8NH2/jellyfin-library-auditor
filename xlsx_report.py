@@ -50,7 +50,7 @@ _INVALID_SHEET_NAME_CHARS = re.compile(r"[:\\/?*\[\]]")
 _INVALID_TABLE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 _MAX_SHEET_NAME_LENGTH = 31
 _MAX_COLUMN_WIDTH = 60
-_FIXED_COLUMN_WIDTH_AFTER_TITLE = 11
+_FIXED_COLUMN_WIDTH_AFTER_TITLE = 12
 _TEXT_NUMBER_FORMAT = "@"
 _WRAP_CENTER_ALIGNMENT = Alignment(wrap_text=True, horizontal="center", vertical="center")
 _TOTALS_ROW_FONT = Font(bold=True)

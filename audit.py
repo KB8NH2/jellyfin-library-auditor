@@ -19,7 +19,6 @@ from audit_types import AuditFinding
 from audit_types import AuditSeverity
 from media import expected_episode_numbers_from_filename
 from media import expected_episode_title_from_filename
-from media import expected_episode_title_from_stream_titles
 from media import expected_movie_title_from_filename
 from media import get_primary_audio_codec
 from media import get_video_codec
@@ -256,7 +255,6 @@ def audit_media_item(item: MediaItem) -> tuple[AuditFinding, ...]:
         unknown_video_codec,
         unknown_audio_codec,
         mismatched_episode_filename_title,
-        mismatched_episode_stream_title,
         mismatched_movie_filename_title,
     )
     findings: list[AuditFinding] = []
@@ -315,6 +313,7 @@ def audit_library_items(
     )
     findings.extend(missing_tv_series_seasons(items_tuple, trustworthy_aired_positions))
     findings.extend(missing_tv_season_episodes(items_tuple, trustworthy_aired_positions))
+    findings.extend(mismatched_tvdb_title(items_tuple, trustworthy_aired_positions))
     findings.extend(mismatched_series_findings)
     return tuple(findings)
 
@@ -478,36 +477,6 @@ def mismatched_episode_filename_title(item: MediaItem) -> AuditFinding | None:
         message=(
             f'Filename suggests episode title "{expected_title}" but metadata '
             f'title is "{item.title}".'
-        ),
-    )
-
-
-def mismatched_episode_stream_title(item: MediaItem) -> AuditFinding | None:
-    """Return a finding when an embedded stream title implies a different title.
-
-    Args:
-        item: Media item to evaluate.
-
-    Returns:
-        A warning finding, or ``None`` when no video/audio track has a
-        discernible episode title, or its implied title matches the metadata
-        title.
-    """
-    expected_title = expected_episode_title_from_stream_titles(item)
-    if expected_title is None:
-        return None
-
-    if titles_match(expected_title, item.title):
-        return None
-
-    return _finding(
-        item,
-        category=AuditCategory.METADATA,
-        severity=AuditSeverity.WARNING,
-        check_name="mismatched_episode_stream_title",
-        message=(
-            f'An embedded stream title suggests episode title "{expected_title}" but '
-            f'metadata title is "{item.title}".'
         ),
     )
 
@@ -1143,6 +1112,87 @@ def best_matching_tvdb_series(
     return best_id
 
 
+def mismatched_tvdb_title(
+    items: Iterable[MediaItem],
+    aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
+) -> tuple[AuditFinding, ...]:
+    """Return findings for local episodes whose title doesn't match TheTVDB's cached aired-order title.
+
+    Unlike :func:`audit_episode_ordering` (which requires a mismatch against
+    *both* aired and DVD order before flagging anything, specifically so a
+    series correctly organized end-to-end in DVD order isn't flagged at
+    every episode), this only ever compares against aired order - the
+    ordering ``tvdb_cache.json`` and TheTVDB's own default reflect. It runs
+    unconditionally whenever a TheTVDB ``api_key`` is configured, the same
+    as :func:`mismatched_tvdb_series`, not just with ``--check-episode-order``.
+
+    Shares :func:`audit_episode_ordering`'s multi-episode-range and
+    multi-candidate-series handling (see its docstring for why both matter):
+    a file spanning more than one episode is compared against every
+    position's title joined together, and a series name matching more than
+    one TheTVDB id is checked against the union of all of their episodes,
+    with a candidate still in its original, non-English language ignored
+    (see :data:`_NON_ENGLISH_SCRIPT_PATTERN`).
+
+    Args:
+        items: Media items from one audited library.
+        aired_positions: TheTVDB aired-order candidate episodes for each
+            series name, keyed by (season_number, episode_number). A series
+            absent here (no TheTVDB match, or the lookup failed) is skipped.
+
+    Returns:
+        One finding per local episode (or multi-episode range) whose title
+        doesn't match any English-titled candidate combination's TheTVDB
+        aired-order title at its (season, episode(s)) position.
+    """
+    if not aired_positions:
+        return ()
+
+    findings: list[AuditFinding] = []
+
+    for item in items:
+        if not item.is_episode or not item.series_name:
+            continue
+        if item.season_number is None or item.episode_number is None:
+            continue
+
+        episode_numbers = expected_episode_numbers_from_filename(item) or (item.episode_number,)
+
+        aired_per_position = _candidates_for_episode_range(
+            aired_positions.get(item.series_name, {}), item.season_number, episode_numbers
+        )
+        if aired_per_position is None:
+            continue
+
+        aired_combined_titles = _combined_candidate_titles(aired_per_position)
+        if any(titles_match(item.title, combined) for combined in aired_combined_titles):
+            continue
+
+        if len(episode_numbers) > 1:
+            position_label = (
+                f"S{item.season_number:02d}E{episode_numbers[0]:02d}-"
+                f"E{episode_numbers[-1]:02d}"
+            )
+        else:
+            position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
+
+        findings.append(
+            _finding(
+                item,
+                category=AuditCategory.METADATA,
+                severity=AuditSeverity.WARNING,
+                check_name="mismatched_tvdb_title",
+                message=(
+                    f'{position_label} is titled "{item.title}", but TheTVDB\'s cached '
+                    f"aired-order title at that position is "
+                    f"{_format_combined_titles(aired_combined_titles)}."
+                ),
+            )
+        )
+
+    return tuple(findings)
+
+
 def audit_episode_ordering(
     items: Iterable[MediaItem],
     aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]],
@@ -1427,9 +1477,9 @@ __all__ = [
     "audit_media_item",
     "best_matching_tvdb_series",
     "mismatched_episode_filename_title",
-    "mismatched_episode_stream_title",
     "mismatched_movie_filename_title",
     "mismatched_tvdb_series",
+    "mismatched_tvdb_title",
     "missing_backdrop",
     "missing_english_subtitles",
     "missing_episode_number",

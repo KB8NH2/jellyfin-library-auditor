@@ -29,9 +29,9 @@ CHECK_DISPLAY_LABELS = {
     "unknown_video_codec": "Unknown Video Codec",
     "unknown_audio_codec": "Unknown Audio Codec",
     "mismatched_episode_filename_title": "Mismatched Episode Filename Title",
-    "mismatched_episode_stream_title": "Mismatched Episode Stream Title",
     "mismatched_movie_filename_title": "Mismatched Movie Filename Title",
     "mismatched_tvdb_series": "Mismatched TheTVDB Series",
+    "mismatched_tvdb_title": "Mismatched TheTVDB Title",
     "aired_dvd_order_mismatch": "Aired/DVD Order Mismatch",
 }
 CHECK_DISPLAY_ORDER = (
@@ -55,6 +55,7 @@ CHECK_SUMMARY_LABELS = {
     "unknown_audio_codec": "Audio Codec",
     "aired_dvd_order_mismatch": "Episode Order",
     "mismatched_tvdb_series": "TheTVDB Match",
+    "mismatched_tvdb_title": "TheTVDB Title",
 }
 
 

@@ -468,47 +468,6 @@ def get_display_episode_number(item: MediaItem) -> str:
     return f"{episode_numbers[0]}-{episode_numbers[-1]}"
 
 
-def expected_episode_title_from_stream_titles(item: MediaItem) -> str | None:
-    """Return the episode title implied by an embedded video/audio stream title.
-
-    Tools like mkvmerge often set a stream's ``Title`` to the original
-    scene-release filename at rip time, and that title survives even after
-    the container file itself gets renamed to fit Jellyfin's naming
-    convention. So a rip that was mislabeled at organize time can still carry
-    its true episode identity here, in a place a filename-only check can't
-    see - the (renamed) filename and Jellyfin's metadata can otherwise agree
-    with each other while both being wrong. This checks the primary video
-    track first, then each audio track in order, since either can carry the
-    original title independently of the other.
-
-    Args:
-        item: Media item to inspect.
-
-    Returns:
-        The episode title segment implied by the first track whose title
-        contains a marker matching the item's known season and starting
-        episode numbers, or ``None`` when no track has one.
-    """
-    if not item.is_episode or item.season_number is None or item.episode_number is None:
-        return None
-
-    candidate_titles = [
-        track.title for track in (item.video_track,) if track is not None
-    ]
-    candidate_titles.extend(track.title for track in item.audio_tracks)
-
-    for candidate_title in candidate_titles:
-        if not candidate_title:
-            continue
-        expected_title = _expected_episode_title_from_text(
-            candidate_title, item.season_number, item.episode_number
-        )
-        if expected_title is not None:
-            return expected_title
-
-    return None
-
-
 def _expected_episode_title_from_text(
     text: str,
     season_number: int,

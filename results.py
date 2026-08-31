@@ -34,6 +34,12 @@ class LibraryAuditResult:
         items_with_local_nfo: Number of items with a local NFO file.
         items_with_local_backdrop: Number of items with a local backdrop file.
         findings: Findings produced while auditing the library.
+        tvdb_available_series: Series names TheTVDB had aired-order episode
+            data for during this audit (empty when no TheTVDB `api_key` is
+            configured, or this library isn't a TV library). Lets report
+            output show "N/A" instead of a possibly-misleading "No" for a
+            TheTVDB-dependent check on a series TheTVDB has no data for at
+            all - see reports.generator._csv_rows().
     """
 
     library: MediaLibrary
@@ -43,6 +49,7 @@ class LibraryAuditResult:
     items_with_local_nfo: int
     items_with_local_backdrop: int
     findings: tuple[AuditFinding, ...]
+    tvdb_available_series: frozenset[str] = frozenset()
 
     @property
     def findings_count(self) -> int:
@@ -104,6 +111,14 @@ class AuditServerResult:
         for library_result in self.library_results:
             items.extend(library_result.audited_items)
         return tuple(items)
+
+    @property
+    def tvdb_available_series(self) -> frozenset[str]:
+        """Return every series name TheTVDB had data for, across all audited libraries."""
+        series_names: set[str] = set()
+        for library_result in self.library_results:
+            series_names.update(library_result.tvdb_available_series)
+        return frozenset(series_names)
 
 
 def _percentage(count: int, total: int) -> float:

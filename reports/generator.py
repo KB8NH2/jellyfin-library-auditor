@@ -43,7 +43,7 @@ CSV_HEADER = (
     "Missing Subtitles",
     "Missing Primary",
     "Mismatched Filename Title",
-    "Mismatched Stream Title",
+    "Mismatched TheTVDB Title",
     "Unknown Audio Codec",
     "Unknown Video Codec",
     "Mismatched TheTVDB Series",
@@ -263,8 +263,25 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     (see audit.missing_tv_series_seasons/missing_tv_season_episodes), so
     "Yes" appears on that one row rather than every episode in the affected
     season.
+
+    "Mismatched TheTVDB Series"/"Mismatched TheTVDB Title" read "N/A"
+    instead of "No" for a movie, or an episode whose series TheTVDB has no
+    data for at all (no TheTVDB `api_key` configured, or no matching series
+    found) - "No" would otherwise misleadingly claim the comparison was
+    made and came back clean, when it was never possible to begin with. For
+    "Mismatched TheTVDB Title" specifically, a series TheTVDB does have data
+    for but that's already flagged by mismatched_tvdb_series also reads
+    "N/A": that data is considered untrustworthy, so
+    audit.audit_library_items() never actually compares titles against it
+    either (see its trustworthy_aired_positions filtering).
     """
     checks_by_item = _check_names_by_item(result.findings)
+    mismatched_tvdb_series_names = frozenset(
+        finding.media_item.series_name
+        for finding in result.findings
+        if finding.check_name == "mismatched_tvdb_series" and finding.media_item.series_name
+    )
+    trustworthy_tvdb_series = result.tvdb_available_series - mismatched_tvdb_series_names
     rows = []
     for item in sorted(result.audited_items, key=templates.check_row_sort_key):
         check_names = checks_by_item.get(item.id, frozenset())
@@ -280,10 +297,18 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 _yes_no("missing_english_subtitles" in check_names),
                 _yes_no("missing_primary_image" in check_names),
                 _yes_no(bool(MISMATCHED_FILENAME_TITLE_CHECKS & check_names)),
-                _yes_no("mismatched_episode_stream_title" in check_names),
+                _tvdb_yes_no(
+                    "mismatched_tvdb_title" in check_names,
+                    series_name=item.series_name,
+                    tvdb_series=trustworthy_tvdb_series,
+                ),
                 _yes_no("unknown_audio_codec" in check_names),
                 _yes_no("unknown_video_codec" in check_names),
-                _yes_no("mismatched_tvdb_series" in check_names),
+                _tvdb_yes_no(
+                    "mismatched_tvdb_series" in check_names,
+                    series_name=item.series_name,
+                    tvdb_series=result.tvdb_available_series,
+                ),
                 _yes_no("aired_dvd_order_mismatch" in check_names),
                 _yes_no("missing_episode_number" in check_names),
                 _yes_no("missing_seasons" in check_names),
@@ -455,3 +480,21 @@ def _server_display_name(server_url: str) -> str:
 def _yes_no(value: bool) -> str:
     """Return Yes or No for CSV fields."""
     return "Yes" if value else "No"
+
+
+def _tvdb_yes_no(
+    value: bool,
+    *,
+    series_name: str | None,
+    tvdb_series: frozenset[str],
+) -> str:
+    """Return Yes/No/N/A for a TheTVDB-dependent CSV field.
+
+    "N/A" when ``series_name`` is missing (a movie) or isn't in
+    ``tvdb_series`` (an episode whose series TheTVDB has no usable data for
+    at all) - the comparison was never possible, so "No" would misleadingly
+    claim it was made and came back clean.
+    """
+    if series_name is None or series_name not in tvdb_series:
+        return "N/A"
+    return _yes_no(value)

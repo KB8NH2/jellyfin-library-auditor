@@ -132,7 +132,7 @@ class WriteAuditResultsWorkbookTests(unittest.TestCase):
             self.assertEqual(cell.alignment.horizontal, "center")
             self.assertEqual(cell.alignment.vertical, "center")
 
-    def test_columns_after_title_have_a_fixed_width_of_eleven(self) -> None:
+    def test_columns_after_title_have_a_fixed_width(self) -> None:
         item = _make_item(
             "A Title Much Longer Than Eleven Characters",
             library="Movies",
@@ -159,10 +159,15 @@ class WriteAuditResultsWorkbookTests(unittest.TestCase):
         # deliberately long title is wider than the fixed width every
         # later column gets.
         title_letter = openpyxl.utils.get_column_letter(title_index + 1)
-        self.assertGreater(sheet.column_dimensions[title_letter].width, 11)
+        self.assertGreater(
+            sheet.column_dimensions[title_letter].width, xlsx_report._FIXED_COLUMN_WIDTH_AFTER_TITLE
+        )
         for index in range(title_index + 1, len(header)):
             column_letter = openpyxl.utils.get_column_letter(index + 1)
-            self.assertEqual(sheet.column_dimensions[column_letter].width, 11)
+            self.assertEqual(
+                sheet.column_dimensions[column_letter].width,
+                xlsx_report._FIXED_COLUMN_WIDTH_AFTER_TITLE,
+            )
 
     def test_diffs_sheet_also_gets_wrap_center_and_fixed_width(self) -> None:
         left_item = _make_item("Same Title", library="Movies")
@@ -198,7 +203,10 @@ class WriteAuditResultsWorkbookTests(unittest.TestCase):
         self.assertTrue(sheet.cell(row=1, column=library_column).alignment.wrap_text)
         title_index = header.index("Title")
         after_title_letter = openpyxl.utils.get_column_letter(title_index + 2)
-        self.assertEqual(sheet.column_dimensions[after_title_letter].width, 11)
+        self.assertEqual(
+            sheet.column_dimensions[after_title_letter].width,
+            xlsx_report._FIXED_COLUMN_WIDTH_AFTER_TITLE,
+        )
 
     def test_header_matches_csv_header_plus_problems_column(self) -> None:
         item = _make_item("Some Title")
