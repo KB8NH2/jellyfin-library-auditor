@@ -31,8 +31,9 @@ numbering their own "Season 1" independently), Jellyfin's automatic
 matching has no way to know which one actually explains the local
 library - and a wrong match here wouldn't just go uncorrected, it would
 actively number (and potentially rename) episodes against some other
-show's episode list. See resolve_series_tvdb_id() for how the right one
-is picked. It does not contain audit logic or report formatting.
+show's episode list. See tvdb_series_resolution.resolve_series_tvdb_id()
+for how the right one is picked. It does not contain audit logic or
+report formatting.
 """
 
 from __future__ import annotations
@@ -56,11 +57,13 @@ from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
 from jellyfin import SeasonEpisodeSummary
 from transfer_metadata import NON_EDITABLE_ITEM_FIELDS
-from transfer_metadata import REQUIRED_NON_EMPTY_FIELDS
+from transfer_metadata import changed_fields
+from transfer_metadata import rejected_reason as _rejected_reason
 from tvdb import TvdbClient
 from tvdb import TvdbEpisode
 from tvdb import TvdbEpisodeCache
 from tvdb import TvdbError
+from tvdb_series_resolution import resolve_series_tvdb_id
 
 
 LOGGER = logging.getLogger("apply_episode_numbers")
@@ -84,12 +87,6 @@ _LEADING_ARTICLE_PATTERN = re.compile(r"^(?:the|an?)\s+")
 # Below this similarity ratio a fuzzy candidate isn't worth showing the user
 # at all - titles that different are essentially never the same episode.
 _FUZZY_MATCH_MIN_RATIO = 0.6
-
-# Bounds worst-case TheTVDB calls for a generically-named series without
-# likely missing the real match - TheTVDB ranks search results
-# most-relevant first. Mirrors auditor.py's identical cap for the same
-# search-then-score-by-local-episode-overlap approach.
-_MAX_TVDB_SEARCH_CANDIDATES = 5
 
 
 def _title_match_keys(title: str) -> tuple[str, str]:
@@ -266,11 +263,7 @@ def _changed_fields(
     merged_dto: Mapping[str, Any],
 ) -> tuple[tuple[str, Any, Any], ...]:
     """Return (field, old_value, new_value) for each field that will change."""
-    return tuple(
-        (field, destination_dto.get(field), merged_dto.get(field))
-        for field in METADATA_FIELDS
-        if destination_dto.get(field) != merged_dto.get(field)
-    )
+    return changed_fields(destination_dto, merged_dto, METADATA_FIELDS)
 
 
 def _unnumbered_episode_sort_key(episode: SeasonEpisodeSummary) -> tuple[str, str]:
@@ -285,20 +278,6 @@ def _unnumbered_episode_sort_key(episode: SeasonEpisodeSummary) -> tuple[str, st
     return (
         str(episode.path).casefold() if episode.path is not None else "",
         episode.name.casefold(),
-    )
-
-
-def _rejected_reason(merged_dto: Mapping[str, Any]) -> str | None:
-    """Return why a merged item document is unsafe to write, or ``None``."""
-    missing_required_fields = tuple(
-        field for field in REQUIRED_NON_EMPTY_FIELDS if not merged_dto.get(field)
-    )
-    if not missing_required_fields:
-        return None
-    return (
-        "the episode item is missing required field(s) "
-        f"{', '.join(missing_required_fields)}. Sending this update would clear "
-        "them on the server instead of leaving them alone."
     )
 
 
@@ -445,113 +424,13 @@ def _describe_plan(plan: EpisodeNumberPlan) -> None:
         _log_line(f"  {label} {field}: {old_value!r} -> {new_value!r}")
 
 
-def _unmatched_position_count(
-    local_positions: frozenset[tuple[int, int]],
-    candidate_positions: Mapping[tuple[int, int], TvdbEpisode],
-) -> int:
-    """Return how many local positions a candidate's episode list doesn't cover."""
-    return sum(1 for position in local_positions if position not in candidate_positions)
-
-
-def resolve_series_tvdb_id(
-    client: JellyfinClient,
-    tvdb_client: TvdbClient,
-    series_name: str,
-    series_id: str,
-    assigned_tvdb_id: str | None,
-) -> str | None:
-    """Return the TheTVDB series id that best explains this series' local episodes.
-
-    Jellyfin's own assigned TheTVDB id for a series can itself be the wrong
-    one - TheTVDB sometimes has more than one series entry sharing an exact
-    name (e.g. a decades-old show and a from-scratch modern revival, each
-    independently numbering their own "Season 1"), and Jellyfin's automatic
-    matching has no way to know which one actually explains a given local
-    library's episodes. Blindly trusting the assigned id here would mean a
-    wrong match doesn't just go uncorrected, it gets used to actively number
-    (and potentially rename) episodes against some *other* show's episode
-    list.
-
-    This searches TheTVDB by name for up to ``_MAX_TVDB_SEARCH_CANDIDATES``
-    same-named candidates, adds the assigned id itself if it isn't already
-    among them, fetches each candidate's aired-order episode list, and picks
-    whichever one's positions best overlap this series' full local
-    (season, episode) set - across every season, not just the one being
-    numbered, since a wrong id can still coincidentally explain a single
-    season while failing everywhere else.
-
-    Args:
-        client: Client for the server the series lives on.
-        tvdb_client: TheTVDB client to search and fetch candidate episode
-            lists with.
-        series_name: Series display name, used for the TheTVDB search.
-        series_id: Jellyfin Series item identifier, to read local episode
-            positions from.
-        assigned_tvdb_id: The TheTVDB id Jellyfin currently has assigned to
-            this series, if any - always considered as a candidate even
-            when TheTVDB's search doesn't itself surface it.
-
-    Returns:
-        The best-fitting TheTVDB id, or ``assigned_tvdb_id`` unchanged when
-        there's nothing to compare against (no local episodes at all, or
-        the search fails) or no other candidate beats it. ``None`` only
-        when there's no assigned id and no candidate was found at all.
-    """
-    local_positions = client.get_series_episode_positions(series_id)
-    if not local_positions:
-        return assigned_tvdb_id
-
-    candidate_ids: list[str] = [assigned_tvdb_id] if assigned_tvdb_id is not None else []
-
-    try:
-        search_results = tvdb_client.search_series(series_name)
-    except TvdbError as error:
-        LOGGER.warning("Skipping TheTVDB series search for %r: %s", series_name, error)
-        search_results = ()
-
-    considered = 0
-    for result in search_results:
-        if result.id in candidate_ids:
-            continue
-        if considered >= _MAX_TVDB_SEARCH_CANDIDATES:
-            break
-        considered += 1
-        candidate_ids.append(result.id)
-
-    if not candidate_ids:
-        return None
-    if len(candidate_ids) == 1:
-        return candidate_ids[0]
-
-    best_id = candidate_ids[0]
-    best_unmatched = None
-    for candidate_id in candidate_ids:
-        try:
-            episodes = tvdb_client.get_series_episodes(
-                candidate_id, "official", series_name=series_name
-            )
-        except TvdbError as error:
-            LOGGER.warning(
-                "Skipping TheTVDB candidate %s for %r: %s", candidate_id, series_name, error
-            )
-            continue
-        candidate_positions = {
-            (episode.season_number, episode.episode_number): episode for episode in episodes
-        }
-        unmatched = _unmatched_position_count(local_positions, candidate_positions)
-        if best_unmatched is None or unmatched < best_unmatched:
-            best_unmatched = unmatched
-            best_id = candidate_id
-
-    return best_id
-
-
 def run_apply_episode_numbers(
     *,
     series_name: str,
     season_number: int,
     server_key: str | None,
     library_name: str | None,
+    path_filter: str | None = None,
     assume_yes: bool,
 ) -> int:
     """Fill in missing episode numbers for one series' season from TheTVDB.
@@ -563,6 +442,9 @@ def run_apply_episode_numbers(
             use servers.toml's default_server.
         library_name: Library name to restrict the series search to, or
             ``None`` to search every TV library.
+        path_filter: When given, only a series whose Path contains this text
+            (case-insensitively) is considered - disambiguates a series name
+            that matches more than one show.
         assume_yes: Skip the interactive confirmation prompt when ``True``.
 
     Returns:
@@ -593,7 +475,9 @@ def run_apply_episode_numbers(
     try:
         with JellyfinClient(server) as client:
             LOGGER.debug("Looking up series %r on %s...", series_name, server.name)
-            matches = client.find_series(series_name, library_name=library_name)
+            matches = client.find_series(
+                series_name, library_name=library_name, path_filter=path_filter
+            )
             if not matches:
                 _log_line(
                     f"No series named {series_name!r} was found on {server.name}.",
@@ -607,7 +491,7 @@ def run_apply_episode_numbers(
                 _log_line(
                     f"Series name {series_name!r} matches shows in more than one "
                     f"library ({library_names}) on {server.name}. Use --library "
-                    "to disambiguate.",
+                    "and/or --path to disambiguate.",
                     error=True,
                 )
                 return 1
@@ -652,7 +536,7 @@ def run_apply_episode_numbers(
                     series_name,
                 )
                 tvdb_id = resolve_series_tvdb_id(
-                    client, tvdb_client, series_name, match.series_id, match.tvdb_id
+                    client, tvdb_client, series_name, match.series_id, match.tvdb_id, logger=LOGGER
                 )
                 if tvdb_id is None:
                     _log_line(
@@ -821,6 +705,15 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--path",
+        metavar="PARTIAL_PATH",
+        help=(
+            "Limit the series search to a series whose path contains this "
+            "text (case-insensitive), to disambiguate a series name that "
+            "matches more than one show."
+        ),
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Skip the confirmation prompt and apply immediately.",
@@ -860,6 +753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         season_number=args.season_number,
         server_key=args.server,
         library_name=args.library,
+        path_filter=args.path,
         assume_yes=args.yes,
     )
 

@@ -295,11 +295,11 @@ class ReportGenerationTests(unittest.TestCase):
             media_item=movie_item,
         )
         non_actionable_finding = _make_finding(
-            category=AuditCategory.VIDEO,
+            category=AuditCategory.ARTWORK,
             severity=AuditSeverity.INFO,
             title="Alien",
-            message="HDR",
-            check_name="hdr_video",
+            message="Backdrop missing",
+            check_name="missing_backdrop",
             media_item=movie_item,
         )
         library_result = LibraryAuditResult(
@@ -357,7 +357,7 @@ class ReportGenerationTests(unittest.TestCase):
                 self.assertTrue((server_dir / "checks" / "missing_primary_image.html").exists())
                 self.assertFalse((server_dir / "categories").exists())
                 self.assertFalse((server_dir / "media").exists())
-                self.assertFalse((server_dir / "checks" / "hdr_video.html").exists())
+                self.assertFalse((server_dir / "checks" / "missing_backdrop.html").exists())
 
                 root_index_html = (root_dir / "index.html").read_text(encoding="utf-8")
                 index_html = index_path.read_text(encoding="utf-8")
@@ -396,7 +396,6 @@ class ReportGenerationTests(unittest.TestCase):
         self.assertIn("✗ missing", library_html)
         self.assertIn("Alien", library_html)
         self.assertIn("Primary Image", check_html)
-        self.assertNotIn("HDR", check_html)
         self.assertNotIn("Backdrop", root_index_html)
         self.assertNotIn("Backdrop", index_html)
         self.assertNotIn("Backdrop", check_html)

@@ -355,6 +355,188 @@ class JellyfinClientSeriesLookupTests(unittest.TestCase):
             (jellyfin.SeriesMatch(library_name="Anime", series_id="s2", tvdb_id=None),),
         )
 
+    def test_find_series_with_path_filter_only_keeps_matching_paths(self) -> None:
+        client = self._make_client()
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                _library_response(),
+                _items_response(
+                    [
+                        {
+                            "Id": "s1",
+                            "Name": "The Office",
+                            "ProviderIds": {},
+                            "Path": "/media/TV Shows/The Office (US)",
+                        }
+                    ]
+                ),
+                _items_response(
+                    [
+                        {
+                            "Id": "s2",
+                            "Name": "The Office",
+                            "ProviderIds": {},
+                            "Path": "/media/Anime/The Office (UK)",
+                        }
+                    ]
+                ),
+            ],
+        ):
+            matches = client.find_series("The Office", path_filter="(uk)")
+
+        self.assertEqual(
+            matches,
+            (
+                jellyfin.SeriesMatch(
+                    library_name="Anime",
+                    series_id="s2",
+                    tvdb_id=None,
+                    path=Path("/media/Anime/The Office (UK)"),
+                ),
+            ),
+        )
+
+    def test_find_series_with_path_filter_excludes_a_series_with_no_path(self) -> None:
+        client = self._make_client()
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                _library_response(),
+                _items_response([{"Id": "s1", "Name": "The Office", "ProviderIds": {}}]),
+                _items_response([]),
+            ],
+        ):
+            matches = client.find_series("The Office", path_filter="us")
+
+        self.assertEqual(matches, ())
+
+    def test_find_movie_matches_case_insensitively_and_returns_path_and_year(self) -> None:
+        client = self._make_client()
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                _library_response(),
+                _items_response(
+                    [
+                        {
+                            "Id": "m1",
+                            "Name": "Movie Name",
+                            "Path": "/media/movies/Movie Name (2001).mkv",
+                            "ProductionYear": 2001,
+                        }
+                    ]
+                ),
+            ],
+        ):
+            matches = client.find_movie("movie name")
+
+        self.assertEqual(
+            matches,
+            (
+                jellyfin.MovieMatch(
+                    library_name="Movies",
+                    movie_id="m1",
+                    name="Movie Name",
+                    path=Path("/media/movies/Movie Name (2001).mkv"),
+                    year=2001,
+                ),
+            ),
+        )
+
+    def test_find_movie_only_queries_movie_libraries(self) -> None:
+        client = self._make_client()
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[_library_response(), _items_response([])],
+        ) as mock_request:
+            matches = client.find_movie("Nonexistent")
+
+        # One request for libraries, one for the single movie library - the
+        # two TV libraries must never be queried for a movie lookup.
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(matches, ())
+
+    def test_find_movie_with_library_name_only_queries_that_library(self) -> None:
+        client = self._make_client()
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                _library_response(),
+                _items_response([{"Id": "m1", "Name": "Movie Name"}]),
+            ],
+        ) as mock_request:
+            matches = client.find_movie("Movie Name", library_name="movies")
+
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(
+            matches,
+            (
+                jellyfin.MovieMatch(
+                    library_name="Movies", movie_id="m1", name="Movie Name", path=None, year=None
+                ),
+            ),
+        )
+
+    def test_find_movie_with_path_filter_only_keeps_matching_paths(self) -> None:
+        client = self._make_client()
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                _library_response(),
+                _items_response(
+                    [
+                        {
+                            "Id": "m1",
+                            "Name": "Dup",
+                            "Path": "/media/Movies/Kids/Dup (2001).mkv",
+                            "ProductionYear": 2001,
+                        },
+                        {
+                            "Id": "m2",
+                            "Name": "Dup",
+                            "Path": "/media/Movies/Horror/Dup (1988).mkv",
+                            "ProductionYear": 1988,
+                        },
+                    ]
+                ),
+            ],
+        ):
+            matches = client.find_movie("Dup", path_filter="horror")
+
+        self.assertEqual(
+            matches,
+            (
+                jellyfin.MovieMatch(
+                    library_name="Movies",
+                    movie_id="m2",
+                    name="Dup",
+                    path=Path("/media/Movies/Horror/Dup (1988).mkv"),
+                    year=1988,
+                ),
+            ),
+        )
+
+    def test_find_movie_with_path_filter_excludes_a_movie_with_no_path(self) -> None:
+        client = self._make_client()
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[
+                _library_response(),
+                _items_response([{"Id": "m1", "Name": "Dup", "ProductionYear": 2001}]),
+            ],
+        ):
+            matches = client.find_movie("Dup", path_filter="anything")
+
+        self.assertEqual(matches, ())
+
     def test_get_series_season_episodes_filters_and_sorts(self) -> None:
         client = self._make_client()
         raw_episodes = [

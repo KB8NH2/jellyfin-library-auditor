@@ -18,6 +18,7 @@ from media import get_primary_audio_codec
 from media import get_video_codec
 from media import has_english_subtitles
 from media import has_jellyfin_primary_image
+from media import relative_to_media_root
 from models import MediaItem
 from models import MediaLibrary
 from output_layout import audit_results_root
@@ -186,9 +187,15 @@ def mismatched_metadata_transfer_targets(
         return ()
 
     comparison = _build_comparison(left_result, right_result)
+    # comparison["mismatched_metadata"] was already built by running every
+    # matched pair through _mismatched_metadata_row() once; reuse that
+    # result as an item-id membership set instead of recomputing the same
+    # per-field comparison (title/season/episode/year/resolution/codecs)
+    # again here for every pair.
+    mismatched_item_ids = {(row[2], row[3]) for row in comparison["mismatched_metadata"]}
     targets: list[MetadataTransferTarget] = []
     for pair in comparison["matched_pairs"]:
-        if _mismatched_metadata_row(pair, left_server_key, right_server_key) is None:
+        if (pair.left.id, pair.right.id) not in mismatched_item_ids:
             continue
         targets.append(
             MetadataTransferTarget(
@@ -664,19 +671,30 @@ def _pair_by_filename_identity(
 
 
 def _group_items_by_filename_identity(items: list[MediaItem]) -> dict[str, list[MediaItem]]:
-    """Group items by their normalized media file base filename."""
+    """Group items by their normalized parent-folder/filename identity."""
     grouped: dict[str, list[MediaItem]] = {}
     for item in items:
-        identity = _filename_identity(item)
-        if not identity:
+        if not item.path.stem.strip():
             continue
-        grouped.setdefault(identity, []).append(item)
+        grouped.setdefault(_filename_identity(item), []).append(item)
     return grouped
 
 
 def _filename_identity(item: MediaItem) -> str:
-    """Return a normalized base filename used to match items across servers."""
-    return item.path.stem.strip().casefold()
+    """Return a normalized parent-folder/filename identity used to match items across servers.
+
+    The immediate containing folder is included alongside the filename so
+    that two different episodes sharing a filename in different season
+    folders (e.g. "Season 01/01.mkv" and "Season 02/01.mkv"), or two
+    different movies sharing a filename in different movie folders, aren't
+    treated as the same file. That folder name is expected to be identical
+    on both servers even when the rest of the path differs (a different
+    mount point or drive letter), since it's the file's own leaf container,
+    not something either server's mount path would insert or remove.
+    """
+    parent_name = item.path.parent.name.strip().casefold()
+    stem = item.path.stem.strip().casefold()
+    return f"{parent_name}/{stem}"
 
 
 def _group_items_by_loose_identity(items: list[MediaItem]) -> dict[tuple, list[MediaItem]]:
@@ -725,8 +743,32 @@ def _pair_item_group(left_items: list, right_items: list) -> tuple[list[tuple[ob
     )
 
 
+_SEASON_FOLDER_NAME_PATTERN = re.compile(r"^season\s*\d+$|^specials?$", re.IGNORECASE)
+
+
+def _series_or_movie_folder_identity(item: MediaItem) -> str:
+    """Return a normalized identity for the item's own series/movie folder.
+
+    For a movie, or an episode with no season subfolder, this is just the
+    immediate parent folder (e.g. "Movie Title (2010)"). For an episode
+    stored as <Series>/<Season NN>/<file>, the season folder itself is
+    skipped in favor of its parent - the series folder - since the season
+    folder name alone (e.g. "Season 01") is identical across any two
+    same-named series using the same season-naming convention, and so
+    can't tell them apart. Season/episode numbers already disambiguate
+    positions *within* one series; what this adds is disambiguating
+    *which* series, for two series (or two movies) that happen to share a
+    display name but live in different folders.
+    """
+    parent = item.path.parent
+    if item.is_episode and _SEASON_FOLDER_NAME_PATTERN.match(parent.name.strip()):
+        parent = parent.parent
+    return parent.name.strip().casefold()
+
+
 def _comparison_identity(item) -> tuple:
     """Return a best-effort cross-server identity for a media item."""
+    folder_identity = _series_or_movie_folder_identity(item)
     if item.is_episode:
         return (
             "episode",
@@ -734,15 +776,18 @@ def _comparison_identity(item) -> tuple:
             item.season_number,
             item.episode_number,
             _normalized_comparison_text(item.title),
+            folder_identity,
         )
     return (
         "movie",
         _normalized_comparison_text(item.title),
+        folder_identity,
     )
 
 
 def _loose_comparison_identity(item: MediaItem) -> tuple:
     """Return a user-visible fallback identity for matching near-equal media."""
+    folder_identity = _series_or_movie_folder_identity(item)
     if item.is_episode:
         return (
             "episode-fallback",
@@ -750,10 +795,12 @@ def _loose_comparison_identity(item: MediaItem) -> tuple:
             _normalized_comparison_text(item.season_name),
             item.episode_number,
             _normalized_comparison_text(item.title),
+            folder_identity,
         )
     return (
         "movie-fallback",
         _normalized_comparison_text(item.title),
+        folder_identity,
     )
 
 
@@ -911,13 +958,7 @@ def _metadata_episode_name(item: MediaItem) -> str:
 
 def _media_relative_path_sort_key(path: Path) -> str:
     """Return a sortable path value using only the segment after the last "media" directory."""
-    segments = str(path).replace("\\", "/").split("/")
-    media_indexes = [
-        index for index, segment in enumerate(segments) if segment.casefold() == "media"
-    ]
-    if media_indexes:
-        segments = segments[media_indexes[-1] + 1 :]
-    return "/".join(segments).casefold()
+    return relative_to_media_root(path).casefold()
 
 
 def _server_settings_rows(

@@ -8,6 +8,7 @@ dataclasses instead of passing around raw Jellyfin JSON.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 
@@ -182,7 +183,12 @@ class MediaItem:
     episode_number: int | None
     year: int | None
     runtime_ticks: int | None
-    image_tags: dict[str, str]
+    # Excluded from the auto-generated __hash__ (via hash=False) since a
+    # dict is unhashable - hashing a MediaItem would otherwise always raise
+    # TypeError despite the class being frozen=True. Still fully part of
+    # __eq__ (its default compare=True is unchanged), so two items that
+    # differ only in image_tags still compare unequal.
+    image_tags: dict[str, str] = field(hash=False)
     subtitle_tracks: tuple[SubtitleTrack, ...]
     audio_tracks: tuple[AudioTrack, ...]
     video_track: VideoTrack | None

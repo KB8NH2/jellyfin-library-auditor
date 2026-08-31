@@ -31,8 +31,8 @@ numbering their own "Season 1" independently), Jellyfin's automatic
 matching has no way to know which one actually explains the local
 library - and a wrong match here wouldn't just go uncorrected, it would
 actively rename episodes to some other show's titles. See
-resolve_series_tvdb_id() for how the right one is picked. It does not
-contain audit logic or report formatting.
+tvdb_series_resolution.resolve_series_tvdb_id() for how the right one is
+picked. It does not contain audit logic or report formatting.
 """
 
 from __future__ import annotations
@@ -53,12 +53,15 @@ from config import get_config
 from jellyfin import EpisodeSummary
 from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
-from transfer_metadata import NON_EDITABLE_ITEM_FIELDS
-from transfer_metadata import REQUIRED_NON_EMPTY_FIELDS
+from title_backup import build_title_merged_item_dto
+from title_backup import build_title_restore_merged_item_dto
+from transfer_metadata import changed_fields
+from transfer_metadata import rejected_reason as _rejected_reason
 from tvdb import TvdbClient
 from tvdb import TvdbEpisode
 from tvdb import TvdbEpisodeCache
 from tvdb import TvdbError
+from tvdb_series_resolution import resolve_series_tvdb_id
 
 
 LOGGER = logging.getLogger("apply_episode_titles")
@@ -66,12 +69,6 @@ LOGGER = logging.getLogger("apply_episode_titles")
 # Append-only record of every apply attempt, mirroring
 # apply_dvd_metadata.py's DVD_METADATA_LOG_FILE convention.
 EPISODE_TITLES_LOG_FILE = Path("episode_titles_apply.log")
-
-# Bounds worst-case TheTVDB calls for a generically-named series without
-# likely missing the real match - TheTVDB ranks search results
-# most-relevant first. Mirrors auditor.py's identical cap for the same
-# search-then-score-by-local-episode-overlap approach.
-_MAX_TVDB_SEARCH_CANDIDATES = 5
 
 # Fields this tool ever writes, and therefore diffs/locks. OriginalTitle only
 # ever changes as a side effect of a Name change (see
@@ -100,125 +97,12 @@ def _log_line(message: str, *, error: bool = False) -> None:
         log_file.write(f"{timestamp} {level} apply_episode_titles: {message}\n")
 
 
-# Jellyfin deserializes LockedFields into its own MetadataField enum
-# (Cast, Genres, ProductionLocations, Studios, Tags, Name, Overview,
-# Runtime, OfficialRating) - OriginalTitle is not a member. Sending any
-# value outside that set fails the *entire* update with a 400, not just
-# that one entry, so only ever lock fields known to be valid there.
-LOCKABLE_METADATA_FIELDS = frozenset({"Name"})
-
-
-def _lock_changed_fields(
-    destination_dto: Mapping[str, Any],
-    merged_dto: dict[str, Any],
-    changed_fields: list[str],
-) -> None:
-    """Add every changed, lockable field to the item's LockedFields, in place.
-
-    This is the same thing Jellyfin's own "Edit Metadata" dialog does when a
-    field is changed by hand. Without it, a library with TheTVDB's internet
-    metadata provider enabled treats Name as provider-owned and its next
-    scheduled/on-demand metadata refresh silently overwrites the rename
-    again, even though the API write itself succeeded.
-    """
-    lockable_changed_fields = [
-        field for field in changed_fields if field in LOCKABLE_METADATA_FIELDS
-    ]
-    if not lockable_changed_fields:
-        return
-    existing_locked_fields = destination_dto.get("LockedFields") or []
-    merged_dto["LockedFields"] = list(
-        dict.fromkeys([*existing_locked_fields, *lockable_changed_fields])
-    )
-
-
-def build_title_merged_item_dto(
-    destination_dto: Mapping[str, Any],
-    target_name: str,
-) -> dict[str, Any]:
-    """Return the destination episode document with its Name renamed.
-
-    Mirrors transfer_metadata.build_merged_item_dto: starts from a full copy
-    of the destination document minus NON_EDITABLE_ITEM_FIELDS. Before
-    overwriting Name, the episode's current Name is copied into
-    OriginalTitle, the same backup convention apply_dvd_metadata.py uses -
-    this does mean a genuine original-language title already stored in
-    OriginalTitle is overwritten, since this tool repurposes that field as
-    its own undo backup.
-
-    Args:
-        destination_dto: Full episode item document read from Jellyfin.
-        target_name: TheTVDB title to rename this episode to.
-
-    Returns:
-        A new item document ready to send back to the server.
-    """
-    merged_dto = {
-        field: value
-        for field, value in destination_dto.items()
-        if field not in NON_EDITABLE_ITEM_FIELDS
-    }
-    merged_dto["OriginalTitle"] = destination_dto.get("Name")
-    merged_dto["Name"] = target_name
-
-    _lock_changed_fields(destination_dto, merged_dto, ["OriginalTitle", "Name"])
-    return merged_dto
-
-
-def build_title_restore_merged_item_dto(
-    destination_dto: Mapping[str, Any],
-    original_title: str,
-) -> dict[str, Any]:
-    """Return the destination episode document with its Name restored from OriginalTitle.
-
-    Sets Name back to the episode's own OriginalTitle - the backup
-    build_title_merged_item_dto writes there before an earlier rename -
-    undoing that rename. OriginalTitle itself is left untouched: there is
-    nothing further to preserve once Name is already back to what it held
-    before.
-
-    Args:
-        destination_dto: Full episode item document read from Jellyfin.
-        original_title: The episode's own OriginalTitle backup value.
-
-    Returns:
-        A new item document ready to send back to the server.
-    """
-    merged_dto = {
-        field: value
-        for field, value in destination_dto.items()
-        if field not in NON_EDITABLE_ITEM_FIELDS
-    }
-    merged_dto["Name"] = original_title
-
-    _lock_changed_fields(destination_dto, merged_dto, ["Name"])
-    return merged_dto
-
-
 def _changed_fields(
     destination_dto: Mapping[str, Any],
     merged_dto: Mapping[str, Any],
 ) -> tuple[tuple[str, Any, Any], ...]:
     """Return (field, old_value, new_value) for each field that will change."""
-    return tuple(
-        (field, destination_dto.get(field), merged_dto.get(field))
-        for field in METADATA_FIELDS
-        if destination_dto.get(field) != merged_dto.get(field)
-    )
-
-
-def _rejected_reason(merged_dto: Mapping[str, Any]) -> str | None:
-    """Return why a merged item document is unsafe to write, or ``None``."""
-    missing_required_fields = tuple(
-        field for field in REQUIRED_NON_EMPTY_FIELDS if not merged_dto.get(field)
-    )
-    if not missing_required_fields:
-        return None
-    return (
-        "the episode item is missing required field(s) "
-        f"{', '.join(missing_required_fields)}. Sending this update would clear "
-        "them on the server instead of leaving them alone."
-    )
+    return changed_fields(destination_dto, merged_dto, METADATA_FIELDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,115 +361,13 @@ def _describe_plan(plan: EpisodeTitlePlan, *, order_label: str, restore: bool = 
         _log_line(f"  {label} {field}: {old_value!r} -> {new_value!r}")
 
 
-def _unmatched_position_count(
-    local_positions: frozenset[tuple[int, int]],
-    candidate_positions: Mapping[tuple[int, int], TvdbEpisode],
-) -> int:
-    """Return how many local positions a candidate's episode list doesn't cover."""
-    return sum(1 for position in local_positions if position not in candidate_positions)
-
-
-def resolve_series_tvdb_id(
-    client: JellyfinClient,
-    tvdb_client: TvdbClient,
-    series_name: str,
-    series_id: str,
-    assigned_tvdb_id: str | None,
-) -> str | None:
-    """Return the TheTVDB series id that best explains this series' local episodes.
-
-    Jellyfin's own assigned TheTVDB id for a series can itself be the wrong
-    one - TheTVDB sometimes has more than one series entry sharing an exact
-    name (e.g. a decades-old show and a from-scratch modern revival, each
-    independently numbering their own "Season 1"), and Jellyfin's automatic
-    matching has no way to know which one actually explains a given local
-    library's episodes. Blindly trusting the assigned id here would mean a
-    wrong match doesn't just go uncorrected, it gets used to actively
-    rename episodes to some *other* show's titles.
-
-    This searches TheTVDB by name for up to ``_MAX_TVDB_SEARCH_CANDIDATES``
-    same-named candidates, adds the assigned id itself if it isn't already
-    among them, fetches each candidate's aired-order episode list, and picks
-    whichever one's positions best overlap this series' full local
-    (season, episode) set - across every season, not just the one being
-    renamed, since a wrong id can still coincidentally explain a single
-    season while failing everywhere else. Aired order is used for this
-    comparison regardless of which ordering the caller ultimately wants
-    titles from, since it's the ordering most likely to be fully populated
-    for the genuinely correct series.
-
-    Args:
-        client: Client for the server the series lives on.
-        tvdb_client: TheTVDB client to search and fetch candidate episode
-            lists with.
-        series_name: Series display name, used for the TheTVDB search.
-        series_id: Jellyfin Series item identifier, to read local episode
-            positions from.
-        assigned_tvdb_id: The TheTVDB id Jellyfin currently has assigned to
-            this series, if any - always considered as a candidate even
-            when TheTVDB's search doesn't itself surface it.
-
-    Returns:
-        The best-fitting TheTVDB id, or ``assigned_tvdb_id`` unchanged when
-        there's nothing to compare against (no local episodes at all, or
-        the search fails) or no other candidate beats it. ``None`` only
-        when there's no assigned id and no candidate was found at all.
-    """
-    local_positions = client.get_series_episode_positions(series_id)
-    if not local_positions:
-        return assigned_tvdb_id
-
-    candidate_ids: list[str] = [assigned_tvdb_id] if assigned_tvdb_id is not None else []
-
-    try:
-        search_results = tvdb_client.search_series(series_name)
-    except TvdbError as error:
-        LOGGER.warning("Skipping TheTVDB series search for %r: %s", series_name, error)
-        search_results = ()
-
-    considered = 0
-    for result in search_results:
-        if result.id in candidate_ids:
-            continue
-        if considered >= _MAX_TVDB_SEARCH_CANDIDATES:
-            break
-        considered += 1
-        candidate_ids.append(result.id)
-
-    if not candidate_ids:
-        return None
-    if len(candidate_ids) == 1:
-        return candidate_ids[0]
-
-    best_id = candidate_ids[0]
-    best_unmatched = None
-    for candidate_id in candidate_ids:
-        try:
-            episodes = tvdb_client.get_series_episodes(
-                candidate_id, "official", series_name=series_name
-            )
-        except TvdbError as error:
-            LOGGER.warning(
-                "Skipping TheTVDB candidate %s for %r: %s", candidate_id, series_name, error
-            )
-            continue
-        candidate_positions = {
-            (episode.season_number, episode.episode_number): episode for episode in episodes
-        }
-        unmatched = _unmatched_position_count(local_positions, candidate_positions)
-        if best_unmatched is None or unmatched < best_unmatched:
-            best_unmatched = unmatched
-            best_id = candidate_id
-
-    return best_id
-
-
 def run_apply_episode_titles(
     *,
     series_name: str,
     season_number: int,
     server_key: str | None,
     library_name: str | None,
+    path_filter: str | None = None,
     assume_yes: bool,
     use_dvd_order: bool = False,
     restore: bool = False,
@@ -600,6 +382,9 @@ def run_apply_episode_titles(
             use servers.toml's default_server.
         library_name: Library name to restrict the series search to, or
             ``None`` to search every TV library.
+        path_filter: When given, only a series whose Path contains this text
+            (case-insensitively) is considered - disambiguates a series name
+            that matches more than one show.
         assume_yes: Skip the interactive confirmation prompt when ``True``.
         use_dvd_order: Rename toward TheTVDB's DVD order instead of aired
             order (the default). Ignored when ``restore`` is ``True``.
@@ -641,7 +426,9 @@ def run_apply_episode_titles(
     try:
         with JellyfinClient(server) as client:
             LOGGER.debug("Looking up series %r on %s...", series_name, server.name)
-            matches = client.find_series(series_name, library_name=library_name)
+            matches = client.find_series(
+                series_name, library_name=library_name, path_filter=path_filter
+            )
             if not matches:
                 _log_line(
                     f"No series named {series_name!r} was found on {server.name}.",
@@ -653,7 +440,7 @@ def run_apply_episode_titles(
                 _log_line(
                     f"Series name {series_name!r} matches shows in more than one "
                     f"library ({library_names}) on {server.name}. Use --library "
-                    "to disambiguate.",
+                    "and/or --path to disambiguate.",
                     error=True,
                 )
                 return 1
@@ -696,7 +483,7 @@ def run_apply_episode_titles(
                         series_name,
                     )
                     tvdb_id = resolve_series_tvdb_id(
-                        client, tvdb_client, series_name, match.series_id, match.tvdb_id
+                        client, tvdb_client, series_name, match.series_id, match.tvdb_id, logger=LOGGER
                     )
                     if tvdb_id is None:
                         _log_line(
@@ -865,6 +652,15 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--path",
+        metavar="PARTIAL_PATH",
+        help=(
+            "Limit the series search to a series whose path contains this "
+            "text (case-insensitive), to disambiguate a series name that "
+            "matches more than one show."
+        ),
+    )
+    parser.add_argument(
         "--dvd-order",
         action="store_true",
         help="Rename toward TheTVDB's DVD order instead of aired order (the default).",
@@ -924,6 +720,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         season_number=args.season_number,
         server_key=args.server,
         library_name=args.library,
+        path_filter=args.path,
         assume_yes=args.yes,
         use_dvd_order=args.dvd_order,
         restore=args.restore,

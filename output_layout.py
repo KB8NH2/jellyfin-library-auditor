@@ -7,7 +7,6 @@ from html import escape
 import json
 from pathlib import Path
 import re
-import shutil
 
 from report_theme import render_theme_bootstrap_script
 from report_theme import render_theme_toggle

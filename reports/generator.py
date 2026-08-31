@@ -53,7 +53,7 @@ CSV_HEADER = (
 MISMATCHED_FILENAME_TITLE_CHECKS = frozenset(
     {"mismatched_episode_filename_title", "mismatched_movie_filename_title"}
 )
-NON_ACTIONABLE_CHECKS = frozenset({"hdr_video", "missing_nfo", "missing_backdrop"})
+NON_ACTIONABLE_CHECKS = frozenset({"missing_backdrop"})
 
 
 def write_csv_report(result: AuditServerResult) -> Path:

@@ -160,15 +160,51 @@ def build_merged_item_dto(
     return merged_dto
 
 
+def changed_fields(
+    destination_dto: Mapping[str, Any],
+    merged_dto: Mapping[str, Any],
+    fields: Sequence[str],
+) -> tuple[tuple[str, Any, Any], ...]:
+    """Return (field, old_value, new_value) for each of ``fields`` that will change.
+
+    Shared by every apply_*.py tool's own plan-building step: each merges a
+    destination document and wants to know which of its own writable fields
+    actually differ, just against a different field list (this module's own
+    TRANSFERABLE_METADATA_FIELDS, or another tool's own METADATA_FIELDS).
+    """
+    return tuple(
+        (field, destination_dto.get(field), merged_dto.get(field))
+        for field in fields
+        if destination_dto.get(field) != merged_dto.get(field)
+    )
+
+
 def _changed_fields(
     destination_dto: Mapping[str, Any],
     merged_dto: Mapping[str, Any],
 ) -> tuple[tuple[str, Any, Any], ...]:
     """Return (field, old_value, new_value) for each field that will change."""
-    return tuple(
-        (field, destination_dto.get(field), merged_dto.get(field))
-        for field in TRANSFERABLE_METADATA_FIELDS
-        if destination_dto.get(field) != merged_dto.get(field)
+    return changed_fields(destination_dto, merged_dto, TRANSFERABLE_METADATA_FIELDS)
+
+
+def rejected_reason(merged_dto: Mapping[str, Any]) -> str | None:
+    """Return why a merged episode document is unsafe to write, or ``None``.
+
+    Shared by apply_dvd_metadata.py, apply_episode_titles.py, and
+    apply_episode_numbers.py - each computes this identically for its own
+    from-scratch merged episode document. Kept separate from this module's
+    own inline rejection check in plan_transfer(), which is worded for a
+    generic "destination item" rather than specifically an episode.
+    """
+    missing_required_fields = tuple(
+        field for field in REQUIRED_NON_EMPTY_FIELDS if not merged_dto.get(field)
+    )
+    if not missing_required_fields:
+        return None
+    return (
+        "the episode item is missing required field(s) "
+        f"{', '.join(missing_required_fields)}. Sending this update would clear "
+        "them on the server instead of leaving them alone."
     )
 
 

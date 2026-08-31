@@ -102,6 +102,36 @@ def _sibling_file_exists(item: MediaItem, filenames: tuple[str, ...]) -> bool:
     return bool(_existing_sibling_files(item, filenames))
 
 
+_MEDIA_ROOT_SEGMENT = "media"
+
+
+def relative_to_media_root(path: Path) -> str:
+    """Return ``path`` with everything through the last "media" segment removed.
+
+    Every Jellyfin library normally lives under one shared root folder
+    (conventionally named "media"), with the library's own folder as the
+    first segment beneath it (e.g. ``.../media/TV Shows/Show/Season 01/
+    Show.S01E01.mkv``). Stripping through that "media" segment leaves a
+    path that starts with the library name and no longer depends on
+    whichever absolute mount point or drive letter a given server happens
+    to use, which is what makes it useful both for display (see
+    get_display_path) and as a sort key (see
+    comparison.generator._media_relative_path_sort_key) that lines up
+    across two differently-mounted servers.
+
+    A path with no "media" segment (not every deployment names its root
+    that way) is returned unchanged, full and untrimmed - there's no
+    reliable anchor to trim from.
+    """
+    segments = str(path).replace("\\", "/").split("/")
+    media_indexes = [
+        index for index, segment in enumerate(segments) if segment.casefold() == _MEDIA_ROOT_SEGMENT
+    ]
+    if not media_indexes:
+        return str(path)
+    return "/".join(segments[media_indexes[-1] + 1 :])
+
+
 def _normalize_for_prefix_match(value: str) -> str:
     """Normalize a path string for prefix matching."""
     return value.replace("/", "\\").casefold()
@@ -777,15 +807,26 @@ def get_audio_languages(item: MediaItem) -> tuple[str, ...]:
 
 
 def get_display_path(item: MediaItem) -> str:
-    """Return the media path with the configured display prefix removed.
+    """Return the media path trimmed for report display.
+
+    Everything through the last "media" folder segment is removed first
+    (see relative_to_media_root), leaving a path that starts with the
+    library name and no longer depends on the server's own mount point or
+    drive letter. When no "media" segment is present, the configured
+    ``REPORT_MEDIA_PATH_PREFIX`` is tried instead, for a deployment that
+    doesn't name its media root that way.
 
     Args:
         item: Media item to format.
 
     Returns:
-        The media path with ``REPORT_MEDIA_PATH_PREFIX`` removed from the start
-        when present.
+        The display path, trimmed to start at the library folder when
+        possible.
     """
+    trimmed_path = relative_to_media_root(item.path)
+    if trimmed_path != str(item.path):
+        return trimmed_path
+
     media_path_prefix = get_config().reporting.media_path_prefix
     return _strip_configured_prefix(item.path, media_path_prefix)
 

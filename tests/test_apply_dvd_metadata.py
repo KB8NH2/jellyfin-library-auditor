@@ -326,7 +326,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def find_series(self, series_name, *, library_name=None):
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
                 return series_matches
 
             def get_series_season_episodes(self, series_id, season_number):
@@ -430,7 +430,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def find_series(self, series_name, *, library_name=None):
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
                 return series_matches
 
             def get_series_season_episodes(self, series_id, season_number):
@@ -517,7 +517,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def find_series(self, series_name, *, library_name=None):
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
                 return series_matches
 
             def get_series_season_episodes(self, series_id, season_number):
@@ -699,6 +699,36 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
                     )
 
         self.assertEqual(exit_code, 1)
+
+    def test_path_filter_is_passed_through_to_find_series(self) -> None:
+        find_series_calls: list = []
+
+        class FakeClient:
+            def __init__(self, server, **kwargs):
+                self.server = server
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
+                find_series_calls.append((library_name, path_filter))
+                return ()
+
+        with patch("apply_dvd_metadata.get_config", return_value=self._make_config()):
+            with patch("apply_dvd_metadata.JellyfinClient", FakeClient):
+                apply_dvd_metadata.run_apply_dvd_metadata(
+                    series_name="The Office",
+                    season_number=1,
+                    server_key=None,
+                    library_name="TV Shows",
+                    path_filter="us version",
+                    assume_yes=True,
+                )
+
+        self.assertEqual(find_series_calls, [("TV Shows", "us version")])
 
     def test_series_without_tvdb_id_is_an_error(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id=None),)

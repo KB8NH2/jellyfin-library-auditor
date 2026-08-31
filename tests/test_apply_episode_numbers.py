@@ -185,7 +185,7 @@ class ApplyEpisodeNumbersCommandTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def find_series(self, series_name, *, library_name=None):
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
                 return series_matches
 
             def get_series_season_episodes_all(self, series_id, season_number):
@@ -469,7 +469,7 @@ class ApplyEpisodeNumbersCommandTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def find_series(self, series_name, *, library_name=None):
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
                 return series_matches
 
             def get_series_season_episodes_all(self, series_id, season_number):
@@ -701,6 +701,36 @@ class ApplyEpisodeNumbersCommandTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(update_calls, [])
+
+    def test_path_filter_is_passed_through_to_find_series(self) -> None:
+        find_series_calls: list = []
+
+        class FakeClient:
+            def __init__(self, server, **kwargs):
+                self.server = server
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
+                find_series_calls.append((library_name, path_filter))
+                return ()
+
+        with patch("apply_episode_numbers.get_config", return_value=self._make_config()):
+            with patch("apply_episode_numbers.JellyfinClient", FakeClient):
+                apply_episode_numbers.run_apply_episode_numbers(
+                    series_name="The FBI Files",
+                    season_number=1,
+                    server_key=None,
+                    library_name="TV Shows",
+                    path_filter="us version",
+                    assume_yes=True,
+                )
+
+        self.assertEqual(find_series_calls, [("TV Shows", "us version")])
 
 
 if __name__ == "__main__":

@@ -95,6 +95,8 @@ ITEM_DETAIL_FIELDS = ",".join(
 ITEM_TYPES = "Movie,Episode"
 SERIES_ITEM_TYPE = "Series"
 EPISODE_ITEM_TYPE = "Episode"
+MOVIE_ITEM_TYPE = "Movie"
+MOVIE_MATCH_FIELDS = "Path,ProductionYear"
 VIDEO_STREAM_TYPE = "video"
 AUDIO_STREAM_TYPE = "audio"
 SUBTITLE_STREAM_TYPE = "subtitle"
@@ -296,6 +298,21 @@ class SeriesMatch:
     library_name: str
     series_id: str
     tvdb_id: str | None
+    # None only for a series item Jellyfin reports with no Path at all - the
+    # find_series() path_filter can't match such a series regardless of what
+    # is asked for.
+    path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MovieMatch:
+    """One Movie item found by name, with the fields needed to rename it."""
+
+    library_name: str
+    movie_id: str
+    name: str
+    path: Path | None
+    year: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,6 +524,7 @@ class JellyfinClient:
         series_name: str,
         *,
         library_name: str | None = None,
+        path_filter: str | None = None,
     ) -> tuple[SeriesMatch, ...]:
         """Return every Series item in TV libraries whose name matches.
 
@@ -514,6 +532,12 @@ class JellyfinClient:
             series_name: Series display name to match, case-insensitively.
             library_name: When given, only that library (matched
                 case-insensitively) is searched instead of every TV library.
+            path_filter: When given, only a series whose Path contains this
+                text (case-insensitively) is included - a series with no
+                Path at all never matches. Used to disambiguate a name that
+                matches more than one series when --library alone isn't
+                specific enough (e.g. two shows sharing a name, both in the
+                same library).
 
         Returns:
             One SeriesMatch per matching series, across every TV library
@@ -523,6 +547,9 @@ class JellyfinClient:
         normalized_name = series_name.strip().casefold()
         normalized_library_name = (
             library_name.strip().casefold() if library_name is not None else None
+        )
+        normalized_path_filter = (
+            path_filter.strip().casefold() if path_filter is not None else None
         )
 
         matches: list[SeriesMatch] = []
@@ -535,7 +562,9 @@ class JellyfinClient:
             ):
                 continue
 
-            matches.extend(self._find_series_in_library(library, normalized_name))
+            matches.extend(
+                self._find_series_in_library(library, normalized_name, normalized_path_filter)
+            )
 
         return tuple(matches)
 
@@ -543,6 +572,7 @@ class JellyfinClient:
         self,
         library: MediaLibrary,
         normalized_name: str,
+        normalized_path_filter: str | None = None,
     ) -> list[SeriesMatch]:
         """Return every Series item in one library whose name matches."""
         matches: list[SeriesMatch] = []
@@ -555,7 +585,7 @@ class JellyfinClient:
                     "ParentId": library.id,
                     "Recursive": "true",
                     "IncludeItemTypes": SERIES_ITEM_TYPE,
-                    "Fields": "ProviderIds",
+                    "Fields": "ProviderIds,Path",
                     "StartIndex": start_index,
                     "Limit": self._page_size,
                 },
@@ -566,11 +596,121 @@ class JellyfinClient:
                 name = self._get_optional_str(raw_item, "Name")
                 if name is None or name.strip().casefold() != normalized_name:
                     continue
+                raw_path = self._get_optional_str(raw_item, "Path")
+                path = Path(raw_path) if raw_path else None
+                if normalized_path_filter is not None and (
+                    path is None or normalized_path_filter not in str(path).casefold()
+                ):
+                    continue
                 matches.append(
                     SeriesMatch(
+                        path=path,
                         library_name=library.name,
                         series_id=self._get_required_str(raw_item, "Id", "series item"),
                         tvdb_id=self._get_string_dict(raw_item, "ProviderIds").get("Tvdb"),
+                    )
+                )
+
+            total_count = self._get_optional_int(payload, "TotalRecordCount")
+            start_index += len(raw_items)
+
+            if not raw_items:
+                break
+            if total_count is not None and start_index >= total_count:
+                break
+            if len(raw_items) < self._page_size:
+                break
+
+        return matches
+
+    def find_movie(
+        self,
+        movie_name: str,
+        *,
+        library_name: str | None = None,
+        path_filter: str | None = None,
+    ) -> tuple[MovieMatch, ...]:
+        """Return every Movie item in movie libraries whose name matches.
+
+        Args:
+            movie_name: Movie display name to match, case-insensitively.
+            library_name: When given, only that library (matched
+                case-insensitively) is searched instead of every movie library.
+            path_filter: When given, only a movie whose Path contains this
+                text (case-insensitively) is included - a movie with no Path
+                at all never matches. Used to disambiguate a name that
+                matches more than one movie when --library alone isn't
+                specific enough.
+
+        Returns:
+            One MovieMatch per matching movie, across every movie library
+            searched.
+        """
+        normalized_name = movie_name.strip().casefold()
+        normalized_library_name = (
+            library_name.strip().casefold() if library_name is not None else None
+        )
+        normalized_path_filter = (
+            path_filter.strip().casefold() if path_filter is not None else None
+        )
+
+        matches: list[MovieMatch] = []
+        for library in self.get_libraries():
+            if not library.is_movie_library:
+                continue
+            if (
+                normalized_library_name is not None
+                and library.name.strip().casefold() != normalized_library_name
+            ):
+                continue
+
+            matches.extend(
+                self._find_movie_in_library(library, normalized_name, normalized_path_filter)
+            )
+
+        return tuple(matches)
+
+    def _find_movie_in_library(
+        self,
+        library: MediaLibrary,
+        normalized_name: str,
+        normalized_path_filter: str | None = None,
+    ) -> list[MovieMatch]:
+        """Return every Movie item in one library whose name matches."""
+        matches: list[MovieMatch] = []
+        start_index = 0
+
+        while True:
+            payload = self._request(
+                ITEMS_ENDPOINT,
+                params={
+                    "ParentId": library.id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": MOVIE_ITEM_TYPE,
+                    "Fields": MOVIE_MATCH_FIELDS,
+                    "StartIndex": start_index,
+                    "Limit": self._page_size,
+                },
+            )
+            raw_items = self._get_required_list(payload, "Items", "movies response")
+
+            for raw_item in raw_items:
+                name = self._get_optional_str(raw_item, "Name")
+                if name is None or name.strip().casefold() != normalized_name:
+                    continue
+                raw_path = self._get_optional_str(raw_item, "Path")
+                path = Path(raw_path) if raw_path else None
+                if normalized_path_filter is not None and (
+                    path is None or normalized_path_filter not in str(path).casefold()
+                ):
+                    continue
+                matches.append(
+                    MovieMatch(
+                        library_name=library.name,
+                        movie_id=self._get_required_str(raw_item, "Id", "movie item"),
+                        name=name,
+                        path=path,
+                        year=self._get_optional_int(raw_item, "ProductionYear"),
                     )
                 )
 

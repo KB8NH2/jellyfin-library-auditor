@@ -1148,36 +1148,37 @@ def _normalize_requested_library_names(names: Iterable[str]) -> tuple[str, ...]:
     return tuple(normalized_names)
 
 
+def _normalize_optional_stripped_value(value: str | None, *, flag: str, noun: str) -> str | None:
+    """Return a stripped optional CLI value, or raise if it's blank after stripping.
+
+    Shared by every ``--<flag> VALUE`` option that just needs "absent is
+    fine, present-but-blank isn't" - the message names the specific flag
+    and value kind so the error stays as clear as when each option wrote
+    its own check by hand.
+    """
+    if value is None:
+        return None
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise CommandLineUsageError(f"--{flag} requires a non-empty {noun}.")
+    return normalized_value
+
+
 def _normalize_optional_server_key(server_key: str | None) -> str | None:
     """Normalize an optional server selection key."""
-    if server_key is None:
-        return None
-    normalized_key = server_key.strip()
-    if not normalized_key:
-        raise CommandLineUsageError("--server requires a non-empty server key.")
-    return normalized_key
+    return _normalize_optional_stripped_value(server_key, flag="server", noun="server key")
 
 
 def _normalize_optional_compare_server_key(server_key: str | None) -> str | None:
     """Normalize an optional compare selection key or auto-compare sentinel."""
     if server_key == AUTO_COMPARE_SENTINEL:
         return AUTO_COMPARE_SENTINEL
-    if server_key is None:
-        return None
-    normalized_key = server_key.strip()
-    if not normalized_key:
-        raise CommandLineUsageError("--compare requires a non-empty server key.")
-    return normalized_key
+    return _normalize_optional_stripped_value(server_key, flag="compare", noun="server key")
 
 
 def _normalize_optional_series_name(series_name: str | None) -> str | None:
     """Normalize an optional --series-name filter value."""
-    if series_name is None:
-        return None
-    normalized_name = series_name.strip()
-    if not normalized_name:
-        raise CommandLineUsageError("--series-name requires a non-empty series name.")
-    return normalized_name
+    return _normalize_optional_stripped_value(series_name, flag="series-name", noun="series name")
 
 
 def _select_server(config, server_key: str | None) -> ServerConfig:
@@ -1315,7 +1316,15 @@ def _run_bulk_metadata_transfer(
         A tuple of (exit code, per-item results). Exit code is ``0`` when
         every attempted transfer succeeded (or nothing needed transferring),
         ``1`` if any item was rejected or failed.
+
+    Raises:
+        ValueError: If ``season_number`` is given without ``series_name``.
+            ``parse_args()`` already rejects this combination at the CLI
+            layer; this is a defensive check for any other caller.
     """
+    if season_number is not None and series_name is None:
+        raise ValueError("season_number requires series_name.")
+
     logger = transfer_metadata.LOGGER
     targets = mismatched_metadata_transfer_targets(left_result, right_result)
     if series_name is not None:

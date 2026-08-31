@@ -2246,6 +2246,24 @@ class BulkMetadataTransferTests(unittest.TestCase):
         self.assertEqual(update_calls[0][1], "right-0")
         self.assertEqual(len(transfer_results), 1)
 
+    def test_season_number_without_series_name_is_rejected_at_the_function_level(self) -> None:
+        """Regression test: parse_args() already rejects --season-number
+        without --series-name at the CLI layer, but _run_bulk_metadata_transfer
+        itself had no equivalent guard - any other caller passing
+        season_number alone would silently filter every series' matching
+        season instead of raising.
+        """
+        left_result, right_result = self._make_results()
+
+        with self.assertRaises(ValueError):
+            auditor._run_bulk_metadata_transfer(
+                left_result,
+                right_result,
+                dry_run=False,
+                assume_yes=True,
+                season_number=1,
+            )
+
     def test_no_matches_for_series_name_filter_reports_zero_without_error(self) -> None:
         left_result, right_result = self._make_results()
         target = MetadataTransferTarget(

@@ -1524,3 +1524,169 @@ class BuildComparisonTests(unittest.TestCase):
             DEFAULT_COMPARISON_OUTPUT_DIR,
             Path("audit_results") / "comparison_results",
         )
+
+    def test_same_filename_in_different_season_folders_does_not_cross_pair(self) -> None:
+        """Regression test: two different episodes sharing a filename in
+        different season folders (e.g. two "01.mkv" files) must not be
+        paired with each other just because _pair_item_group's final
+        fallback zips whatever's left in a shared identity group
+        positionally - the season folder has to be part of the filename
+        identity, not just the bare filename.
+        """
+        left_s1 = _make_item(
+            "Left S1E1",
+            item_id="left-s1",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Show",
+            season_number=1,
+            episode_number=1,
+            path=Path("Show/Season 01/01.mkv"),
+        )
+        left_s2 = _make_item(
+            "Left S2E1",
+            item_id="left-s2",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Show",
+            season_number=2,
+            episode_number=1,
+            path=Path("Show/Season 02/01.mkv"),
+        )
+        right_s1 = _make_item(
+            "Right S1E1",
+            item_id="right-s1",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Show",
+            season_number=1,
+            episode_number=1,
+            path=Path("Show/Season 01/01.mkv"),
+        )
+        right_s2 = _make_item(
+            "Right S2E1",
+            item_id="right-s2",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Show",
+            season_number=2,
+            episode_number=1,
+            path=Path("Show/Season 02/01.mkv"),
+        )
+        left_result = _make_single_library_result(
+            (left_s1, left_s2),
+            library_id="shows",
+            library_name="TV Shows",
+            collection_type="tv",
+        )
+        right_result = _make_single_library_result(
+            (right_s1, right_s2),
+            library_id="shows",
+            library_name="TV Shows",
+            collection_type="tv",
+        )
+
+        comparison = comparison_generator._build_comparison(left_result, right_result)
+
+        paired_ids = {
+            (pair.left.id, pair.right.id)
+            for pair in comparison["matched_pairs"]
+            if pair.library == "TV Shows"
+        }
+        self.assertEqual(paired_ids, {("left-s1", "right-s1"), ("left-s2", "right-s2")})
+
+    def test_same_titled_movies_in_different_folders_are_not_conflated(self) -> None:
+        """Regression test: two different movies sharing a title (e.g. two
+        different films both called "It") must be distinguished by their
+        own movie folder - a title-only identity would otherwise merge
+        them into one group and pair them positionally, potentially
+        pairing the wrong two movies together.
+        """
+        left_1990 = _make_item(
+            "It",
+            item_id="left-1990",
+            library="Movies",
+            path=Path("Movies/It (1990)/It (1990).mkv"),
+            year=1990,
+        )
+        left_2017 = _make_item(
+            "It",
+            item_id="left-2017",
+            library="Movies",
+            path=Path("Movies/It (2017)/It (2017).mkv"),
+            year=2017,
+        )
+        right_1990 = _make_item(
+            "It",
+            item_id="right-1990",
+            library="Movies",
+            path=Path("Movies/It (1990)/It (1990).mkv"),
+            year=1990,
+        )
+        right_2017 = _make_item(
+            "It",
+            item_id="right-2017",
+            library="Movies",
+            path=Path("Movies/It (2017)/It (2017).mkv"),
+            year=2017,
+        )
+        left_result = _make_single_library_result(
+            (left_1990, left_2017),
+            library_id="movies",
+            library_name="Movies",
+            collection_type="movies",
+        )
+        right_result = _make_single_library_result(
+            (right_1990, right_2017),
+            library_id="movies",
+            library_name="Movies",
+            collection_type="movies",
+        )
+
+        comparison = comparison_generator._build_comparison(left_result, right_result)
+
+        paired_ids = {(pair.left.id, pair.right.id) for pair in comparison["matched_pairs"]}
+        self.assertEqual(paired_ids, {("left-1990", "right-1990"), ("left-2017", "right-2017")})
+
+    def test_same_movie_with_differently_named_folder_reports_missing_instead_of_wrong_pair(
+        self,
+    ) -> None:
+        """When a movie's own folder happens to be named differently on the
+        two servers, it's reported as missing on both sides rather than
+        matched - safer than a title-only match that could pair it with
+        an unrelated same-titled movie in a different folder.
+        """
+        left_item = _make_item(
+            "Twins",
+            item_id="left-twins",
+            library="Movies",
+            path=Path("Movies/Twins (1988)/Twins.mkv"),
+        )
+        right_item = _make_item(
+            "Twins",
+            item_id="right-twins",
+            library="Movies",
+            path=Path("Movies/Twins/Twins - Copy.mkv"),
+        )
+        left_result = _make_single_library_result(
+            (left_item,),
+            library_id="movies",
+            library_name="Movies",
+            collection_type="movies",
+        )
+        right_result = _make_single_library_result(
+            (right_item,),
+            library_id="movies",
+            library_name="Movies",
+            collection_type="movies",
+        )
+
+        comparison = comparison_generator._build_comparison(left_result, right_result)
+
+        self.assertEqual(comparison["matched_pairs"], ())
+        self.assertEqual(len(comparison["missing_left_media"]), 1)
+        self.assertEqual(len(comparison["missing_right_media"]), 1)

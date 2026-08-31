@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import audit
 from audit_types import AuditCategory
 from audit_types import AuditSeverity
+import config
 import media
 from models import AudioTrack
 from models import VideoTrack
 
+from tests.helpers import _make_app_config
 from tests.helpers import _make_item
 
 
@@ -1248,3 +1251,90 @@ class MismatchedMovieFilenameTitleTests(unittest.TestCase):
         )
 
         self.assertIsNone(audit.mismatched_movie_filename_title(item))
+
+
+class RelativeToMediaRootTests(unittest.TestCase):
+    def test_strips_everything_through_the_media_segment(self) -> None:
+        result = media.relative_to_media_root(
+            Path("/mnt/left/media/TV Shows/Show/Season 01/Show.S01E09.mkv")
+        )
+
+        self.assertEqual(result, "TV Shows/Show/Season 01/Show.S01E09.mkv")
+
+    def test_matches_the_media_segment_case_insensitively(self) -> None:
+        result = media.relative_to_media_root(Path("D:/Media/Movies/Movie (2024)/Movie (2024).mkv"))
+
+        self.assertEqual(result, "Movies/Movie (2024)/Movie (2024).mkv")
+
+    def test_uses_the_last_media_segment_when_more_than_one_exists(self) -> None:
+        result = media.relative_to_media_root(Path("/srv/media/archive/media/Movies/Movie.mkv"))
+
+        self.assertEqual(result, "Movies/Movie.mkv")
+
+    def test_returns_path_unchanged_when_no_media_segment_exists(self) -> None:
+        result = media.relative_to_media_root(Path("/mnt/library/Movies/Movie.mkv"))
+
+        self.assertEqual(result, str(Path("/mnt/library/Movies/Movie.mkv")))
+
+
+class GetDisplayPathTests(unittest.TestCase):
+    def test_trims_to_the_library_folder_automatically(self) -> None:
+        item = _make_item(
+            title="Movie",
+            library="Movies",
+            path=Path("/mnt/left/media/Movies/Movie (2024)/Movie (2024).mkv"),
+        )
+
+        self.assertEqual(media.get_display_path(item), "Movies/Movie (2024)/Movie (2024).mkv")
+
+    def test_falls_back_to_configured_prefix_without_a_media_segment(self) -> None:
+        item = _make_item(
+            title="Movie",
+            library="Movies",
+            path=Path("/mnt/library/Movies/Movie.mkv"),
+        )
+
+        with patch("media.get_config", return_value=_make_app_config_with_prefix("/mnt/library")):
+            display_path = media.get_display_path(item)
+
+        self.assertEqual(display_path, str(Path("Movies/Movie.mkv")))
+
+
+class MediaItemHashabilityTests(unittest.TestCase):
+    """Regression tests for MediaItem's frozen=True hashability contract.
+
+    MediaItem is @dataclass(frozen=True, slots=True), which promises a
+    working __hash__ - but its image_tags field is a plain dict, and the
+    dataclass-generated __hash__ would try to hash it along with every
+    other field, raising TypeError. image_tags is marked field(hash=False)
+    to exclude it from hashing while still fully participating in __eq__.
+    """
+
+    def test_media_item_is_hashable(self) -> None:
+        item = _make_item(title="Movie", image_tags={"Primary": "tag"})
+
+        # Must not raise TypeError: unhashable type: 'dict'.
+        hash(item)
+
+    def test_differing_image_tags_alone_still_compare_unequal(self) -> None:
+        first = _make_item(title="Movie", item_id="same-id", image_tags={"Primary": "tag"})
+        second = _make_item(title="Movie", item_id="same-id", image_tags={})
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(hash(first), hash(second))
+
+
+def _make_app_config_with_prefix(media_path_prefix: str):
+    """Return an AppConfig with a configured REPORT_MEDIA_PATH_PREFIX, for the fallback test."""
+    app_config = _make_app_config()
+    return config.AppConfig(
+        reporting=config.ReportingConfig(
+            media_path_prefix=media_path_prefix,
+            csv_output=app_config.reporting.csv_output,
+            output=app_config.reporting.output,
+            english_language_codes=app_config.reporting.english_language_codes,
+        ),
+        processing=app_config.processing,
+        servers=app_config.servers,
+        tvdb=app_config.tvdb,
+    )
