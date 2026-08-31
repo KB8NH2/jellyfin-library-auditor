@@ -831,6 +831,44 @@ def get_display_path(item: MediaItem) -> str:
     return _strip_configured_prefix(item.path, media_path_prefix)
 
 
+def get_display_base_directory(item: MediaItem) -> str:
+    """Return the directory immediately below the library, for display.
+
+    Splits get_display_path()'s already library-trimmed value on "/" (a
+    literal backslash is normalized to one first, since the configured-
+    prefix fallback branch of get_display_path() can return either
+    separator depending on the OS) and takes the first segment after the
+    library itself - e.g. the series folder for a TV episode, or a movie's
+    own folder for a movie library organized one folder per movie.
+
+    Args:
+        item: Media item to format.
+
+    Returns:
+        The one directory name right below the library, or "" when the
+        item's file sits directly in the library folder with no such
+        directory at all (e.g. a movie library with no per-movie folder).
+    """
+    segments = get_display_path(item).replace("\\", "/").split("/")
+    return segments[1] if len(segments) > 2 else ""
+
+
+def get_display_base_filename(item: MediaItem) -> str:
+    """Return just the filename portion of an item's display path.
+
+    Everything after the last "/" in get_display_path()'s value (a literal
+    backslash is normalized to one first - see get_display_base_directory()
+    for why).
+
+    Args:
+        item: Media item to format.
+
+    Returns:
+        The item's filename, with extension.
+    """
+    return get_display_path(item).replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def media_files(item: MediaItem) -> tuple[Path, ...]:
     """Return media-adjacent files that share the same basename.
 

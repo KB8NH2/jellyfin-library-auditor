@@ -6,12 +6,13 @@ worksheet when two servers were compared. Yes/No columns on a server sheet
 get a yellow background for "Yes" cells; diff cells (any "left|right" value
 where the two sides differ) get the same treatment on the diffs sheet. The
 Episode column is formatted as text (rather than CSV's leading-apostrophe
-guard) so a merged range like "19-20" isn't misread as a date, and every
-column from Season onward is wrapped and center-aligned. A server sheet
-also gets a "Problems" column (a per-row count of that row's "Yes" cells)
-and a "Totals" row below the table (a per-column count of "Yes" cells, plus
-the sum of "Problems") - neither exists in the server's own audit CSV,
-which stays a plain per-item export.
+guard) so a merged range like "19-20" isn't misread as a date. Every cell,
+header and data alike, is wrapped and center-aligned, and every column after
+Title has a fixed width rather than the content-fitted width the columns up
+through Title get. A server sheet also gets a "Problems" column (a per-row
+count of that row's "Yes" cells) and a "Totals" row below the table (a
+per-column count of "Yes" cells, plus the sum of "Problems") - neither
+exists in the server's own audit CSV, which stays a plain per-item export.
 """
 
 from __future__ import annotations
@@ -41,21 +42,25 @@ DIFFS_SHEET_LABEL = "diffs"
 PROBLEMS_COLUMN_LABEL = "Problems"
 TOTALS_ROW_LABEL = "Totals"
 
-_SERVER_IDENTITY_COLUMNS = frozenset({"Library", "Path", "Series", "Title", "Season", "Episode"})
+_SERVER_IDENTITY_COLUMNS = frozenset(
+    {"Library", "Base Directory", "Base Filename", "Series", "Title", "Season", "Episode"}
+)
 _YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 _INVALID_SHEET_NAME_CHARS = re.compile(r"[:\\/?*\[\]]")
 _INVALID_TABLE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 _MAX_SHEET_NAME_LENGTH = 31
 _MAX_COLUMN_WIDTH = 60
-_PROBLEMS_COLUMN_WIDTH = 10
+_FIXED_COLUMN_WIDTH_AFTER_TITLE = 11
 _TEXT_NUMBER_FORMAT = "@"
 _WRAP_CENTER_ALIGNMENT = Alignment(wrap_text=True, horizontal="center", vertical="center")
 _TOTALS_ROW_FONT = Font(bold=True)
-# Column from which "Season, Episode and all subsequent columns" (per-column
-# wrap/center formatting) starts. Both CSV_HEADER and the diffs sheet's
-# header (compare_csv_files.build_header(CSV_HEADER)) keep "Season" at the
-# same position, so one column name lookup covers both sheet shapes.
-_WRAP_CENTER_START_COLUMN = "Season"
+# Column after which every subsequent column (Season, Episode, and all the
+# Yes/No/Problems columns) gets a fixed width instead of the generic
+# content-fitted one - see _set_fixed_width_after_title(). Both CSV_HEADER
+# and the diffs sheet's header (compare_csv_files.build_header(CSV_HEADER))
+# keep "Title" at the same position, so one column name lookup covers both
+# sheet shapes.
+_FIXED_WIDTH_START_COLUMN = "Title"
 
 
 def write_audit_results_workbook(
@@ -155,10 +160,7 @@ def _write_server_sheet(
         rows=rows_with_problems,
         table_name=_unique_table_name(label, used_table_names),
     )
-    # Overrides _write_table()'s generic content-fitted width, which would
-    # otherwise size this column to the Problems formula's own text length
-    # rather than the short count it actually displays.
-    sheet.column_dimensions[get_column_letter(len(header))].width = _PROBLEMS_COLUMN_WIDTH
+    _set_fixed_width_after_title(sheet, header)
 
     _add_yes_no_conditional_formatting(sheet, CSV_HEADER, last_row)
     _add_episode_text_format(sheet, CSV_HEADER, last_row)
@@ -198,6 +200,8 @@ def _write_diffs_sheet(
         rows=diff_rows,
         table_name=_unique_table_name(DIFFS_SHEET_LABEL, used_table_names),
     )
+    _set_fixed_width_after_title(sheet, diff_header)
+
     _add_diff_conditional_formatting(sheet, diff_header, last_row)
     _add_episode_text_format(sheet, diff_header, last_row)
     _add_wrap_center_alignment(sheet, diff_header, last_row)
@@ -339,14 +343,29 @@ def _add_episode_text_format(sheet: Worksheet, header: tuple[str, ...], last_row
 
 
 def _add_wrap_center_alignment(sheet: Worksheet, header: tuple[str, ...], last_row: int) -> None:
-    """Wrap and center every "Season" column onward, header and data alike."""
-    if _WRAP_CENTER_START_COLUMN not in header:
-        return
-    start_index = header.index(_WRAP_CENTER_START_COLUMN)
-    for index in range(start_index, len(header)):
+    """Wrap and center every cell in the table, header and data alike."""
+    for index in range(len(header)):
         column_letter = get_column_letter(index + 1)
         for row in range(1, last_row + 1):
             sheet[f"{column_letter}{row}"].alignment = _WRAP_CENTER_ALIGNMENT
+
+
+def _set_fixed_width_after_title(sheet: Worksheet, header: tuple[str, ...]) -> None:
+    """Set every column after "Title" to a fixed width.
+
+    Overrides the generic content-fitted width _write_table() gives every
+    column by default - a Yes/No or short numeric column doesn't need
+    content-fit sizing, and a fixed width keeps those columns visually
+    consistent regardless of what happens to be in them. Columns up through
+    Title (Library, Base Directory, Base Filename, Series, Title) keep their
+    content-fitted width, since those can genuinely vary a lot in length.
+    """
+    if _FIXED_WIDTH_START_COLUMN not in header:
+        return
+    start_index = header.index(_FIXED_WIDTH_START_COLUMN) + 1
+    for index in range(start_index, len(header)):
+        column_letter = get_column_letter(index + 1)
+        sheet.column_dimensions[column_letter].width = _FIXED_COLUMN_WIDTH_AFTER_TITLE
 
 
 def _server_label(result: AuditServerResult) -> str:

@@ -35,7 +35,7 @@ class ReportGenerationTests(unittest.TestCase):
         movie_item = _make_item(
             title="Movie One",
             library="Movies",
-            path=Path("Movie One (2024)/Movie One (2024).mkv"),
+            path=Path("Movies/Movie One (2024)/Movie One (2024).mkv"),
         )
         episode_item = _make_item(
             title="Episode Two",
@@ -46,7 +46,7 @@ class ReportGenerationTests(unittest.TestCase):
             series_name="Show Name",
             season_number=1,
             episode_number=2,
-            path=Path("Show Name/Season 01/Show Name S01E02.mkv"),
+            path=Path("TV Shows/Show Name/Season 01/Show Name S01E02.mkv"),
         )
         findings = (
             AuditFinding(
@@ -102,7 +102,8 @@ class ReportGenerationTests(unittest.TestCase):
             report_generator.CSV_HEADER,
             (
                 "Library",
-                "Path",
+                "Base Directory",
+                "Base Filename",
                 "Series",
                 "Title",
                 "Season",
@@ -125,7 +126,8 @@ class ReportGenerationTests(unittest.TestCase):
             (
                 (
                     "Movies",
-                    str(Path("Movie One (2024)/Movie One (2024).mkv")),
+                    "Movie One (2024)",
+                    "Movie One (2024).mkv",
                     "",
                     "Movie One",
                     "",
@@ -144,7 +146,8 @@ class ReportGenerationTests(unittest.TestCase):
                 ),
                 (
                     "TV Shows",
-                    str(Path("Show Name/Season 01/Show Name S01E02.mkv")),
+                    "Show Name",
+                    "Show Name S01E02.mkv",
                     "Show Name",
                     "Episode Two",
                     "1",
@@ -251,7 +254,8 @@ class ReportGenerationTests(unittest.TestCase):
         rows = report_generator._csv_rows(result)
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][5], "'5-7")
+        episode_index = report_generator.CSV_HEADER.index("Episode")
+        self.assertEqual(rows[0][episode_index], "'5-7")
 
     def test_csv_row_does_not_guard_a_plain_single_episode_number(self) -> None:
         item = _make_item(
@@ -282,7 +286,8 @@ class ReportGenerationTests(unittest.TestCase):
 
         rows = report_generator._csv_rows(result)
 
-        self.assertEqual(rows[0][5], "1")
+        episode_index = report_generator.CSV_HEADER.index("Episode")
+        self.assertEqual(rows[0][episode_index], "1")
 
     def test_write_html_report_creates_simplified_site_tree(self) -> None:
         movie_item = _make_item(title="Alien", library="Movies")

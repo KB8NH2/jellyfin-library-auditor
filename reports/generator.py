@@ -9,8 +9,9 @@ import shutil
 from urllib.parse import urlsplit
 
 from config import get_config
+from media import get_display_base_directory
+from media import get_display_base_filename
 from media import get_display_episode_number
-from media import get_display_path
 from models import MediaItem
 from output_layout import audit_results_root
 from output_layout import comparison_output_dir
@@ -33,7 +34,8 @@ from results import AuditServerResult
 
 CSV_HEADER = (
     "Library",
-    "Path",
+    "Base Directory",
+    "Base Filename",
     "Series",
     "Title",
     "Season",
@@ -269,7 +271,8 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
         rows.append(
             (
                 item.library,
-                get_display_path(item),
+                get_display_base_directory(item),
+                get_display_base_filename(item),
                 item.series_name if item.is_episode and item.series_name else "",
                 item.title,
                 str(item.season_number) if item.is_episode and item.season_number is not None else "",

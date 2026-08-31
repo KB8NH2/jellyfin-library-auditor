@@ -1,16 +1,19 @@
 """Compare two audit CSV files from a --compare operation and report real diffs.
 
 The two CSVs come from auditing the same libraries on two different Jellyfin
-servers, so every "Path" value is expected to differ (different mount points),
-and the two files won't necessarily have the same number of rows (one server
-may be missing items the other has). This script matches rows between the two
-files by the base filename of their Path column and writes one line per
-differing item: identity columns (Library, Title, Season, Episode, and Path
-replaced with Base Filename) show a single value, and every test-criteria
-column shows "L|R" ("y"/"n" for the left/right file, or "-" if the row is
-missing from that file). The output starts with a "left|right" line naming
-which input file (by filename, extension stripped) is L and which is R,
-e.g. "FELIX_audit|Jellyfin_audit".
+servers, so the audit's "Base Filename" column - everything after the last
+"/" in an item's path - is the one column expected to line up between them
+regardless of each server's own mount point or drive letter, and the two
+files won't necessarily have the same number of rows (one server may be
+missing items the other has). This script matches rows between the two files
+by that Base Filename column and writes one line per differing item: identity
+columns (Library, Base Directory, Title, Season, Episode, Base Filename) show
+a single value (or "L|R" when an identity column other than Base Filename -
+which is what matched the rows in the first place - actually differs), and
+every test-criteria column shows "L|R" ("y"/"n" for the left/right file, or
+"-" if the row is missing from that file). The output starts with a
+"left|right" line naming which input file (by filename, extension stripped)
+is L and which is R, e.g. "FELIX_audit|Jellyfin_audit".
 
 All comparisons (deciding whether a row differs, and whether an identity
 column differs enough to show as "L|R") are case-insensitive, matching the
@@ -24,14 +27,15 @@ from __future__ import annotations
 
 import argparse
 import csv
-import posixpath
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-PATH_COLUMN_NAME = "Path"
 EPISODE_COLUMN_NAME = "Episode"
-IDENTITY_COLUMNS = frozenset({"Library", "Series", "Title", "Season", EPISODE_COLUMN_NAME})
+BASE_FILENAME_COLUMN_NAME = "Base Filename"
+IDENTITY_COLUMNS = frozenset(
+    {"Library", "Base Directory", "Series", "Title", "Season", EPISODE_COLUMN_NAME, BASE_FILENAME_COLUMN_NAME}
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -91,10 +95,6 @@ def _without_excel_text_guard(row: tuple[str, ...], column_index: int) -> tuple[
     return row[:column_index] + (value[1:],) + row[column_index + 1 :]
 
 
-def without_column(row: tuple[str, ...], index: int) -> tuple[str, ...]:
-    return row[:index] + row[index + 1 :]
-
-
 def normalized(row: tuple[str, ...]) -> tuple[str, ...]:
     """Casefold every value so comparisons are case-insensitive.
 
@@ -103,11 +103,6 @@ def normalized(row: tuple[str, ...]) -> tuple[str, ...]:
     difference between two servers' metadata isn't flagged here either.
     """
     return tuple(value.casefold() for value in row)
-
-
-def basename_key(path_value: str) -> str:
-    """Return the base filename from a (always POSIX-style) media path."""
-    return posixpath.basename(path_value.rstrip("/"))
 
 
 def yn(value: str) -> str:
@@ -136,18 +131,12 @@ def _with_excel_text_guard(value: str) -> str:
 
 def build_header(header: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
-        "Base Filename"
-        if column == PATH_COLUMN_NAME
-        else column
-        if column in IDENTITY_COLUMNS
-        else f"{column} (L|R)"
-        for column in header
+        column if column in IDENTITY_COLUMNS else f"{column} (L|R)" for column in header
     )
 
 
 def combine_row(
     header: tuple[str, ...],
-    key: str,
     row_a: tuple[str, ...] | None,
     row_b: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
@@ -156,9 +145,7 @@ def combine_row(
     assert identity_source is not None
     combined = []
     for index, column in enumerate(header):
-        if column == PATH_COLUMN_NAME:
-            combined.append(key)
-        elif column in IDENTITY_COLUMNS:
+        if column in IDENTITY_COLUMNS:
             if (
                 row_a is not None
                 and row_b is not None
@@ -189,36 +176,34 @@ def diff_header_and_rows(
     Uses ``header_a`` as the output header shape, same as :func:`write_diff_csv`.
     """
     try:
-        path_index = header_a.index(PATH_COLUMN_NAME)
+        base_filename_index = header_a.index(BASE_FILENAME_COLUMN_NAME)
     except ValueError:
-        raise ValueError(f"'{PATH_COLUMN_NAME}' column not found in header") from None
+        raise ValueError(f"'{BASE_FILENAME_COLUMN_NAME}' column not found in header") from None
 
     # Bucket file B's rows by base filename so file A's rows can be realigned
     # to their counterpart even when the two files don't have matching row
     # counts or ordering.
     remaining_b: dict[str, list[tuple[str, ...]]] = defaultdict(list)
     for row in rows_b:
-        remaining_b[basename_key(row[path_index])].append(row)
+        remaining_b[row[base_filename_index]].append(row)
 
     diff_rows: list[tuple[str, ...]] = []
     for row_a in rows_a:
-        key = basename_key(row_a[path_index])
+        key = row_a[base_filename_index]
         bucket = remaining_b.get(key)
         if bucket:
             row_b = bucket.pop(0)
             if not bucket:
                 del remaining_b[key]
-            if normalized(without_column(row_a, path_index)) != normalized(
-                without_column(row_b, path_index)
-            ):
-                diff_rows.append(combine_row(header_a, key, row_a, row_b))
+            if normalized(row_a) != normalized(row_b):
+                diff_rows.append(combine_row(header_a, row_a, row_b))
         else:
             # No counterpart in file B: this row only exists in file A.
-            diff_rows.append(combine_row(header_a, key, row_a, None))
+            diff_rows.append(combine_row(header_a, row_a, None))
 
     # Anything left in remaining_b only exists in file B.
-    for key, bucket in remaining_b.items():
-        diff_rows.extend(combine_row(header_a, key, None, row_b) for row_b in bucket)
+    for bucket in remaining_b.values():
+        diff_rows.extend(combine_row(header_a, None, row_b) for row_b in bucket)
 
     return build_header(header_a), tuple(diff_rows)
 

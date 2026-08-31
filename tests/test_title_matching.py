@@ -1300,6 +1300,70 @@ class GetDisplayPathTests(unittest.TestCase):
         self.assertEqual(display_path, str(Path("Movies/Movie.mkv")))
 
 
+class GetDisplayBaseDirectoryAndFilenameTests(unittest.TestCase):
+    """The Path column shown throughout the app's reports is split into
+    Base Directory (the one directory right below the library) and Base
+    Filename (everything after the last "/") - these mirror
+    GetDisplayPathTests' own fixtures, since both are built from
+    get_display_path()'s already-trimmed value.
+    """
+
+    def test_splits_a_movie_stored_one_folder_per_movie(self) -> None:
+        item = _make_item(
+            title="Movie",
+            library="Movies",
+            path=Path("/mnt/left/media/Movies/Movie (2024)/Movie (2024).mkv"),
+        )
+
+        self.assertEqual(media.get_display_base_directory(item), "Movie (2024)")
+        self.assertEqual(media.get_display_base_filename(item), "Movie (2024).mkv")
+
+    def test_splits_a_tv_episode_dropping_the_season_folder(self) -> None:
+        """The season folder itself isn't the base directory - the audit
+        already tracks season number in its own Season column, so the base
+        directory is the series folder one level below that."""
+        item = _make_item(
+            title="Episode",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            path=Path("/mnt/left/media/TV Shows/Show/Season 01/Show.S01E09.mkv"),
+        )
+
+        self.assertEqual(media.get_display_base_directory(item), "Show")
+        self.assertEqual(media.get_display_base_filename(item), "Show.S01E09.mkv")
+
+    def test_base_directory_is_empty_when_file_sits_directly_in_the_library_folder(self) -> None:
+        """A movie library with no per-movie folder has nothing "right
+        below the library" to report."""
+        item = _make_item(
+            title="Movie",
+            library="Movies",
+            path=Path("/mnt/left/media/Movies/Movie.mkv"),
+        )
+
+        self.assertEqual(media.get_display_base_directory(item), "")
+        self.assertEqual(media.get_display_base_filename(item), "Movie.mkv")
+
+    def test_normalizes_backslashes_from_the_configured_prefix_fallback(self) -> None:
+        """The configured-prefix fallback branch of get_display_path()
+        returns OS-native separators (backslash on Windows), unlike the
+        media-root-trimmed branch, which always uses "/" - both must split
+        the same way."""
+        item = _make_item(
+            title="Movie",
+            library="Movies",
+            path=Path("/mnt/library/Movies/Movie (2024)/Movie (2024).mkv"),
+        )
+
+        with patch("media.get_config", return_value=_make_app_config_with_prefix("/mnt/library")):
+            base_directory = media.get_display_base_directory(item)
+            base_filename = media.get_display_base_filename(item)
+
+        self.assertEqual(base_directory, "Movie (2024)")
+        self.assertEqual(base_filename, "Movie (2024).mkv")
+
+
 class MediaItemHashabilityTests(unittest.TestCase):
     """Regression tests for MediaItem's frozen=True hashability contract.
 
