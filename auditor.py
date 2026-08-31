@@ -12,6 +12,8 @@ import argparse
 import contextlib
 from datetime import timedelta
 import logging
+import shlex
+import sys
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -136,12 +138,27 @@ def configure_logging() -> None:
 
 
 def _add_file_handler(logger: logging.Logger, log_file: Path) -> None:
-    """Attach a timestamped file handler to a logger.
+    """Attach a timestamped file handler to a logger, unless one for this
+    exact file is already attached.
 
     Pinned to INFO regardless of the logger's own effective level, so
     --debug's console-only progress output (LOGGER.debug(...)) never leaks
-    into this file even though it shares the same logger.
+    into this file even though it shares the same logger. The already-
+    attached check matters because _enable_general_file_logging() now runs
+    unconditionally at the top of every main() call: within one long-lived
+    process that calls main() more than once (this project's own test
+    suite, for instance), a second call with the same log file would
+    otherwise pile up a second handler, doubling every subsequent line
+    written to it instead of being a no-op.
     """
+    resolved_path = log_file.resolve()
+    for existing_handler in logger.handlers:
+        if (
+            isinstance(existing_handler, logging.FileHandler)
+            and Path(existing_handler.baseFilename) == resolved_path
+        ):
+            return
+
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
@@ -151,13 +168,15 @@ def _add_file_handler(logger: logging.Logger, log_file: Path) -> None:
 def _enable_general_file_logging() -> None:
     """Persist this run's non-transfer log output to the shared audit log file.
 
-    Only attached when at least one --transfer-metadata/--transfer-images/
-    --transfer-subtitles flag is used, matching the other
-    _enable_*_file_logging() helpers below, so a plain audit run still only
-    logs to the console. Attached to LOGGER specifically (not the per-type
-    transfer loggers those helpers use), so this file only ever contains
-    audit progress, comparison writing, and --verify output - not the
-    per-transfer-type history each of those already gets its own file for.
+    Attached unconditionally at the start of every run (not gated behind a
+    --transfer-* flag) so the invoking command line - logged immediately
+    after this is called - always lands somewhere persistent, even for a
+    plain audit run that writes no other log file. Attached to LOGGER
+    specifically (not the per-type transfer loggers the other
+    _enable_*_file_logging() helpers below use), so this file only ever
+    contains audit progress, comparison writing, and --verify output - not
+    the per-transfer-type history each of those already gets its own file
+    for.
     """
     _add_file_handler(LOGGER, AUDIT_LOG_FILE)
 
@@ -232,6 +251,7 @@ def audit_server(
     include_configuration_snapshot: bool = False,
     tvdb_client: TvdbClient | None = None,
     check_episode_order: bool = False,
+    client_request_counts: dict[str, int] | None = None,
 ) -> AuditServerResult:
     """Audit all enabled movie and TV libraries on the configured server.
 
@@ -246,6 +266,11 @@ def audit_server(
             missing seasons/episodes.
         check_episode_order: Whether TV libraries are also checked for
             aired/DVD episode-ordering mismatches. Requires ``tvdb_client``.
+        client_request_counts: When given, this call's Jellyfin API request
+            count is added to it, keyed by server key - lets a caller that
+            audits/re-audits the same server more than once in one run (e.g.
+            a --verify re-audit after a transfer) accumulate one running
+            total instead of only ever seeing this one call's count.
 
     Returns:
         Structured audit results for the server.
@@ -298,6 +323,11 @@ def audit_server(
             server_settings = client.get_server_user_experience_settings()
             library_settings = client.get_library_user_experience_settings(
                 selected_library_names
+            )
+
+        if client_request_counts is not None:
+            client_request_counts[server.key] = (
+                client_request_counts.get(server.key, 0) + client.request_count
             )
 
     return AuditServerResult(
@@ -443,13 +473,18 @@ def filter_audit_result(
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the application audit workflow and return an exit code."""
     configure_logging()
+    _enable_general_file_logging()
+    LOGGER.info(
+        "Command: auditor %s",
+        shlex.join(argv if argv is not None else sys.argv[1:]),
+    )
+
+    client_request_counts: dict[str, int] = {}
 
     try:
         options = parse_args(argv)
         if options.debug:
             logging.getLogger().setLevel(logging.DEBUG)
-        if options.transfer_metadata or options.transfer_images or options.transfer_subtitles:
-            _enable_general_file_logging()
         if options.transfer_metadata:
             _enable_metadata_transfer_file_logging()
         if options.transfer_images:
@@ -479,6 +514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     include_configuration_snapshot=include_configuration_snapshot,
                     tvdb_client=tvdb_client,
                     check_episode_order=options.check_episode_order,
+                    client_request_counts=client_request_counts,
                 )
                 for server_key in selected_server_keys
             )
@@ -530,6 +566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 series_name=options.transfer_metadata_series_name,
                 season_number=options.transfer_metadata_season_number,
                 limit=options.transfer_limit,
+                client_request_counts=client_request_counts,
             )
         image_transfer_exit_code = 0
         image_transfer_results: tuple[ImageTransferResult, ...] | None = None
@@ -540,6 +577,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dry_run=options.transfer_metadata_dry_run,
                 assume_yes=options.transfer_metadata_yes,
                 limit=options.transfer_limit,
+                client_request_counts=client_request_counts,
             )
         subtitle_transfer_exit_code = 0
         subtitle_transfer_results: tuple[SubtitleTransferResult, ...] | None = None
@@ -550,6 +588,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dry_run=options.transfer_metadata_dry_run,
                 assume_yes=options.transfer_metadata_yes,
                 limit=options.transfer_limit,
+                client_request_counts=client_request_counts,
             )
         transfer_exit_code = max(transfer_exit_code, image_transfer_exit_code, subtitle_transfer_exit_code)
         if compare_result is not None and options.verify:
@@ -564,7 +603,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "Skipping --verify: no items were actually transferred, so there is nothing to verify."
                 )
             else:
-                compare_result = _verify_transfer_result(results[0], compare_result, options)
+                compare_result = _verify_transfer_result(
+                    results[0], compare_result, options, client_request_counts=client_request_counts
+                )
         if compare_result is not None:
             _write_comparison_site(
                 results[0],
@@ -602,10 +643,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOGGER.info("Libraries audited: %d", filtered_result.libraries_audited)
         LOGGER.info("Media items processed: %d", filtered_result.media_items_processed)
         LOGGER.info("Total findings: %d", len(filtered_result.findings))
+        LOGGER.info(
+            "Jellyfin API calls: %d",
+            client_request_counts.get(filtered_result.server_key, 0),
+        )
         _log_library_summaries(filtered_result.library_results)
 
         for category, count in sorted(findings_by_category.items(), key=lambda entry: entry[0]):
             LOGGER.info("%s Findings in %s: %d", filtered_result.server_name, category.value, count)
+
+    if tvdb_client is not None:
+        LOGGER.info("TheTVDB API calls: %d", tvdb_client.request_count)
 
     return transfer_exit_code
 
@@ -1238,6 +1286,7 @@ def _verify_transfer_result(
     left_result: AuditServerResult,
     compare_result: AuditServerResult,
     options: AuditRunOptions,
+    client_request_counts: dict[str, int] | None = None,
 ) -> AuditServerResult:
     """Re-audit the --compare server after transfers finish and log what remains.
 
@@ -1254,6 +1303,9 @@ def _verify_transfer_result(
             server, used only to identify which server to re-audit.
         options: Parsed run options, for the library selection used the
             first time.
+        client_request_counts: When given, this re-audit's Jellyfin API
+            request count is added to it, keyed by server key, accumulating
+            with counts from any other phase of the run.
 
     Returns:
         Freshly audited results for the compare server.
@@ -1264,6 +1316,7 @@ def _verify_transfer_result(
         compare_result.server_key,
         options.library_names,
         include_configuration_snapshot=True,
+        client_request_counts=client_request_counts,
     )
     summary_counts = comparison_summary_counts(left_result, verified_result)
     LOGGER.info(
@@ -1290,6 +1343,7 @@ def _run_bulk_metadata_transfer(
     series_name: str | None = None,
     season_number: int | None = None,
     limit: int | None = None,
+    client_request_counts: dict[str, int] | None = None,
 ) -> tuple[int, tuple[MetadataTransferResult, ...]]:
     """Transfer metadata for every mismatched-metadata item pair between two servers.
 
@@ -1311,6 +1365,9 @@ def _run_bulk_metadata_transfer(
             to this one season number.
         limit: When given, only attempt the first N items found, regardless
             of outcome - for quickly testing bulk-mode changes.
+        client_request_counts: When given, each server client created here
+            has its Jellyfin API request count added to it, keyed by server
+            key, accumulating with counts from any other phase of the run.
 
     Returns:
         A tuple of (exit code, per-item results). Exit code is ``0`` when
@@ -1458,6 +1515,11 @@ def _run_bulk_metadata_transfer(
                 )
             )
     finally:
+        if client_request_counts is not None:
+            for server_key, client in server_clients.items():
+                client_request_counts[server_key] = (
+                    client_request_counts.get(server_key, 0) + client.request_count
+                )
         for client in server_clients.values():
             client.close()
 
@@ -1476,6 +1538,7 @@ def _run_bulk_image_transfer(
     dry_run: bool,
     assume_yes: bool,
     limit: int | None = None,
+    client_request_counts: dict[str, int] | None = None,
 ) -> tuple[int, tuple[ImageTransferResult, ...]]:
     """Transfer cached images for every artwork-differing item pair between two servers.
 
@@ -1496,6 +1559,9 @@ def _run_bulk_image_transfer(
         assume_yes: Skip the batch confirmation prompt.
         limit: When given, only attempt the first N items found, regardless
             of outcome - for quickly testing bulk-mode changes.
+        client_request_counts: When given, each server client created here
+            has its Jellyfin API request count added to it, keyed by server
+            key, accumulating with counts from any other phase of the run.
 
     Returns:
         A tuple of (exit code, per-(item, image type) results). Exit code is
@@ -1685,6 +1751,11 @@ def _run_bulk_image_transfer(
                     )
                 )
     finally:
+        if client_request_counts is not None:
+            for server_key, client in server_clients.items():
+                client_request_counts[server_key] = (
+                    client_request_counts.get(server_key, 0) + client.request_count
+                )
         for client in server_clients.values():
             client.close()
 
@@ -1704,6 +1775,7 @@ def _run_bulk_subtitle_transfer(
     dry_run: bool,
     assume_yes: bool,
     limit: int | None = None,
+    client_request_counts: dict[str, int] | None = None,
 ) -> tuple[int, tuple[SubtitleTransferResult, ...]]:
     """Transfer the English subtitle track for every subtitle-differing item pair.
 
@@ -1729,6 +1801,9 @@ def _run_bulk_subtitle_transfer(
         assume_yes: Skip the batch confirmation prompt.
         limit: When given, only attempt the first N items found, regardless
             of outcome - for quickly testing bulk-mode changes.
+        client_request_counts: When given, each server client created here
+            has its Jellyfin API request count added to it, keyed by server
+            key, accumulating with counts from any other phase of the run.
 
     Returns:
         A tuple of (exit code, per-item results). Exit code is ``0`` when
@@ -1895,6 +1970,11 @@ def _run_bulk_subtitle_transfer(
                 )
             )
     finally:
+        if client_request_counts is not None:
+            for server_key, client in server_clients.items():
+                client_request_counts[server_key] = (
+                    client_request_counts.get(server_key, 0) + client.request_count
+                )
         for client in server_clients.values():
             client.close()
 

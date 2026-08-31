@@ -45,6 +45,8 @@ from datetime import timedelta
 import difflib
 import logging
 import re
+import shlex
+import sys
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -734,6 +736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the episode-number apply workflow and return an exit code."""
     configure_logging()
     parser = _build_argument_parser()
+    _log_line(f"Command: {parser.prog} {shlex.join(argv if argv is not None else sys.argv[1:])}")
 
     try:
         args = parser.parse_args(argv)

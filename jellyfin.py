@@ -386,6 +386,7 @@ class JellyfinClient:
         self._max_retries = max(1, max_retries)
         self._retry_backoff_seconds = retry_backoff_seconds
         self._cached_user_id: str | None = None
+        self._request_count = 0
 
         self._session.headers.update(
             {
@@ -397,6 +398,17 @@ class JellyfinClient:
     def close(self) -> None:
         """Close the underlying HTTP session."""
         self._session.close()
+
+    @property
+    def request_count(self) -> int:
+        """Return the number of HTTP requests this client has issued so far.
+
+        Counts every actual attempt sent to the server, including one that
+        was retried after a timeout/connection error - each such attempt is
+        a real network round trip, not just the logical operation it was
+        part of.
+        """
+        return self._request_count
 
     def __enter__(self) -> JellyfinClient:
         """Return the client for context manager usage."""
@@ -1432,6 +1444,7 @@ class JellyfinClient:
         LOGGER.debug("Jellyfin %s %s", method, url)
         for attempt in range(1, self._max_retries + 1):
             try:
+                self._request_count += 1
                 return self._session.request(
                     method=method, url=url, timeout=self._timeout, **kwargs
                 )

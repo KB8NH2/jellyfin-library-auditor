@@ -1166,6 +1166,120 @@ class AuditServerTests(unittest.TestCase):
             ),
         )
 
+    def test_audit_server_accumulates_jellyfin_request_count(self) -> None:
+        """Regression test: the summary's per-server "Jellyfin API calls"
+        count must reflect the client this call actually used, keyed by
+        server key, and must add to (not overwrite) whatever a caller
+        already accumulated there - e.g. from an earlier audit_server() call
+        against the same server in the same run.
+        """
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs) -> None:
+                del args
+                del kwargs
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, *args) -> None:
+                del args
+
+            def ping(self) -> bool:
+                return True
+
+            def get_server_name(self) -> str:
+                return "Primary Server"
+
+            def get_libraries(self) -> list[MediaLibrary]:
+                return []
+
+            @property
+            def request_count(self) -> int:
+                return 7
+
+        fake_config = _make_app_config()
+
+        with patch("auditor.get_config", return_value=fake_config):
+            with patch("auditor.JellyfinClient", FakeClient):
+                client_request_counts = {"primary": 3}
+                auditor.audit_server("primary", client_request_counts=client_request_counts)
+
+        self.assertEqual(client_request_counts, {"primary": 10})
+
+
+class MainInvocationLoggingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        log_patch = patch("auditor.AUDIT_LOG_FILE", Path(temp_dir.name) / "audit.log")
+        log_patch.start()
+        self.addCleanup(log_patch.stop)
+
+        handlers_before = list(auditor.LOGGER.handlers)
+
+        def _remove_added_handlers() -> None:
+            for handler in list(auditor.LOGGER.handlers):
+                if handler not in handlers_before:
+                    auditor.LOGGER.removeHandler(handler)
+                    handler.close()
+
+        self.addCleanup(_remove_added_handlers)
+
+    def test_main_logs_the_invoking_command_line(self) -> None:
+        with patch("auditor.get_config", return_value=_make_app_config()):
+            exit_code = auditor.main(["--server", "does-not-matter"])
+
+        log_contents = auditor.AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Command: auditor --server does-not-matter", log_contents)
+
+    def test_main_summary_includes_jellyfin_and_tvdb_api_call_counts(self) -> None:
+        result = AuditServerResult(
+            libraries_audited=1,
+            media_items_processed=1,
+            library_results=(),
+            findings=(),
+            server_key="primary",
+            server_name="Primary",
+            server_url="http://primary:8096",
+        )
+
+        class FakeTvdbClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def __enter__(self) -> "FakeTvdbClient":
+                return self
+
+            def __exit__(self, *args) -> None:
+                del args
+
+            @property
+            def request_count(self) -> int:
+                return 12
+
+        with patch("auditor.audit_server", return_value=result):
+            with patch("auditor.write_csv_report"):
+                with patch("auditor.write_html_report"):
+                    with patch("auditor.reset_audit_results_root"):
+                        with patch("auditor.write_audit_results_index"):
+                            with patch(
+                                "auditor.get_config",
+                                return_value=_make_app_config(tvdb_api_key="tvdb-secret"),
+                            ):
+                                with patch("auditor.TvdbClient", FakeTvdbClient):
+                                    exit_code = auditor.main(["--server", "primary"])
+
+        log_contents = auditor.AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("TheTVDB API calls: 12", log_contents)
+        # audit_server() is mocked, so the fake never mutates
+        # client_request_counts itself - the summary line still reports
+        # whatever total that dict holds (0 here), proving the value comes
+        # from client_request_counts rather than being hardcoded.
+        self.assertIn("Jellyfin API calls: 0", log_contents)
+
 
 class CompareCommandTests(unittest.TestCase):
     def test_main_with_all_audits_every_configured_server(self) -> None:
@@ -1254,9 +1368,18 @@ class CompareCommandTests(unittest.TestCase):
         self.assertEqual(
             mock_audit.call_args_list,
             [
-                call("server1", (), include_configuration_snapshot=False, tvdb_client=None, check_episode_order=False),
-                call("server2", (), include_configuration_snapshot=False, tvdb_client=None, check_episode_order=False),
-                call("server3", (), include_configuration_snapshot=False, tvdb_client=None, check_episode_order=False),
+                call(
+                    "server1", (), include_configuration_snapshot=False, tvdb_client=None,
+                    check_episode_order=False, client_request_counts={},
+                ),
+                call(
+                    "server2", (), include_configuration_snapshot=False, tvdb_client=None,
+                    check_episode_order=False, client_request_counts={},
+                ),
+                call(
+                    "server3", (), include_configuration_snapshot=False, tvdb_client=None,
+                    check_episode_order=False, client_request_counts={},
+                ),
             ],
         )
         self.assertEqual(
@@ -1345,8 +1468,14 @@ class CompareCommandTests(unittest.TestCase):
         self.assertEqual(
             mock_audit.call_args_list,
             [
-                call("server1", (), include_configuration_snapshot=True, tvdb_client=None, check_episode_order=False),
-                call("server2", (), include_configuration_snapshot=True, tvdb_client=None, check_episode_order=False),
+                call(
+                    "server1", (), include_configuration_snapshot=True, tvdb_client=None,
+                    check_episode_order=False, client_request_counts={},
+                ),
+                call(
+                    "server2", (), include_configuration_snapshot=True, tvdb_client=None,
+                    check_episode_order=False, client_request_counts={},
+                ),
             ],
         )
 
@@ -1523,7 +1652,7 @@ class CompareCommandTests(unittest.TestCase):
         self.assertEqual(mock_audit.call_count, 3)
         self.assertEqual(
             mock_audit.call_args_list[2],
-            call("server2", (), include_configuration_snapshot=True),
+            call("server2", (), include_configuration_snapshot=True, client_request_counts={}),
         )
         mock_compare.assert_called_once_with(
             base_result,
@@ -1866,7 +1995,7 @@ class BulkMetadataTransferTests(unittest.TestCase):
         )
         return left_result, right_result
 
-    def _make_fake_client(self, dtos_by_server_and_item, update_calls):
+    def _make_fake_client(self, dtos_by_server_and_item, update_calls, *, request_count=0):
         class FakeClient:
             def __init__(self, server, **kwargs):
                 self.server = server
@@ -1879,6 +2008,10 @@ class BulkMetadataTransferTests(unittest.TestCase):
 
             def update_item(self, item_id, item_dto):
                 update_calls.append((self.server.key, item_id, item_dto))
+
+            @property
+            def request_count(self):
+                return request_count
 
         return FakeClient
 
@@ -1929,6 +2062,37 @@ class BulkMetadataTransferTests(unittest.TestCase):
         self.assertEqual(transfer_results[0].library, "TV Shows")
         self.assertEqual(transfer_results[0].display_name, "Show.S01E01")
         self.assertEqual(transfer_results[0].changed_fields, ("Name",))
+
+    def test_accumulates_client_request_counts_per_server(self) -> None:
+        left_result, right_result = self._make_results()
+        target = MetadataTransferTarget(
+            library="TV Shows",
+            display_name="Show.S01E01",
+            left_server_key="left",
+            left_item_id="left-id",
+            right_server_key="right",
+            right_item_id="right-id",
+        )
+        dtos = {
+            ("left", "left-id"): {"Id": "left-id", "Name": "Correct Title", "Path": "/media/left/file.mkv"},
+            ("right", "right-id"): {"Id": "right-id", "Name": "Wrong Title", "Path": "/media/right/file.mkv"},
+        }
+        update_calls: list = []
+        fake_client = self._make_fake_client(dtos, update_calls, request_count=5)
+
+        with patch("auditor.mismatched_metadata_transfer_targets", return_value=(target,)):
+            with patch("auditor.get_config", return_value=self._make_config()):
+                with patch("auditor.JellyfinClient", fake_client):
+                    client_request_counts = {"left": 2}
+                    auditor._run_bulk_metadata_transfer(
+                        left_result,
+                        right_result,
+                        dry_run=False,
+                        assume_yes=True,
+                        client_request_counts=client_request_counts,
+                    )
+
+        self.assertEqual(client_request_counts, {"left": 7, "right": 5})
 
     def test_aborts_batch_when_confirmation_declined(self) -> None:
         left_result, right_result = self._make_results()
@@ -2323,6 +2487,7 @@ class BulkImageTransferTests(unittest.TestCase):
         fail_uploads_for=frozenset(),
         destination_names=None,
         destination_image_tags=None,
+        request_count=0,
     ):
         names = destination_names or {}
         image_tags_by_item = destination_image_tags or {}
@@ -2347,6 +2512,10 @@ class BulkImageTransferTests(unittest.TestCase):
                 if (self.server.key, item_id, image_type) in fail_uploads_for:
                     raise jellyfin.JellyfinError("upload failed")
                 upload_calls.append((self.server.key, item_id, image_type, image_bytes, content_type))
+
+            @property
+            def request_count(self):
+                return request_count
 
         return FakeClient
 
@@ -2391,6 +2560,40 @@ class BulkImageTransferTests(unittest.TestCase):
         self.assertEqual(len(results), len(auditor.BULK_IMAGE_TYPES))
         by_type = {result.image_type: result for result in results}
         self.assertEqual(by_type["Primary"].status, "transferred")
+
+    def test_accumulates_client_request_counts_per_server(self) -> None:
+        left_result, right_result = self._make_results()
+        target = ImageTransferTarget(
+            library="Movies",
+            display_name="Alien",
+            left_title="Alien",
+            left_server_key="left",
+            left_item_id="left-id",
+            right_server_key="right",
+            right_item_id="right-id",
+        )
+        images = {("left", "left-id", "Primary"): (b"bytes", "image/jpeg")}
+        upload_calls: list = []
+        fake_client = self._make_fake_client(
+            images,
+            upload_calls,
+            destination_names={("right", "right-id"): "Alien"},
+            request_count=4,
+        )
+
+        with patch("auditor.missing_image_transfer_targets", return_value=(target,)):
+            with patch("auditor.get_config", return_value=self._make_config()):
+                with patch("auditor.JellyfinClient", fake_client):
+                    client_request_counts = {"right": 1}
+                    auditor._run_bulk_image_transfer(
+                        left_result,
+                        right_result,
+                        dry_run=False,
+                        assume_yes=True,
+                        client_request_counts=client_request_counts,
+                    )
+
+        self.assertEqual(client_request_counts, {"left": 4, "right": 5})
 
     def test_only_attempts_bulk_image_types(self) -> None:
         """Regression test: the bulk run only attempts BULK_IMAGE_TYPES

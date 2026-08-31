@@ -22,6 +22,8 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+import shlex
+import sys
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -355,6 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the subtitle transfer workflow and return an exit code."""
     configure_logging()
     parser = _build_argument_parser()
+    _log_line(f"Command: {parser.prog} {shlex.join(argv if argv is not None else sys.argv[1:])}")
 
     try:
         args = parser.parse_args(argv)

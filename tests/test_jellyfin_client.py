@@ -236,6 +236,39 @@ class JellyfinClientRetryTests(unittest.TestCase):
         mock_request.assert_called_once()
         mock_sleep.assert_not_called()
 
+    def test_request_count_starts_at_zero(self) -> None:
+        client = self._make_client()
+
+        self.assertEqual(client.request_count, 0)
+
+    def test_request_count_increments_once_per_successful_request(self) -> None:
+        client = self._make_client()
+        response = MagicMock()
+        response.content = b'{"Items": []}'
+        response.json.return_value = {"Items": []}
+        with patch.object(client._session, "request", return_value=response):
+            client._request(jellyfin.ITEMS_ENDPOINT)
+            client._request(jellyfin.ITEMS_ENDPOINT)
+
+        self.assertEqual(client.request_count, 2)
+
+    def test_request_count_includes_a_retried_attempt(self) -> None:
+        """Regression test: a retried attempt is a real network round trip
+        too, not just the logical operation it was part of - it must be
+        counted the same as one that succeeded on the first try."""
+        client = self._make_client()
+        response = MagicMock()
+        response.content = b'{"Items": []}'
+        response.json.return_value = {"Items": []}
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[requests.exceptions.ReadTimeout("timed out"), response],
+        ), patch.object(jellyfin.time, "sleep"):
+            client._request(jellyfin.ITEMS_ENDPOINT)
+
+        self.assertEqual(client.request_count, 2)
+
 
 def _library_response(*, tv1_id: str = "tv1", tv2_id: str = "tv2", movies_id: str = "mov1") -> MagicMock:
     response = MagicMock()

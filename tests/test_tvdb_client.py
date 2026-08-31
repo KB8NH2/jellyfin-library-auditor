@@ -323,6 +323,49 @@ class TvdbClientTests(unittest.TestCase):
 
         cache.set_search.assert_called_once_with("Ghosts", results)
 
+    def test_request_count_starts_at_zero(self) -> None:
+        client = self._make_client()
+
+        self.assertEqual(client.request_count, 0)
+
+    def test_request_count_counts_login_and_each_page(self) -> None:
+        client = self._make_client()
+        login_response = self._make_response({"data": {"token": "jwt-token"}})
+        episodes_response = self._make_response(
+            {"data": {"episodes": [{"id": 1, "seasonNumber": 1, "number": 1, "name": "Pilot"}]}}
+        )
+        empty_page_response = self._make_response({"data": {"episodes": []}})
+
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[login_response, episodes_response, empty_page_response],
+        ):
+            client.get_series_episodes("123", "dvd")
+
+        self.assertEqual(client.request_count, 3)
+
+    def test_request_count_is_not_incremented_by_a_cache_hit(self) -> None:
+        cached_result = _make_tvdb_search_result(series_id="400267", name="Ghosts")
+        cache = MagicMock()
+        cache.get_search.return_value = (cached_result,)
+        client = tvdb.TvdbClient("test-api-key", cache=cache)
+
+        with patch.object(client._session, "request"):
+            client.search_series("Ghosts")
+
+        self.assertEqual(client.request_count, 0)
+
+    def test_request_count_includes_image_downloads(self) -> None:
+        client = self._make_client()
+        image_response = MagicMock()
+        image_response.content = b"image-bytes"
+        image_response.headers = {"Content-Type": "image/jpeg"}
+        with patch.object(client._session, "request", return_value=image_response):
+            client.download_image("https://artworks.thetvdb.com/banners/episode.jpg")
+
+        self.assertEqual(client.request_count, 1)
+
 
 class TvdbEpisodeCacheTests(unittest.TestCase):
     def test_returns_none_for_an_empty_cache(self) -> None:

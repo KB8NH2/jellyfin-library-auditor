@@ -472,10 +472,21 @@ class TvdbClient:
         self._timeout = timeout_seconds
         self._token: str | None = None
         self._cache = cache
+        self._request_count = 0
 
     def close(self) -> None:
         """Close the underlying HTTP session."""
         self._session.close()
+
+    @property
+    def request_count(self) -> int:
+        """Return the number of HTTP requests this client has issued so far.
+
+        Only counts requests that actually reached the network - a
+        get_series_episodes()/search_series() call answered from the local
+        cache issues no request at all and isn't counted.
+        """
+        return self._request_count
 
     def __enter__(self) -> TvdbClient:
         """Return the client for context manager usage."""
@@ -688,6 +699,7 @@ class TvdbClient:
         """
         LOGGER.debug("TheTVDB GET %s (image)", url)
         try:
+            self._request_count += 1
             response = self._session.request("GET", url, timeout=self._timeout)
             response.raise_for_status()
         except requests.RequestException as error:
@@ -724,6 +736,7 @@ class TvdbClient:
 
         LOGGER.debug("TheTVDB %s %s", method, url)
         try:
+            self._request_count += 1
             response = self._session.request(
                 method=method,
                 url=url,

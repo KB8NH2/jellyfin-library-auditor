@@ -564,6 +564,16 @@ class RunApplyTitlesFromFilenameCommandTests(unittest.TestCase):
 
 
 class MainArgumentValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        log_patch = patch(
+            "apply_titles_from_filename.TITLES_FROM_FILENAME_LOG_FILE",
+            Path(temp_dir.name) / "titles_from_filename_apply.log",
+        )
+        log_patch.start()
+        self.addCleanup(log_patch.stop)
+
     def test_rejects_movie_combined_with_series_name(self) -> None:
         exit_code = apply_titles_from_filename.main(
             ["--movie", "Movie Name", "--series-name", "Show", "--season-number", "1"]
