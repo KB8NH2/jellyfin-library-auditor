@@ -801,6 +801,54 @@ class MismatchedTvdbTitleTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].check_name, "mismatched_tvdb_title")
 
+    def test_no_finding_when_local_title_is_arabic_and_tvdb_title_is_roman_numeral(self) -> None:
+        """Regression test: a local title spelled with an arabic digit
+        ("Chapter 1") must match TheTVDB's aired-order title for the same
+        episode spelled with a roman numeral ("Chapter I") instead - e.g.
+        Star Wars: Clone Wars (2003) numbers its "Chapter" episodes this way
+        on TheTVDB.
+        """
+        item = _make_item(
+            "Chapter 1",
+            is_movie=False,
+            is_episode=True,
+            series_name="Star Wars: Clone Wars",
+            season_number=1,
+            episode_number=1,
+        )
+        aired_positions = {
+            "Star Wars: Clone Wars": {
+                (1, 1): (_make_tvdb_episode(season_number=1, episode_number=1, name="Chapter I"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(findings, ())
+
+    def test_no_finding_for_a_roman_numeral_past_the_old_fixed_range(self) -> None:
+        """Regression test: roman-numeral conversion must be generic, not
+        capped at a small fixed range - Star Wars: Clone Wars (2003) runs
+        its "Chapter" episodes up through 25 ("Chapter XXV").
+        """
+        item = _make_item(
+            "Chapter 25",
+            is_movie=False,
+            is_episode=True,
+            series_name="Star Wars: Clone Wars",
+            season_number=1,
+            episode_number=25,
+        )
+        aired_positions = {
+            "Star Wars: Clone Wars": {
+                (1, 25): (_make_tvdb_episode(season_number=1, episode_number=25, name="Chapter XXV"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(findings, ())
+
     def test_no_finding_when_no_aired_positions_given(self) -> None:
         item = _make_item(
             "Something Else Entirely",

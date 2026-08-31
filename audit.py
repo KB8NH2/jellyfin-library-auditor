@@ -48,15 +48,30 @@ _PART_NUMBER_WORDS = (
     "one|two|three|four|five|six|seven|eight|nine|ten|"
     "eleven|twelve|thirteen|fourteen|fifteen"
 )
-# Longest-first so e.g. "III" can't match as "I" before the engine ever tries
-# the longer alternative - \b after a short match would reject it anyway
-# (mid-word, not a boundary) and backtracking would recover, but ordering
-# this way makes the match unambiguous without relying on that.
-_PART_NUMBER_ROMAN_NUMERALS = "VIII|XIII|III|VII|XII|XIV|II|IV|VI|IX|XI|XV|I|V|X"
+# A bare run of only roman-numeral letters (I, V, X, L, C, D, M), bounded by
+# \b so it can only match a whole word, never a fragment of one (e.g. the
+# "ic" inside "Ecstatic" is one, but \b won't allow the match to start
+# there, since the preceding "t" is also a word character). Deliberately
+# generic - it accepts any value, not just a small enumerated range - since
+# TheTVDB and Jellyfin between them use roman numerals well past what any
+# fixed list would practically cover (e.g. Star Wars: Clone Wars (2003)
+# numbers episodes "Chapter I" through "Chapter XXV"). The unavoidable
+# tradeoff of a generic match like this is an ordinary English word that
+# happens to be spelled entirely with these seven letters (e.g. "Mix",
+# "Civil", "Did", or the pronoun "I" itself) reading as a numeral too - see
+# titles_match() for why every use of this pattern accepts that tradeoff.
+_ROMAN_NUMERAL_SHAPE = "[IVXLCDM]+"
 _PART_NUMBER_PATTERN = re.compile(
-    rf"\b(?:part|pt)\.?\s+(?:\d+|{_PART_NUMBER_WORDS}|{_PART_NUMBER_ROMAN_NUMERALS})\b",
+    rf"\b(?:part|pt)\.?\s+(?:\d+|{_PART_NUMBER_WORDS}|{_ROMAN_NUMERAL_SHAPE})\b",
     re.IGNORECASE,
 )
+# A trailing roman numeral with nothing else after it (e.g. "Chapter I") is
+# the same disambiguator TheTVDB and Jellyfin metadata sometimes spell
+# differently - one side numbering an episode titled just "Chapter" with an
+# arabic digit ("Chapter 1"), the other with a roman numeral. Applied to
+# normalized_title()'s already-casefolded output, so a lowercase-only class
+# is enough (unlike _PART_NUMBER_PATTERN above, matched before casefolding).
+_TRAILING_ROMAN_NUMERAL_PATTERN = re.compile(r"\b[ivxlcdm]+$")
 _ARTICLE_STOPWORD_PATTERN = re.compile(r"\b(?:a|an|the)\b", re.IGNORECASE)
 
 # Matches a character from a script no genuine English title would contain.
@@ -634,6 +649,17 @@ def titles_match(first: str, second: str) -> bool:
     alone for callers that need an exact match to win over a
     same-titled-except-for-this coincidence).
 
+    Each reading is also tried with a trailing standalone roman numeral
+    rewritten as its arabic equivalent (e.g. "Chapter I" reads the same as
+    "Chapter 1", and "Chapter XXV" the same as "Chapter 25") - unlike
+    :func:`normalized_title`'s own roman-numeral handling, which only covers
+    a parenthesized disambiguator or a "Part I" suffix, this also covers a
+    title that's just a name plus a bare trailing numeral with no
+    "Part"/parentheses at all (e.g. TheTVDB titling an episode "Chapter I"
+    while Jellyfin's own metadata spells it "Chapter 1"). See
+    :data:`_TRAILING_ROMAN_NUMERAL_PATTERN` for the tradeoff this generic
+    match accepts.
+
     Finally, every resulting reading is also tried with all of its
     remaining spaces removed, so two words split apart on one side but
     joined into one on the other (e.g. "Doll House" versus "Dollhouse")
@@ -665,6 +691,9 @@ def _title_comparison_variants(value: str) -> frozenset[str]:
         raw_variants.add(_COMPOUND_PUNCTUATION_PATTERN.sub("", comma_variant))
 
     normalized_forms = {normalized_title(raw_variant) for raw_variant in raw_variants}
+    normalized_forms |= {
+        _with_trailing_roman_numeral_as_arabic(form) for form in normalized_forms
+    }
     variants: set[str] = set()
     for form in normalized_forms:
         for with_or_without_articles in (form, _without_articles(form)):
@@ -673,6 +702,25 @@ def _title_comparison_variants(value: str) -> frozenset[str]:
 
     variants |= {variant.replace(" ", "") for variant in variants}
     return frozenset(variants)
+
+
+def _with_trailing_roman_numeral_as_arabic(normalized_value: str) -> str:
+    """Return ``normalized_value`` with a trailing standalone roman numeral rewritten as arabic.
+
+    Any value converts, not just a small enumerated range (see
+    :data:`_ROMAN_NUMERAL_SHAPE`) - a series like Star Wars: Clone Wars
+    (2003) numbers episodes well past what a fixed list would cover
+    ("Chapter I" through "Chapter XXV"). ``normalized_value`` is expected to
+    already be casefolded and whitespace-collapsed, i.e. the output of
+    :func:`normalized_title`.
+    """
+    match = _TRAILING_ROMAN_NUMERAL_PATTERN.search(normalized_value)
+    if match is None:
+        return normalized_value
+    numeral_value = _roman_numeral_to_int(match.group(0))
+    if numeral_value is None:
+        return normalized_value
+    return f"{normalized_value[:match.start()]}{numeral_value}"
 
 
 def _without_articles(normalized_value: str) -> str:

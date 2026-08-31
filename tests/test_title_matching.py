@@ -565,6 +565,19 @@ class MismatchedEpisodeFilenameTitleTests(unittest.TestCase):
 
         self.assertIsNone(audit.mismatched_episode_filename_title(item))
 
+    def test_does_not_flag_trailing_roman_numeral_versus_arabic_number(self) -> None:
+        item = _make_item(
+            title="Chapter I",
+            is_movie=False,
+            is_episode=True,
+            path=Path("Show - S01E01 - Chapter 1.mkv"),
+            series_name="Show",
+            season_number=1,
+            episode_number=1,
+        )
+
+        self.assertIsNone(audit.mismatched_episode_filename_title(item))
+
     def test_does_not_flag_paren_number_versus_no_disambiguator(self) -> None:
         item = _make_item(
             title="Poltergeist",
@@ -610,6 +623,42 @@ class MismatchedEpisodeFilenameTitleTests(unittest.TestCase):
             is_movie=False,
             is_episode=True,
             path=Path("Show - S01E25 - The Savage Time (2).mkv"),
+            series_name="Show",
+            season_number=1,
+            episode_number=25,
+        )
+
+        self.assertIsNone(audit.mismatched_episode_filename_title(item))
+
+    def test_does_not_flag_paren_number_versus_part_roman_numeral_past_the_old_fixed_range(
+        self,
+    ) -> None:
+        """Regression test: "Part <roman numeral>" recognition must be
+        generic, not capped at a small fixed range (the old whitelist only
+        went up through XV).
+        """
+        item = _make_item(
+            title="The Savage Time: Part XX",
+            is_movie=False,
+            is_episode=True,
+            path=Path("Show - S01E20 - The Savage Time (20).mkv"),
+            series_name="Show",
+            season_number=1,
+            episode_number=20,
+        )
+
+        self.assertIsNone(audit.mismatched_episode_filename_title(item))
+
+    def test_does_not_flag_trailing_roman_numeral_past_the_old_fixed_range(self) -> None:
+        """Regression test: a bare trailing roman numeral must convert for
+        any value, not just a small enumerated range - Star Wars: Clone Wars
+        (2003) runs its "Chapter" episodes up through 25 ("Chapter XXV").
+        """
+        item = _make_item(
+            title="Chapter XXV",
+            is_movie=False,
+            is_episode=True,
+            path=Path("Show - S01E25 - Chapter 25.mkv"),
             series_name="Show",
             season_number=1,
             episode_number=25,
