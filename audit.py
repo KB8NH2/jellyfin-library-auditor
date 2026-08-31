@@ -1217,7 +1217,12 @@ def mismatched_tvdb_title(
         One finding per local episode (or multi-episode range) whose title
         doesn't match any English-titled candidate combination's TheTVDB
         aired-order title at its (season, episode(s)) position, and also
-        doesn't match its DVD-order title there.
+        doesn't match its DVD-order title there. Also includes a separate,
+        informational finding (check_name "tvdb_title_not_english") for an
+        episode whose aired-order position has TheTVDB data at every
+        position it covers, but none of it in English - see
+        :func:`_has_non_english_only_candidates` for why that's neither a
+        real comparison nor the total absence of one.
     """
     if not aired_positions:
         return ()
@@ -1231,11 +1236,34 @@ def mismatched_tvdb_title(
             continue
 
         episode_numbers = expected_episode_numbers_from_filename(item) or (item.episode_number,)
+        if len(episode_numbers) > 1:
+            position_label = (
+                f"S{item.season_number:02d}E{episode_numbers[0]:02d}-"
+                f"E{episode_numbers[-1]:02d}"
+            )
+        else:
+            position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
 
+        aired_series_positions = aired_positions.get(item.series_name, {})
         aired_per_position = _candidates_for_episode_range(
-            aired_positions.get(item.series_name, {}), item.season_number, episode_numbers
+            aired_series_positions, item.season_number, episode_numbers
         )
         if aired_per_position is None:
+            if _has_non_english_only_candidates(
+                aired_series_positions, item.season_number, episode_numbers
+            ):
+                findings.append(
+                    _finding(
+                        item,
+                        category=AuditCategory.METADATA,
+                        severity=AuditSeverity.INFO,
+                        check_name="tvdb_title_not_english",
+                        message=(
+                            f"{position_label} has TheTVDB aired-order data, but no English "
+                            "translation is on file for it, so its title can't be compared."
+                        ),
+                    )
+                )
             continue
 
         aired_combined_titles = _combined_candidate_titles(aired_per_position)
@@ -1250,14 +1278,6 @@ def mismatched_tvdb_title(
                 dvd_combined_titles = _combined_candidate_titles(dvd_per_position)
                 if any(titles_match(item.title, combined) for combined in dvd_combined_titles):
                     continue
-
-        if len(episode_numbers) > 1:
-            position_label = (
-                f"S{item.season_number:02d}E{episode_numbers[0]:02d}-"
-                f"E{episode_numbers[-1]:02d}"
-            )
-        else:
-            position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
 
         findings.append(
             _finding(
@@ -1406,6 +1426,21 @@ def audit_episode_ordering(
     return tuple(findings)
 
 
+def is_untranslated_tvdb_title(title: str) -> bool:
+    """Return whether a TheTVDB title is still in its original, non-English script.
+
+    See :data:`_NON_ENGLISH_SCRIPT_PATTERN` - TheTVDB silently falls back to
+    a series' original-language name for any episode with no English
+    translation on file, with no separate flag in the API response saying
+    that happened. Public so apply_episode_titles.py/apply_dvd_metadata.py
+    can refuse to rename a Jellyfin item's title to text in a script its
+    metadata almost certainly isn't otherwise written in - the same
+    protection :func:`mismatched_tvdb_title` already gives comparisons via
+    :func:`_english_titled_candidates` below.
+    """
+    return bool(_NON_ENGLISH_SCRIPT_PATTERN.search(title))
+
+
 def _english_titled_candidates(
     candidates: tuple[TvdbEpisode, ...] | None,
 ) -> tuple[TvdbEpisode, ...]:
@@ -1415,9 +1450,7 @@ def _english_titled_candidates(
     """
     if not candidates:
         return ()
-    return tuple(
-        candidate for candidate in candidates if not _NON_ENGLISH_SCRIPT_PATTERN.search(candidate.name)
-    )
+    return tuple(candidate for candidate in candidates if not is_untranslated_tvdb_title(candidate.name))
 
 
 def _candidates_for_episode_range(
@@ -1440,6 +1473,36 @@ def _candidates_for_episode_range(
             return None
         per_position_candidates.append(candidates)
     return tuple(per_position_candidates)
+
+
+def _has_non_english_only_candidates(
+    positions: Mapping[tuple[int, int], tuple[TvdbEpisode, ...]],
+    season_number: int,
+    episode_numbers: tuple[int, ...],
+) -> bool:
+    """Return whether every position in the range has TheTVDB data, with at least one English-blocked.
+
+    Distinguishes "TheTVDB has an episode here, but only in its original,
+    untranslated language, at one or more positions" (this) from "TheTVDB
+    has nothing at all at some position" (``False`` - the ordinary, silent
+    skip a missing position already gets). A caller that's already handling
+    a ``_candidates_for_episode_range()`` ``None`` result calls this to tell
+    the two apart, since both cases return ``None`` there but only this one
+    is worth reporting as a "no English title available" outcome rather
+    than treating a missing title comparison as if it simply hadn't come up
+    at all. For a multi-episode range, only one position needs to be
+    English-blocked to make the whole combined comparison impossible - the
+    other positions having English data doesn't help build a title that's
+    missing one of its parts.
+    """
+    saw_english_blocked_position = False
+    for episode_number in episode_numbers:
+        raw_candidates = positions.get((season_number, episode_number))
+        if not raw_candidates:
+            return False
+        if not _english_titled_candidates(raw_candidates):
+            saw_english_blocked_position = True
+    return saw_english_blocked_position
 
 
 def _combined_candidate_titles(
@@ -1559,6 +1622,7 @@ __all__ = [
     "audit_library_items",
     "audit_media_item",
     "best_matching_tvdb_series",
+    "is_untranslated_tvdb_title",
     "mismatched_episode_filename_title",
     "mismatched_movie_filename_title",
     "mismatched_tvdb_series",

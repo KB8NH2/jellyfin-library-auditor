@@ -49,12 +49,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from audit import is_untranslated_tvdb_title
 from audit import titles_match
 from config import ConfigError
 from config import get_config
 from jellyfin import EpisodeSummary
 from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
+from media import expected_episode_numbers_from_text
 from title_backup import build_title_merged_item_dto
 from title_backup import build_title_restore_merged_item_dto
 from transfer_metadata import changed_fields
@@ -124,6 +126,7 @@ class EpisodeTitlePlan:
     rejected_reason: str | None
     no_target_match: bool
     already_matches: bool
+    no_english_title: bool = False
 
     @property
     def has_changes(self) -> bool:
@@ -140,6 +143,7 @@ class EpisodeTitlePlan:
         """Return whether this plan should actually be applied."""
         return (
             not self.no_target_match
+            and not self.no_english_title
             and not self.already_matches
             and not self.is_rejected
             and self.has_changes
@@ -159,6 +163,26 @@ def plan_episode_title_update(
     episode summary's own Name is enough to rule most already-correct
     episodes out without a network round trip.
 
+    A single video file can span more than one episode, e.g.
+    ``Show S01E17-E18 Title.mkv`` - Jellyfin's own episode_number for such an
+    item is just the range's first episode (17 here), so renaming toward
+    only that one position's TheTVDB title would silently drop the second
+    episode's title entirely instead of producing the combined
+    "Title A / Title B" a multi-episode item's Name is supposed to read (see
+    :func:`media.expected_episode_numbers_from_text`). Every position the
+    filename implies is required to have TheTVDB data before a rename is
+    planned at all - a partial rename built from only some of the range
+    would be guessing.
+
+    A candidate title still in its original, untranslated language (see
+    :func:`audit.is_untranslated_tvdb_title`) is never renamed to, even
+    though TheTVDB reports a name there - there's no separate flag in
+    TheTVDB's response saying a title fell back to the original language,
+    and writing foreign-script text into an otherwise-English library's
+    metadata would be a worse outcome than just leaving the title alone.
+    This is reported as its own outcome (``no_english_title``), distinct
+    from ``no_target_match`` (TheTVDB has nothing at this position at all).
+
     Args:
         client: Client for the server the episode lives on.
         episode: The Jellyfin episode to plan a rename for.
@@ -172,9 +196,21 @@ def plan_episode_title_update(
         A plan describing what would change and whether it's safe to apply.
     """
     position = (season_number, episode.episode_number)
-    target_episode = target_positions.get(position)
+    episode_numbers = (
+        expected_episode_numbers_from_text(episode.path.stem, season_number, episode.episode_number)
+        if episode.path is not None
+        else None
+    ) or (episode.episode_number,)
 
-    if target_episode is None or not target_episode.name:
+    target_episodes: list[TvdbEpisode] | None = []
+    for episode_number in episode_numbers:
+        target_episode = target_positions.get((season_number, episode_number))
+        if target_episode is None or not target_episode.name:
+            target_episodes = None
+            break
+        target_episodes.append(target_episode)
+
+    if not target_episodes:
         return EpisodeTitlePlan(
             episode_id=episode.id,
             position=position,
@@ -187,12 +223,28 @@ def plan_episode_title_update(
             already_matches=False,
         )
 
-    if titles_match(episode.name, target_episode.name):
+    if any(is_untranslated_tvdb_title(target_episode.name) for target_episode in target_episodes):
         return EpisodeTitlePlan(
             episode_id=episode.id,
             position=position,
             current_name=episode.name,
-            target_name=target_episode.name,
+            target_name=None,
+            merged_dto=None,
+            changes=(),
+            rejected_reason=None,
+            no_target_match=False,
+            already_matches=False,
+            no_english_title=True,
+        )
+
+    target_name = " / ".join(target_episode.name for target_episode in target_episodes)
+
+    if titles_match(episode.name, target_name):
+        return EpisodeTitlePlan(
+            episode_id=episode.id,
+            position=position,
+            current_name=episode.name,
+            target_name=target_name,
             merged_dto=None,
             changes=(),
             rejected_reason=None,
@@ -206,12 +258,12 @@ def plan_episode_title_update(
     # The episode summary's Name can be stale (e.g. changed since the season
     # was listed) - re-check against the freshly-fetched live Name before
     # deciding a rename is actually needed.
-    if titles_match(current_name, target_episode.name):
+    if titles_match(current_name, target_name):
         return EpisodeTitlePlan(
             episode_id=episode.id,
             position=position,
             current_name=current_name,
-            target_name=target_episode.name,
+            target_name=target_name,
             merged_dto=None,
             changes=(),
             rejected_reason=None,
@@ -219,12 +271,12 @@ def plan_episode_title_update(
             already_matches=True,
         )
 
-    merged_dto = build_title_merged_item_dto(destination_dto, target_episode.name)
+    merged_dto = build_title_merged_item_dto(destination_dto, target_name)
     return EpisodeTitlePlan(
         episode_id=episode.id,
         position=position,
         current_name=current_name,
-        target_name=target_episode.name,
+        target_name=target_name,
         merged_dto=merged_dto,
         changes=_changed_fields(destination_dto, merged_dto),
         rejected_reason=_rejected_reason(merged_dto),
@@ -349,6 +401,11 @@ def _describe_plan(plan: EpisodeTitlePlan, *, order_label: str, restore: bool = 
             _log_line(f"  {label}: no OriginalTitle backup to restore from - skipped.")
         else:
             _log_line(f"  {label}: no TheTVDB {order_label} match at this position - skipped.")
+        return
+    if plan.no_english_title:
+        _log_line(
+            f"  {label}: TheTVDB has no English title at this position - skipped."
+        )
         return
     if plan.is_rejected:
         _log_line(f"  {label}: rejected: {plan.rejected_reason}", error=True)
@@ -594,11 +651,13 @@ def run_apply_episode_titles(
             already_matching_count = sum(1 for plan in plans if plan.already_matches)
             no_match_count = sum(1 for plan in plans if plan.no_target_match)
             no_match_label = "no OriginalTitle backup" if restore else f"no {order_label} match"
+            no_english_title_count = sum(1 for plan in plans if plan.no_english_title)
             _log_line(
                 f"Episode titles {verb} complete: {len(actionable_plans) - failed} {past_participle}, "
                 f"{failed} failed, {len(rejected_plans)} rejected, "
                 f"{already_matching_count} already matching, "
-                f"{no_match_count} with {no_match_label}."
+                f"{no_match_count} with {no_match_label}, "
+                f"{no_english_title_count} with no English title available."
             )
 
             return 1 if failed or rejected_plans else 0

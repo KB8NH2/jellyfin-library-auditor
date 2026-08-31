@@ -37,7 +37,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
         dvd_positions = {
             (1, 1): _make_tvdb_episode(
                 season_number=1, episode_number=1, name="DVD Title", overview="DVD overview."
@@ -65,6 +65,201 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
         self.assertEqual(plan.merged_dto["Id"], "ep1")
         self.assertEqual(plan.merged_dto["Path"], "/media/show/S01E01.mkv")
 
+    def test_plan_dvd_apply_combines_name_and_overview_for_a_multi_episode_range(self) -> None:
+        """Regression test: a file spanning a multi-episode range (e.g.
+        S01E17-E18) must combine both positions' TheTVDB title/overview -
+        Jellyfin's own episode_number for such an item is just the range's
+        first episode, so looking up only that one position silently
+        dropped the second episode's title/overview from the update.
+        """
+        client = self._make_client(
+            {
+                "ep1": {
+                    "Id": "ep1",
+                    "Path": "/media/show/S01E17-E18.mkv",
+                    "Name": "Wrong Title",
+                    "Overview": "Wrong overview.",
+                }
+            }
+        )
+        episode = jellyfin.EpisodeSummary(
+            id="ep1", name="Wrong Title", episode_number=17, path=Path("/media/show/S01E17-E18.mkv")
+        )
+        dvd_positions = {
+            (1, 17): _make_tvdb_episode(
+                season_number=1, episode_number=17, name="Title A", overview="Overview A."
+            ),
+            (1, 18): _make_tvdb_episode(
+                season_number=1, episode_number=18, name="Title B", overview="Overview B."
+            ),
+        }
+
+        plan = apply_dvd_metadata.plan_episode_update(
+            client, episode, 1, dvd_positions, restore_aired=False
+        )
+
+        self.assertFalse(plan.no_target_match)
+        self.assertTrue(plan.is_actionable)
+        self.assertEqual(plan.merged_dto["Name"], "Title A / Title B")
+        self.assertEqual(plan.merged_dto["Overview"], "Overview A.\n\nOverview B.")
+        self.assertEqual(plan.merged_dto["OriginalTitle"], "Wrong Title")
+
+    def test_plan_dvd_apply_leaves_name_unchanged_but_still_updates_overview_when_untranslated(
+        self,
+    ) -> None:
+        """Regression test: TheTVDB silently falls back to a series'
+        original-language name for an episode with no recorded English
+        translation - Name must not be rewritten to that foreign-script
+        text, but Overview (unaffected by this protection) can still update
+        independently, since it's a genuinely separate field.
+        """
+        client = self._make_client(
+            {
+                "ep1": {
+                    "Id": "ep1",
+                    "Path": "/media/show/S01E01.mkv",
+                    "Name": "Aired Title",
+                    "Overview": "Aired overview.",
+                }
+            }
+        )
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
+        dvd_positions = {
+            (1, 1): _make_tvdb_episode(
+                season_number=1,
+                episode_number=1,
+                name="大剣 -クレイモア-",
+                overview="DVD overview.",
+            )
+        }
+
+        plan = apply_dvd_metadata.plan_episode_update(
+            client, episode, 1, dvd_positions, restore_aired=False
+        )
+
+        self.assertTrue(plan.no_english_title)
+        self.assertTrue(plan.is_actionable)
+        self.assertEqual(plan.merged_dto["Name"], "Aired Title")
+        self.assertNotIn("OriginalTitle", plan.merged_dto)
+        self.assertEqual(plan.merged_dto["Overview"], "DVD overview.")
+        self.assertEqual([field for field, _, _ in plan.changes], ["Overview"])
+
+    def test_plan_aired_restore_leaves_name_unchanged_when_fallback_is_untranslated(self) -> None:
+        """The TheTVDB-fallback path (no OriginalTitle backup) must also
+        refuse an untranslated title, same as the DVD-apply direction.
+        """
+        client = self._make_client(
+            {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "DVD Title"}}
+        )
+        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1, path=None)
+        aired_positions = {
+            (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="大剣 -クレイモア-")
+        }
+
+        plan = apply_dvd_metadata.plan_episode_update(
+            client, episode, 1, aired_positions, restore_aired=True
+        )
+
+        self.assertTrue(plan.no_english_title)
+        self.assertEqual(plan.merged_dto["Name"], "DVD Title")
+
+    def test_plan_aired_restore_ignores_tvdb_language_when_backup_exists(self) -> None:
+        """An OriginalTitle backup restores Name without ever consulting
+        TheTVDB, so its language must not affect no_english_title - the
+        restore succeeds normally even if TheTVDB's own data happens to be
+        untranslated at this position.
+        """
+        client = self._make_client(
+            {
+                "ep1": {
+                    "Id": "ep1",
+                    "Path": "/media/show/S01E01.mkv",
+                    "Name": "DVD Title",
+                    "OriginalTitle": "Backed Up Aired Title",
+                }
+            }
+        )
+        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1, path=None)
+        aired_positions = {
+            (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="大剣 -クレイモア-")
+        }
+
+        plan = apply_dvd_metadata.plan_episode_update(
+            client, episode, 1, aired_positions, restore_aired=True
+        )
+
+        self.assertFalse(plan.no_english_title)
+        self.assertEqual(plan.merged_dto["Name"], "Backed Up Aired Title")
+
+    def test_plan_dvd_apply_no_match_when_only_one_position_of_a_range_has_data(self) -> None:
+        """A partial update built from only some of a multi-episode range's
+        positions would be guessing - every position the filename implies
+        must have TheTVDB data before an update is planned at all.
+        """
+        episode = jellyfin.EpisodeSummary(
+            id="ep1", name="Wrong Title", episode_number=17, path=Path("/media/show/S01E17-E18.mkv")
+        )
+        dvd_positions = {
+            (1, 17): _make_tvdb_episode(season_number=1, episode_number=17, name="Title A"),
+        }
+
+        plan = apply_dvd_metadata.plan_episode_update(
+            self._make_client({}), episode, 1, dvd_positions, restore_aired=False
+        )
+
+        self.assertTrue(plan.no_target_match)
+        self.assertFalse(plan.is_actionable)
+
+    def test_plan_dvd_apply_uses_first_position_image_for_a_multi_episode_range(self) -> None:
+        """A multi-episode item's Primary image slot is singular - there's
+        no way to combine two images into one, so the range's first
+        position (the one Jellyfin's own episode_number reflects) is used.
+        """
+        client = self._make_client(
+            {
+                "ep1": {
+                    "Id": "ep1",
+                    "Path": "/media/show/S01E17-E18.mkv",
+                    "Name": "Title A / Title B",
+                }
+            }
+        )
+        episode = jellyfin.EpisodeSummary(
+            id="ep1",
+            name="Title A / Title B",
+            episode_number=17,
+            path=Path("/media/show/S01E17-E18.mkv"),
+        )
+        dvd_positions = {
+            (1, 17): apply_dvd_metadata.TvdbEpisode(
+                id=17,
+                season_number=1,
+                episode_number=17,
+                name="Title A",
+                overview=None,
+                runtime_minutes=None,
+                image_url="https://example.com/17.jpg",
+            ),
+            (1, 18): apply_dvd_metadata.TvdbEpisode(
+                id=18,
+                season_number=1,
+                episode_number=18,
+                name="Title B",
+                overview=None,
+                runtime_minutes=None,
+                image_url="https://example.com/18.jpg",
+            ),
+        }
+        tvdb_client = MagicMock()
+        tvdb_client.download_image.return_value = (b"image-bytes", "image/jpeg")
+
+        plan = apply_dvd_metadata.plan_episode_update(
+            client, episode, 1, dvd_positions, restore_aired=False, images=True, tvdb_client=tvdb_client
+        )
+
+        tvdb_client.download_image.assert_called_once_with("https://example.com/17.jpg")
+        self.assertEqual(plan.image_bytes, b"image-bytes")
+
     def test_plan_dvd_apply_locks_changed_fields(self) -> None:
         """Regression test: without locking the fields it edits, a library with
         TheTVDB's internet metadata provider enabled treats Name/Overview as
@@ -81,7 +276,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
         dvd_positions = {(1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="DVD Title")}
 
         plan = apply_dvd_metadata.plan_episode_update(
@@ -100,7 +295,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
         dvd_positions = {(1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="DVD Title")}
 
         plan = apply_dvd_metadata.plan_episode_update(
@@ -121,7 +316,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Same Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Same Title", episode_number=1, path=None)
         dvd_positions = {(1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Same Title")}
 
         plan = apply_dvd_metadata.plan_episode_update(
@@ -142,7 +337,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
         dvd_positions = {(1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="DVD Title")}
 
         plan = apply_dvd_metadata.plan_episode_update(
@@ -164,7 +359,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Same Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Same Title", episode_number=1, path=None)
         dvd_positions = {(1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Same Title")}
 
         plan = apply_dvd_metadata.plan_episode_update(
@@ -180,7 +375,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
 
         client = MagicMock()
         client.get_item.side_effect = _unexpected_get_item
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=5)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=5, path=None)
 
         plan = apply_dvd_metadata.plan_episode_update(
             client, episode, 1, {}, restore_aired=False
@@ -194,7 +389,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Name": "Aired Title"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
         dvd_positions = {(1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="DVD Title")}
 
         plan = apply_dvd_metadata.plan_episode_update(
@@ -215,7 +410,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(
                 season_number=1,
@@ -245,7 +440,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="TVDB Aired Title")
         }
@@ -256,11 +451,40 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.merged_dto["Name"], "TVDB Aired Title")
 
+    def test_plan_aired_restore_combines_tvdb_titles_for_a_multi_episode_range(self) -> None:
+        """The TheTVDB-fallback path (no OriginalTitle backup) must combine
+        every position a multi-episode range covers, same as the DVD-apply
+        direction - only the OriginalTitle-backup path is already a single,
+        pre-combined string needing no recombining.
+        """
+        client = self._make_client(
+            {
+                "ep1": {
+                    "Id": "ep1",
+                    "Path": "/media/show/S01E17-E18.mkv",
+                    "Name": "DVD Title",
+                }
+            }
+        )
+        episode = jellyfin.EpisodeSummary(
+            id="ep1", name="DVD Title", episode_number=17, path=Path("/media/show/S01E17-E18.mkv")
+        )
+        aired_positions = {
+            (1, 17): _make_tvdb_episode(season_number=1, episode_number=17, name="Title A"),
+            (1, 18): _make_tvdb_episode(season_number=1, episode_number=18, name="Title B"),
+        }
+
+        plan = apply_dvd_metadata.plan_episode_update(
+            client, episode, 1, aired_positions, restore_aired=True
+        )
+
+        self.assertEqual(plan.merged_dto["Name"], "Title A / Title B")
+
     def test_plan_aired_restore_no_match_when_no_backup_and_no_tvdb_data(self) -> None:
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "DVD Title"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1, path=None)
 
         plan = apply_dvd_metadata.plan_episode_update(
             client, episode, 1, {}, restore_aired=True
@@ -283,7 +507,7 @@ class ApplyDvdMetadataPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1, path=None)
 
         plan = apply_dvd_metadata.plan_episode_update(
             client, episode, 1, {}, restore_aired=True
@@ -370,7 +594,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
 
     def test_updates_episodes_after_confirmation(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}
         }
@@ -413,7 +637,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
             jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="78804"),
         )
         episodes = (
-            jellyfin.EpisodeSummary(id="ep1", name="Wrong Show's Title", episode_number=1),
+            jellyfin.EpisodeSummary(id="ep1", name="Wrong Show's Title", episode_number=1, path=None),
         )
         items_by_id = {
             "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Wrong Show's Title"}
@@ -500,7 +724,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
         silently revert on its own refresh. The re-read after applying must
         catch this instead of reporting "updated" for a no-op write."""
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}
         }
@@ -595,7 +819,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
 
     def test_skips_prompt_with_yes(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}
         }
@@ -629,7 +853,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
 
     def test_aborts_when_user_declines(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}
         }
@@ -732,7 +956,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
 
     def test_series_without_tvdb_id_is_an_error(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id=None),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Some Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Some Title", episode_number=1, path=None),)
         fake_client = self._make_fake_client(
             series_matches=series_matches, episodes=episodes, items_by_id={}, update_calls=[]
         )
@@ -793,7 +1017,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
 
     def test_writes_apply_details_to_log_file(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}
         }
@@ -830,7 +1054,7 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
         lookup, and OriginalTitle itself must query TheTVDB's "official"
         ordering, not "dvd"."""
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="DVD Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {
                 "Id": "ep1",

@@ -27,7 +27,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Wrong Title"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title")
         }
@@ -50,6 +50,132 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
         self.assertEqual(plan.merged_dto["Id"], "ep1")
         self.assertEqual(plan.merged_dto["Path"], "/media/show/S01E01.mkv")
 
+    def test_plan_combines_both_titles_for_a_multi_episode_range(self) -> None:
+        """Regression test: a file spanning a multi-episode range (e.g.
+        S01E17-E18) must be renamed to both positions' TheTVDB titles joined
+        with " / ", not just the first position's - Jellyfin's own
+        episode_number for such an item is just the range's first episode,
+        so looking up only that one position silently dropped the second
+        episode's title from the new Name entirely.
+        """
+        client = self._make_client(
+            {
+                "ep1": {
+                    "Id": "ep1",
+                    "Path": "/media/show/S01E17-E18.mkv",
+                    "Name": "Wrong Title",
+                }
+            }
+        )
+        episode = jellyfin.EpisodeSummary(
+            id="ep1", name="Wrong Title", episode_number=17, path=Path("/media/show/S01E17-E18.mkv")
+        )
+        aired_positions = {
+            (1, 17): _make_tvdb_episode(season_number=1, episode_number=17, name="Title A"),
+            (1, 18): _make_tvdb_episode(season_number=1, episode_number=18, name="Title B"),
+        }
+
+        plan = apply_episode_titles.plan_episode_title_update(client, episode, 1, aired_positions)
+
+        self.assertFalse(plan.no_target_match)
+        self.assertTrue(plan.is_actionable)
+        self.assertEqual(plan.target_name, "Title A / Title B")
+        self.assertEqual(plan.merged_dto["Name"], "Title A / Title B")
+
+    def test_plan_reports_no_target_match_when_only_one_position_of_a_range_has_data(self) -> None:
+        """A partial rename built from only some of a multi-episode range's
+        positions would be guessing - every position the filename implies
+        must have TheTVDB data before a rename is planned at all.
+        """
+
+        class ExplodingClient:
+            def get_item(self, item_id: str) -> dict:
+                raise AssertionError("should not fetch an item with an incomplete range match")
+
+        episode = jellyfin.EpisodeSummary(
+            id="ep1", name="Wrong Title", episode_number=17, path=Path("/media/show/S01E17-E18.mkv")
+        )
+        aired_positions = {
+            (1, 17): _make_tvdb_episode(season_number=1, episode_number=17, name="Title A"),
+        }
+
+        plan = apply_episode_titles.plan_episode_title_update(
+            ExplodingClient(), episode, 1, aired_positions
+        )
+
+        self.assertTrue(plan.no_target_match)
+        self.assertFalse(plan.is_actionable)
+
+    def test_plan_reports_no_english_title_instead_of_renaming_to_foreign_script(self) -> None:
+        """Regression test: TheTVDB silently falls back to a series'
+        original-language name for an episode with no recorded English
+        translation - renaming toward that text would write foreign-script
+        text into the item's Name, so this must be its own distinct,
+        non-actionable outcome instead.
+        """
+
+        class ExplodingClient:
+            def get_item(self, item_id: str) -> dict:
+                raise AssertionError("should not fetch an item with no English title")
+
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Big Sword", episode_number=1, path=None)
+        aired_positions = {
+            (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="大剣 -クレイモア-"),
+        }
+
+        plan = apply_episode_titles.plan_episode_title_update(
+            ExplodingClient(), episode, 1, aired_positions
+        )
+
+        self.assertTrue(plan.no_english_title)
+        self.assertFalse(plan.no_target_match)
+        self.assertFalse(plan.is_actionable)
+        self.assertIsNone(plan.merged_dto)
+
+    def test_plan_reports_no_english_title_for_a_multi_episode_range_when_any_position_lacks_it(
+        self,
+    ) -> None:
+        episode = jellyfin.EpisodeSummary(
+            id="ep1", name="Combined Title", episode_number=17, path=Path("/media/show/S01E17-E18.mkv")
+        )
+        aired_positions = {
+            (1, 17): _make_tvdb_episode(season_number=1, episode_number=17, name="Title A"),
+            (1, 18): _make_tvdb_episode(season_number=1, episode_number=18, name="大剣 -クレイモア-"),
+        }
+
+        class ExplodingClient:
+            def get_item(self, item_id: str) -> dict:
+                raise AssertionError("should not fetch an item with no English title")
+
+        plan = apply_episode_titles.plan_episode_title_update(
+            ExplodingClient(), episode, 1, aired_positions
+        )
+
+        self.assertTrue(plan.no_english_title)
+        self.assertFalse(plan.is_actionable)
+
+    def test_plan_already_matches_a_combined_title_without_fetching_the_item(self) -> None:
+        class ExplodingClient:
+            def get_item(self, item_id: str) -> dict:
+                raise AssertionError("should not fetch an item that already matches")
+
+        episode = jellyfin.EpisodeSummary(
+            id="ep1",
+            name="Title A / Title B",
+            episode_number=17,
+            path=Path("/media/show/S01E17-E18.mkv"),
+        )
+        aired_positions = {
+            (1, 17): _make_tvdb_episode(season_number=1, episode_number=17, name="Title A"),
+            (1, 18): _make_tvdb_episode(season_number=1, episode_number=18, name="Title B"),
+        }
+
+        plan = apply_episode_titles.plan_episode_title_update(
+            ExplodingClient(), episode, 1, aired_positions
+        )
+
+        self.assertTrue(plan.already_matches)
+
     def test_plan_skips_title_already_matching_under_lenient_comparison(self) -> None:
         """Regression test: an episode whose title already reads the same as
         TheTVDB's under audit.titles_match()'s lenient rules (here, just a
@@ -60,7 +186,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "The Colour of Money"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="The Colour of Money", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="The Colour of Money", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="The Color of Money")
         }
@@ -83,7 +209,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title")
         }
@@ -102,7 +228,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Wrong Title"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title")
         }
@@ -124,7 +250,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title")
         }
@@ -139,7 +265,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
             def get_item(self, item_id: str) -> dict:
                 raise AssertionError("should not fetch an item with no TheTVDB match")
 
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Some Title", episode_number=99)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Some Title", episode_number=99, path=None)
 
         plan = apply_episode_titles.plan_episode_title_update(ExplodingClient(), episode, 1, {})
 
@@ -156,7 +282,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
             def get_item(self, item_id: str) -> dict:
                 raise AssertionError("should not fetch an item that already matches")
 
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title")
         }
@@ -169,7 +295,7 @@ class ApplyEpisodeTitlesPlanTests(unittest.TestCase):
 
     def test_plan_rejects_when_required_fields_missing(self) -> None:
         client = self._make_client({"ep1": {"Id": "ep1", "Name": "Wrong Title"}})
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None)
         aired_positions = {
             (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title")
         }
@@ -200,7 +326,7 @@ class ApplyEpisodeTitlesRestorePlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
 
         plan = apply_episode_titles.plan_episode_title_restore(client, episode, 1)
 
@@ -218,7 +344,7 @@ class ApplyEpisodeTitlesRestorePlanTests(unittest.TestCase):
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
 
         plan = apply_episode_titles.plan_episode_title_restore(client, episode, 1)
 
@@ -237,7 +363,7 @@ class ApplyEpisodeTitlesRestorePlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
 
         plan = apply_episode_titles.plan_episode_title_restore(client, episode, 1)
 
@@ -255,7 +381,7 @@ class ApplyEpisodeTitlesRestorePlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Original Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Original Title", episode_number=1, path=None)
 
         plan = apply_episode_titles.plan_episode_title_restore(client, episode, 1)
 
@@ -276,7 +402,7 @@ class ApplyEpisodeTitlesRestorePlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
 
         plan = apply_episode_titles.plan_episode_title_restore(client, episode, 1)
 
@@ -295,7 +421,7 @@ class ApplyEpisodeTitlesRestorePlanTests(unittest.TestCase):
                 }
             }
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
 
         plan = apply_episode_titles.plan_episode_title_restore(client, episode, 1)
 
@@ -306,7 +432,7 @@ class ApplyEpisodeTitlesRestorePlanTests(unittest.TestCase):
         client = self._make_client(
             {"ep1": {"Id": "ep1", "Name": "Aired Title", "OriginalTitle": "Original Title"}}
         )
-        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1)
+        episode = jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None)
 
         plan = apply_episode_titles.plan_episode_title_restore(client, episode, 1)
 
@@ -391,7 +517,7 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
     def test_renames_episodes_after_confirmation_using_aired_order_by_default(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None),)
         items_by_id = {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Wrong Title"}}
         aired_episodes = (_make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title"),)
         update_calls: list = []
@@ -424,7 +550,7 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
     def test_dvd_order_flag_fetches_dvd_episodes_instead(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None),)
         items_by_id = {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Wrong Title"}}
         dvd_episodes = (_make_tvdb_episode(season_number=1, episode_number=1, name="DVD Title"),)
         update_calls: list = []
@@ -455,7 +581,7 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
     def test_nothing_to_do_when_all_titles_already_match(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}}
         aired_episodes = (_make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title"),)
         update_calls: list = []
@@ -483,7 +609,7 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
     def test_declining_confirmation_aborts_without_writing(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None),)
         items_by_id = {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Wrong Title"}}
         aired_episodes = (_make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title"),)
         update_calls: list = []
@@ -556,7 +682,7 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
     def test_restore_sets_name_from_original_title_backup(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {
                 "Id": "ep1",
@@ -599,7 +725,7 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
     def test_restore_works_without_a_configured_tvdb_api_key(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {
             "ep1": {
                 "Id": "ep1",
@@ -640,7 +766,7 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
     def test_restore_reports_nothing_to_do_without_a_backup(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
-        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1),)
+        episodes = (jellyfin.EpisodeSummary(id="ep1", name="Aired Title", episode_number=1, path=None),)
         items_by_id = {"ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title"}}
         update_calls: list = []
         fake_client = self._make_fake_client(

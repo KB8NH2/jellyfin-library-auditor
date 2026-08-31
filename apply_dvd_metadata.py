@@ -41,11 +41,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from audit import is_untranslated_tvdb_title
 from config import ConfigError
 from config import get_config
 from jellyfin import EpisodeSummary
 from jellyfin import JellyfinClient
 from jellyfin import JellyfinError
+from media import expected_episode_numbers_from_text
 from transfer_metadata import NON_EDITABLE_ITEM_FIELDS
 from transfer_metadata import changed_fields
 from transfer_metadata import rejected_reason as _rejected_reason
@@ -123,7 +125,7 @@ def _lock_changed_fields(
 
 def build_dvd_merged_item_dto(
     destination_dto: Mapping[str, Any],
-    dvd_episode: TvdbEpisode,
+    dvd_episodes: tuple[TvdbEpisode, ...],
 ) -> dict[str, Any]:
     """Return the destination episode document set to its DVD-order values.
 
@@ -140,9 +142,22 @@ def build_dvd_merged_item_dto(
     already stored in OriginalTitle is overwritten - this tool repurposes
     that field specifically as its own undo backup.
 
+    A multi-episode item (see plan_episode_update) is passed every position
+    it covers' TvdbEpisode, in order - Name is joined from every position's
+    title with " / " and Overview from every position's synopsis with a
+    blank line, matching the combined style Jellyfin itself already uses for
+    a multi-episode item's own metadata. Each field is only touched when
+    TheTVDB actually has it at *every* position in the range - joining from
+    only some of them would silently drop the missing position's part of
+    the combined value instead of just leaving the field alone. An ordinary
+    single-episode item is just the one-element case of the same logic.
+
     Args:
         destination_dto: Full episode item document read from Jellyfin.
-        dvd_episode: TheTVDB DVD-order episode at this item's position.
+        dvd_episodes: TheTVDB DVD-order episode(s) at this item's
+            position(s), one per episode number a multi-episode filename
+            marker implies (or just one, for an ordinary single-episode
+            item).
 
     Returns:
         A new item document ready to send back to the server.
@@ -155,22 +170,74 @@ def build_dvd_merged_item_dto(
 
     changed_fields: list[str] = []
     current_name = destination_dto.get("Name")
-    if dvd_episode.name and dvd_episode.name != current_name:
+    combined_name = _combined_name(dvd_episodes)
+    if combined_name and combined_name != current_name:
         merged_dto["OriginalTitle"] = current_name
-        merged_dto["Name"] = dvd_episode.name
+        merged_dto["Name"] = combined_name
         changed_fields.extend(("OriginalTitle", "Name"))
-    if dvd_episode.overview is not None and dvd_episode.overview != destination_dto.get("Overview"):
-        merged_dto["Overview"] = dvd_episode.overview
+
+    combined_overview = _combined_overview(dvd_episodes)
+    if combined_overview is not None and combined_overview != destination_dto.get("Overview"):
+        merged_dto["Overview"] = combined_overview
         changed_fields.append("Overview")
 
     _lock_changed_fields(destination_dto, merged_dto, changed_fields)
     return merged_dto
 
 
+def _combined_name(episodes: tuple[TvdbEpisode, ...]) -> str | None:
+    """Return every episode's title joined with " / ", or ``None`` if any is blank or untranslated.
+
+    A blank (or missing) title at any position means there's nothing usable
+    to join there - mirrors the single-episode ``if dvd_episode.name`` check
+    this generalizes. A title still in its original, untranslated language
+    (see audit.is_untranslated_tvdb_title) is treated the same way - TheTVDB
+    silently falls back to a series' original-language name when there's no
+    English translation on file, and writing foreign-script text into an
+    otherwise-English library's Name would be a worse outcome than leaving
+    it unchanged. Overview has no such protection (see _combined_overview) -
+    it's prose rather than a short label, and TheTVDB doesn't flag its
+    language the same way.
+    """
+    names = [episode.name for episode in episodes]
+    if not all(names):
+        return None
+    if any(is_untranslated_tvdb_title(name) for name in names):
+        return None
+    return " / ".join(names)
+
+
+def _has_untranslated_name(episodes: tuple[TvdbEpisode, ...] | None) -> bool:
+    """Return whether any episode has a title, but it's still untranslated.
+
+    Used to report ``EpisodePlan.no_english_title`` - unlike a blank/missing
+    title (``no_target_match``, or simply no Overview/image change), this is
+    worth calling out specifically: TheTVDB *has* something here, it's just
+    not usable for Name.
+    """
+    if not episodes:
+        return False
+    return any(episode.name and is_untranslated_tvdb_title(episode.name) for episode in episodes)
+
+
+def _combined_overview(episodes: tuple[TvdbEpisode, ...]) -> str | None:
+    """Return every episode's overview joined with a blank line, or ``None``.
+
+    ``None`` only when any position's overview is genuinely absent (unlike
+    _combined_name, an empty-string overview is a real value to write, not
+    a missing one - mirrors the single-episode ``if dvd_episode.overview is
+    not None`` check this generalizes).
+    """
+    overviews = [episode.overview for episode in episodes]
+    if any(overview is None for overview in overviews):
+        return None
+    return "\n\n".join(overviews)
+
+
 def build_aired_restore_merged_item_dto(
     destination_dto: Mapping[str, Any],
     original_title: str | None,
-    aired_episode: TvdbEpisode | None,
+    aired_episodes: tuple[TvdbEpisode, ...] | None,
 ) -> dict[str, Any]:
     """Return the destination episode document restored toward aired order.
 
@@ -178,14 +245,19 @@ def build_aired_restore_merged_item_dto(
     there during a previous DVD-order apply - over TheTVDB's aired-order
     title, since it reflects exactly what this item had before being
     changed rather than a fresh (and possibly slightly different) TheTVDB
-    lookup. Overview has no such backup, so it always comes from TheTVDB's
-    aired-order data when available.
+    lookup. That backup is already the item's own combined title for a
+    multi-episode item (see build_dvd_merged_item_dto), so it needs no
+    recombining here - only the TheTVDB fallback (used when there's no
+    backup at all) does. Overview has no such backup, so it always comes
+    from TheTVDB's aired-order data when available, combined the same way
+    build_dvd_merged_item_dto combines it.
 
     Args:
         destination_dto: Full episode item document read from Jellyfin.
         original_title: The episode's current OriginalTitle, or ``None``.
-        aired_episode: TheTVDB aired-order episode at this item's position,
-            or ``None`` when TheTVDB has nothing there.
+        aired_episodes: TheTVDB aired-order episode(s) at this item's
+            position(s), or ``None`` when TheTVDB has nothing there (or, for
+            a multi-episode item, not at every position it covers).
 
     Returns:
         A new item document ready to send back to the server.
@@ -197,19 +269,14 @@ def build_aired_restore_merged_item_dto(
     }
 
     changed_fields: list[str] = []
-    target_name = original_title or (
-        aired_episode.name if aired_episode and aired_episode.name else None
-    )
+    target_name = original_title or (_combined_name(aired_episodes) if aired_episodes else None)
     if target_name and target_name != destination_dto.get("Name"):
         merged_dto["Name"] = target_name
         changed_fields.append("Name")
 
-    if (
-        aired_episode is not None
-        and aired_episode.overview is not None
-        and aired_episode.overview != destination_dto.get("Overview")
-    ):
-        merged_dto["Overview"] = aired_episode.overview
+    combined_overview = _combined_overview(aired_episodes) if aired_episodes else None
+    if combined_overview is not None and combined_overview != destination_dto.get("Overview"):
+        merged_dto["Overview"] = combined_overview
         changed_fields.append("Overview")
 
     _lock_changed_fields(destination_dto, merged_dto, changed_fields)
@@ -239,6 +306,7 @@ class EpisodePlan:
     changes: tuple[tuple[str, Any, Any], ...]
     rejected_reason: str | None
     no_target_match: bool
+    no_english_title: bool = False
     image_bytes: bytes | None = None
     image_content_type: str | None = None
     previous_primary_image_tag: str | None = None
@@ -302,15 +370,47 @@ def plan_episode_update(
 
     Returns:
         A plan describing what would change and whether it's safe to apply.
+        ``no_english_title`` is set when TheTVDB's Name at this position
+        (any position, for a multi-episode item) is present but still in
+        its original, untranslated language (see
+        audit.is_untranslated_tvdb_title) - Name is left unchanged in that
+        case, same protection :func:`apply_episode_titles.plan_episode_title_update`
+        gives its own renames. Unlike that sibling tool, this one still
+        updates Overview/image independently even when Name is blocked this
+        way - ``no_english_title`` doesn't affect ``is_actionable`` here,
+        since a real Overview or image change can still be worth applying
+        on its own.
     """
     position = (season_number, episode.episode_number)
-    target_episode = target_positions.get(position)
+    episode_numbers = (
+        expected_episode_numbers_from_text(episode.path.stem, season_number, episode.episode_number)
+        if episode.path is not None
+        else None
+    ) or (episode.episode_number,)
 
-    if not restore_aired and target_episode is None:
+    target_episodes: tuple[TvdbEpisode, ...] | None = tuple(
+        target_positions[(season_number, episode_number)]
+        for episode_number in episode_numbers
+        if (season_number, episode_number) in target_positions
+    )
+    if len(target_episodes) != len(episode_numbers):
+        # Either no TheTVDB data at all, or (for a multi-episode item) data
+        # for only some of the positions the filename covers - a partial
+        # combined title/overview built from some-have/some-don't would be
+        # guessing, so this is a hard skip either way, same as a plain
+        # missing single-episode match.
+        target_episodes = None
+    # A multi-episode item's own image slot is singular - there's no way to
+    # combine two images into one Primary image, so this uses the range's
+    # first position, the same one Jellyfin's own episode_number reflects.
+    target_episode = target_episodes[0] if target_episodes else None
+
+    if not restore_aired and target_episodes is None:
         # DVD mode has no fallback data source - OriginalTitle only ever
-        # holds a backup made during a *previous* DVD apply - so a missing
-        # TheTVDB DVD-order entry at this position is always a hard skip,
-        # without needing to fetch the item at all.
+        # holds a backup made during a *previous* DVD apply - so missing
+        # TheTVDB DVD-order data at this position (or, for a multi-episode
+        # item, any position it covers) is always a hard skip, without
+        # needing to fetch the item at all.
         return EpisodePlan(
             episode_id=episode.id,
             position=position,
@@ -325,7 +425,7 @@ def plan_episode_update(
 
     if restore_aired:
         original_title = destination_dto.get("OriginalTitle") or None
-        if target_episode is None and original_title is None:
+        if target_episodes is None and original_title is None:
             return EpisodePlan(
                 episode_id=episode.id,
                 position=position,
@@ -335,11 +435,16 @@ def plan_episode_update(
                 rejected_reason=None,
                 no_target_match=True,
             )
+        # TheTVDB's language only matters here when there's no OriginalTitle
+        # backup to prefer instead - a backup already restores Name without
+        # ever consulting TheTVDB, so its language is never in question.
+        no_english_title = original_title is None and _has_untranslated_name(target_episodes)
         merged_dto = build_aired_restore_merged_item_dto(
-            destination_dto, original_title, target_episode
+            destination_dto, original_title, target_episodes
         )
     else:
-        merged_dto = build_dvd_merged_item_dto(destination_dto, target_episode)
+        no_english_title = _has_untranslated_name(target_episodes)
+        merged_dto = build_dvd_merged_item_dto(destination_dto, target_episodes)
 
     image_bytes: bytes | None = None
     image_content_type: str | None = None
@@ -365,6 +470,7 @@ def plan_episode_update(
         changes=_changed_fields(destination_dto, merged_dto),
         rejected_reason=_rejected_reason(merged_dto),
         no_target_match=False,
+        no_english_title=no_english_title,
         image_bytes=image_bytes,
         image_content_type=image_content_type,
         previous_primary_image_tag=previous_primary_image_tag,
@@ -442,8 +548,13 @@ def _describe_plan(plan: EpisodePlan, *, restore_aired: bool) -> None:
     if plan.is_rejected:
         _log_line(f"  {label}: rejected: {plan.rejected_reason}", error=True)
         return
+    if plan.no_english_title:
+        _log_line(
+            f"  {label}: TheTVDB has no English title at this position - Name left unchanged."
+        )
     if not plan.has_changes and not plan.has_image_change:
-        _log_line(f"  {label}: already matches {order_label}.")
+        if not plan.no_english_title:
+            _log_line(f"  {label}: already matches {order_label}.")
         return
     for field, old_value, new_value in plan.changes:
         _log_line(f"  {label} {field}: {old_value!r} -> {new_value!r}")
@@ -672,10 +783,12 @@ def run_apply_dvd_metadata(
                     _log_line(f"  {_format_position(plan.position)}: {past_participle}.")
 
             no_match_count = sum(1 for plan in plans if plan.no_target_match)
+            no_english_title_count = sum(1 for plan in plans if plan.no_english_title)
             _log_line(
                 f"{order_label_title} metadata {verb} complete: "
                 f"{len(actionable_plans) - failed} {past_participle}, {failed} failed, "
-                f"{len(rejected_plans)} rejected, {no_match_count} with no {order_label} match."
+                f"{len(rejected_plans)} rejected, {no_match_count} with no {order_label} match, "
+                f"{no_english_title_count} with no English title available (Name left unchanged)."
             )
 
             return 1 if failed or rejected_plans else 0

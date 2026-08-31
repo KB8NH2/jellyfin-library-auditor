@@ -694,8 +694,8 @@ class JellyfinClientSeriesLookupTests(unittest.TestCase):
         self.assertEqual(
             episodes,
             (
-                jellyfin.EpisodeSummary(id="e1", name="First", episode_number=1),
-                jellyfin.EpisodeSummary(id="e3", name="Third", episode_number=3),
+                jellyfin.EpisodeSummary(id="e1", name="First", episode_number=1, path=None),
+                jellyfin.EpisodeSummary(id="e3", name="Third", episode_number=3, path=None),
             ),
         )
 
@@ -729,7 +729,7 @@ class JellyfinClientSeriesLookupTests(unittest.TestCase):
 
         self.assertEqual(
             episodes,
-            (jellyfin.EpisodeSummary(id="e1", name="First", episode_number=1),),
+            (jellyfin.EpisodeSummary(id="e1", name="First", episode_number=1, path=None),),
         )
 
     def test_get_series_season_episodes_all_keeps_unnumbered_sorted_last_by_path(self) -> None:

@@ -307,6 +307,55 @@ class ReportGenerationTests(unittest.TestCase):
             rows_by_title["Episode Two"][header.index("Mismatched TheTVDB Title")], "No"
         )
 
+    def test_csv_rows_show_noe_for_tvdb_title_when_no_english_translation(self) -> None:
+        """Regression test: an episode whose TheTVDB position has data but
+        none of it in English must read "NoE" for Mismatched TheTVDB Title -
+        distinct from "No" (a real comparison was made and passed) and from
+        "N/A" (there's no TheTVDB data to compare against at all).
+        """
+        untranslated_episode = _make_item(
+            title="Big Sword",
+            item_id="episode-untranslated",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Claymore",
+            season_number=1,
+            episode_number=1,
+            path=Path("TV Shows/Claymore/Season 01/Claymore S01E01.mkv"),
+        )
+        library_result = LibraryAuditResult(
+            library=_make_library(library_id="tv", name="TV Shows", collection_type="tv"),
+            media_items_processed=1,
+            audited_items=(untranslated_episode,),
+            items_with_english_subtitles=0,
+            items_with_local_nfo=0,
+            items_with_local_backdrop=0,
+            findings=(
+                _make_finding(
+                    category=AuditCategory.METADATA,
+                    severity=AuditSeverity.INFO,
+                    title="TheTVDB title not in English",
+                    check_name="tvdb_title_not_english",
+                    media_item=untranslated_episode,
+                ),
+            ),
+            tvdb_available_series=frozenset({"Claymore"}),
+        )
+        result = AuditServerResult(
+            libraries_audited=1,
+            media_items_processed=1,
+            library_results=(library_result,),
+            findings=library_result.findings,
+        )
+
+        rows = report_generator._csv_rows(result)
+
+        header = report_generator.CSV_HEADER
+        self.assertEqual(rows[0][header.index("Mismatched TheTVDB Title")], "NoE")
+        # Unaffected column - not a "no English title" concern.
+        self.assertEqual(rows[0][header.index("Mismatched TheTVDB Series")], "No")
+
     def test_csv_row_shows_episode_range_for_combined_episode_file(self) -> None:
         """A range value like "5-7" is exactly the shape Excel's automatic
         type detection likes to reinterpret as a date (e.g. "5-6" commonly
@@ -377,6 +426,13 @@ class ReportGenerationTests(unittest.TestCase):
 
         episode_index = report_generator.CSV_HEADER.index("Episode")
         self.assertEqual(rows[0][episode_index], "1")
+
+    def test_tvdb_title_not_english_is_excluded_from_actionable_findings(self) -> None:
+        """"NoE" is a limitation, not a problem to fix - it must not inflate
+        the HTML dashboard's actionable-findings counts/check pages, same as
+        missing_backdrop already isn't.
+        """
+        self.assertIn("tvdb_title_not_english", report_generator.NON_ACTIONABLE_CHECKS)
 
     def test_write_html_report_creates_simplified_site_tree(self) -> None:
         movie_item = _make_item(title="Alien", library="Movies")

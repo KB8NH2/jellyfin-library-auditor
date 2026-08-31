@@ -32,6 +32,7 @@ CHECK_DISPLAY_LABELS = {
     "mismatched_movie_filename_title": "Mismatched Movie Filename Title",
     "mismatched_tvdb_series": "Mismatched TheTVDB Series",
     "mismatched_tvdb_title": "Mismatched TheTVDB Title",
+    "tvdb_title_not_english": "TheTVDB Title Not in English",
     "aired_dvd_order_mismatch": "Aired/DVD Order Mismatch",
 }
 CHECK_DISPLAY_ORDER = (
@@ -56,6 +57,7 @@ CHECK_SUMMARY_LABELS = {
     "aired_dvd_order_mismatch": "Episode Order",
     "mismatched_tvdb_series": "TheTVDB Match",
     "mismatched_tvdb_title": "TheTVDB Title",
+    "tvdb_title_not_english": "TheTVDB Title Language",
 }
 
 

@@ -321,11 +321,19 @@ class MovieMatch:
 
 @dataclass(frozen=True, slots=True)
 class EpisodeSummary:
-    """A minimal Episode item summary used to locate items to update."""
+    """A minimal Episode item summary used to locate items to update.
+
+    path lets a caller recognize a multi-episode file (e.g.
+    ``Show S01E17-E18 Title.mkv``) via
+    ``media.expected_episode_numbers_from_text`` - Jellyfin's own
+    episode_number for such a file is just the marker's first episode, not
+    every episode the file actually covers.
+    """
 
     id: str
     name: str
     episode_number: int
+    path: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +803,7 @@ class JellyfinClient:
                     "ParentId": series_id,
                     "Recursive": "true",
                     "IncludeItemTypes": EPISODE_ITEM_TYPE,
+                    "Fields": "Path",
                     "StartIndex": start_index,
                     "Limit": self._page_size,
                 },
@@ -807,11 +816,13 @@ class JellyfinClient:
                 episode_number = self._get_optional_int(raw_item, "IndexNumber")
                 if episode_number is None:
                     continue
+                raw_path = self._get_optional_str(raw_item, "Path")
                 episodes.append(
                     EpisodeSummary(
                         id=self._get_required_str(raw_item, "Id", "episode item"),
                         name=self._get_optional_str(raw_item, "Name") or "",
                         episode_number=episode_number,
+                        path=Path(raw_path) if raw_path else None,
                     )
                 )
 

@@ -55,7 +55,7 @@ CSV_HEADER = (
 MISMATCHED_FILENAME_TITLE_CHECKS = frozenset(
     {"mismatched_episode_filename_title", "mismatched_movie_filename_title"}
 )
-NON_ACTIONABLE_CHECKS = frozenset({"missing_backdrop"})
+NON_ACTIONABLE_CHECKS = frozenset({"missing_backdrop", "tvdb_title_not_english"})
 
 
 def write_csv_report(result: AuditServerResult) -> Path:
@@ -273,7 +273,12 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     for but that's already flagged by mismatched_tvdb_series also reads
     "N/A": that data is considered untrustworthy, so
     audit.audit_library_items() never actually compares titles against it
-    either (see its trustworthy_aired_positions filtering).
+    either (see its trustworthy_aired_positions filtering). "Mismatched
+    TheTVDB Title" also reads "NoE" instead of "No" for an episode whose
+    TheTVDB position has data but none of it in English (see
+    audit.mismatched_tvdb_title's "tvdb_title_not_english" finding) - same
+    reasoning as "N/A", just for a narrower cause (untranslated rather than
+    absent).
     """
     checks_by_item = _check_names_by_item(result.findings)
     mismatched_tvdb_series_names = frozenset(
@@ -301,6 +306,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                     "mismatched_tvdb_title" in check_names,
                     series_name=item.series_name,
                     tvdb_series=trustworthy_tvdb_series,
+                    untranslated="tvdb_title_not_english" in check_names,
                 ),
                 _yes_no("unknown_audio_codec" in check_names),
                 _yes_no("unknown_video_codec" in check_names),
@@ -329,7 +335,14 @@ def _check_names_by_item(
 
 
 def _actionable_findings(findings: tuple) -> tuple:
-    """Return only actionable findings for HTML reporting."""
+    """Return only actionable findings for HTML reporting.
+
+    "tvdb_title_not_english" is excluded the same way "missing_backdrop" is:
+    it isn't a problem to fix, just a limitation (TheTVDB has no English
+    translation on file), so it would only clutter the dashboard/check
+    pages. It still reaches the CSV/XLSX "NoE" designation, which reads
+    straight from AuditServerResult.findings rather than this filtered set.
+    """
     return tuple(
         finding
         for finding in findings
@@ -487,14 +500,25 @@ def _tvdb_yes_no(
     *,
     series_name: str | None,
     tvdb_series: frozenset[str],
+    untranslated: bool = False,
 ) -> str:
-    """Return Yes/No/N/A for a TheTVDB-dependent CSV field.
+    """Return Yes/No/N/A/NoE for a TheTVDB-dependent CSV field.
 
     "N/A" when ``series_name`` is missing (a movie) or isn't in
     ``tvdb_series`` (an episode whose series TheTVDB has no usable data for
     at all) - the comparison was never possible, so "No" would misleadingly
     claim it was made and came back clean.
+
+    "NoE" (checked after N/A, so N/A still wins for an untrustworthy/absent
+    series) when ``untranslated`` is set - TheTVDB has data at this item's
+    position(s), but none of it in English (see
+    audit.mismatched_tvdb_title's "tvdb_title_not_english" finding), so
+    there's no way to tell whether it matches or not. Distinct from both
+    "No" (a real comparison was made and passed) and "N/A" (there was
+    nothing at all to compare against).
     """
     if series_name is None or series_name not in tvdb_series:
         return "N/A"
+    if untranslated:
+        return "NoE"
     return _yes_no(value)

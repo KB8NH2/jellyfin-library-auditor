@@ -944,7 +944,9 @@ class MismatchedTvdbTitleTests(unittest.TestCase):
         original-language name for an episode with no recorded English
         translation - there's no way to tell whether that untranslated name
         matches the local title or not, so it must not be treated as a
-        mismatch.
+        mismatch. It's reported as its own distinct informational finding
+        instead (see test_reports_untranslated_title_instead_of_a_mismatch
+        below), not silently dropped.
         """
         item = _make_item(
             "Big Sword",
@@ -964,7 +966,86 @@ class MismatchedTvdbTitleTests(unittest.TestCase):
 
         findings = audit.mismatched_tvdb_title([item], aired_positions)
 
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_name, "tvdb_title_not_english")
+        self.assertNotEqual(findings[0].check_name, "mismatched_tvdb_title")
+
+    def test_reports_untranslated_title_instead_of_a_mismatch(self) -> None:
+        item = _make_item(
+            "Big Sword",
+            is_movie=False,
+            is_episode=True,
+            series_name="Claymore",
+            season_number=1,
+            episode_number=1,
+        )
+        aired_positions = {
+            "Claymore": {
+                (1, 1): (
+                    _make_tvdb_episode(season_number=1, episode_number=1, name="大剣 -クレイモア-"),
+                ),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding.check_name, "tvdb_title_not_english")
+        self.assertEqual(finding.category, AuditCategory.METADATA)
+        self.assertEqual(finding.severity, AuditSeverity.INFO)
+        self.assertIn("S01E01", finding.message)
+        self.assertIs(finding.media_item, item)
+
+    def test_no_untranslated_finding_when_position_is_simply_missing(self) -> None:
+        """A position with no TheTVDB data at all (as opposed to
+        non-English-only data) must not be reported as "not English" -
+        that's a different, pre-existing silent-skip case.
+        """
+        item = _make_item(
+            "Some Title",
+            is_movie=False,
+            is_episode=True,
+            series_name="Claymore",
+            season_number=1,
+            episode_number=99,
+        )
+        aired_positions = {
+            "Claymore": {
+                (1, 1): (_make_tvdb_episode(season_number=1, episode_number=1, name="Episode One"),),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
         self.assertEqual(findings, ())
+
+    def test_untranslated_finding_for_a_multi_episode_range_when_any_position_lacks_english(
+        self,
+    ) -> None:
+        item = _make_item(
+            "Combined Title",
+            is_movie=False,
+            is_episode=True,
+            series_name="Claymore",
+            season_number=1,
+            episode_number=1,
+            path=Path("Claymore S01E01-E02 Combined Title.mkv"),
+        )
+        aired_positions = {
+            "Claymore": {
+                (1, 1): (_make_tvdb_episode(season_number=1, episode_number=1, name="Episode One"),),
+                (1, 2): (
+                    _make_tvdb_episode(season_number=1, episode_number=2, name="大剣 -クレイモア-"),
+                ),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_name, "tvdb_title_not_english")
+        self.assertIn("S01E01-E02", findings[0].message)
 
     def test_no_finding_when_combined_title_matches_multi_episode_range(self) -> None:
         item = _make_item(

@@ -384,17 +384,23 @@ def expected_episode_numbers_from_filename(item: MediaItem) -> tuple[int, ...] |
     if not item.is_episode or item.season_number is None or item.episode_number is None:
         return None
 
-    return _expected_episode_numbers_from_text(
+    return expected_episode_numbers_from_text(
         item.path.stem, item.season_number, item.episode_number
     )
 
 
-def _expected_episode_numbers_from_text(
+def expected_episode_numbers_from_text(
     text: str,
     season_number: int,
     episode_number: int,
 ) -> tuple[int, ...] | None:
     """Return the inclusive episode-number range a filename-style marker implies.
+
+    The lower-level counterpart to :func:`expected_episode_numbers_from_filename`,
+    for a caller that only has a raw path/filename string and season/episode
+    numbers on hand rather than a full :class:`MediaItem` - e.g.
+    apply_episode_titles.py/apply_dvd_metadata.py, working from
+    ``jellyfin.EpisodeSummary`` while planning a rename.
 
     Doesn't assume ``episode_number`` is the first (leftmost) number in the
     marker - Jellyfin's own ``IndexNumber`` for a multi-episode file isn't
