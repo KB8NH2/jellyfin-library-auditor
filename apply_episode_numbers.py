@@ -1,5 +1,8 @@
 #!/usr/bin/python3
-"""CLI to fill in missing episode numbers for one series/season from TheTVDB.
+"""CLI to fill in missing episode numbers for one series from TheTVDB.
+
+Defaults to every season the series has; pass --season-number to scope it
+to just one.
 
 Jellyfin sometimes cannot parse an episode number out of a file at all (no
 recognizable ``SxxExx`` marker in the filename), leaving the episode's
@@ -429,17 +432,18 @@ def _describe_plan(plan: EpisodeNumberPlan) -> None:
 def run_apply_episode_numbers(
     *,
     series_name: str,
-    season_number: int,
+    season_number: int | None,
     server_key: str | None,
     library_name: str | None,
     path_filter: str | None = None,
     assume_yes: bool,
 ) -> int:
-    """Fill in missing episode numbers for one series' season from TheTVDB.
+    """Fill in missing episode numbers for one series from TheTVDB.
 
     Args:
         series_name: Series display name to match in Jellyfin.
-        season_number: Season number to update.
+        season_number: Season number to update, or ``None`` to update every
+            season the series has.
         server_key: Configured server key from servers.toml, or ``None`` to
             use servers.toml's default_server.
         library_name: Library name to restrict the series search to, or
@@ -507,25 +511,41 @@ def run_apply_episode_numbers(
                 match.tvdb_id,
             )
 
-            episodes = client.get_series_season_episodes_all(match.series_id, season_number)
-            if not episodes:
+            if season_number is not None:
+                season_numbers: tuple[int, ...] = (season_number,)
+            else:
+                season_numbers = client.get_series_season_numbers(match.series_id)
+
+            episodes_by_season = {
+                season: client.get_series_season_episodes_all(match.series_id, season)
+                for season in season_numbers
+            }
+            if not any(episodes_by_season.values()):
+                season_description = (
+                    f"season {season_number}" if season_number is not None else "any season"
+                )
                 _log_line(
-                    f"No episodes found for {series_name!r} season {season_number} "
+                    f"No episodes found for {series_name!r} {season_description} "
                     f"in library {match.library_name!r}."
                 )
                 return 0
 
-            numbered_episodes = tuple(e for e in episodes if e.episode_number is not None)
-            unnumbered_episodes = tuple(
-                sorted(
-                    (e for e in episodes if e.episode_number is None),
-                    key=_unnumbered_episode_sort_key,
+            unnumbered_by_season = {
+                season: tuple(
+                    sorted(
+                        (episode for episode in episodes if episode.episode_number is None),
+                        key=_unnumbered_episode_sort_key,
+                    )
                 )
-            )
-            if not unnumbered_episodes:
+                for season, episodes in episodes_by_season.items()
+            }
+            if not any(unnumbered_by_season.values()):
+                season_description = (
+                    f"season {season_number}" if season_number is not None else "any season"
+                )
                 _log_line(
                     f"No episodes are missing an episode number for {series_name!r} "
-                    f"season {season_number} in library {match.library_name!r}."
+                    f"{season_description} in library {match.library_name!r}."
                 )
                 return 0
 
@@ -563,44 +583,50 @@ def run_apply_episode_numbers(
                     tvdb_id, "official", series_name=series_name
                 )
 
-            season_aired_episodes = sorted(
-                (
-                    aired_episode
-                    for aired_episode in aired_episodes
-                    if aired_episode.season_number == season_number
-                ),
-                key=lambda aired_episode: aired_episode.episode_number,
-            )
-            taken_numbers = {episode.episode_number for episode in numbered_episodes}
-            available_aired_episodes = [
-                aired_episode
-                for aired_episode in season_aired_episodes
-                if aired_episode.episode_number not in taken_numbers
-            ]
-
             plans: list[EpisodeNumberPlan] = []
-            for episode in unnumbered_episodes:
-                target = _pop_title_match(available_aired_episodes, episode.name)
-                apply_title = False
-                if target is None and not assume_yes:
-                    fuzzy_match = _best_fuzzy_match(available_aired_episodes, episode.name)
-                    if fuzzy_match is not None:
-                        candidate, ratio = fuzzy_match
-                        current_label = (
-                            episode.path.name if episode.path is not None else episode.name
-                        )
-                        if _confirm_fuzzy_match(current_label, candidate, ratio):
-                            available_aired_episodes.remove(candidate)
-                            target = candidate
-                            apply_title = True
-                plans.append(
-                    plan_episode_number_update(client, episode, target, apply_title=apply_title)
+            for season, episodes in episodes_by_season.items():
+                unnumbered_episodes = unnumbered_by_season[season]
+                if not unnumbered_episodes:
+                    continue
+                numbered_episodes = tuple(e for e in episodes if e.episode_number is not None)
+                season_aired_episodes = sorted(
+                    (
+                        aired_episode
+                        for aired_episode in aired_episodes
+                        if aired_episode.season_number == season
+                    ),
+                    key=lambda aired_episode: aired_episode.episode_number,
                 )
+                taken_numbers = {episode.episode_number for episode in numbered_episodes}
+                available_aired_episodes = [
+                    aired_episode
+                    for aired_episode in season_aired_episodes
+                    if aired_episode.episode_number not in taken_numbers
+                ]
+
+                for episode in unnumbered_episodes:
+                    target = _pop_title_match(available_aired_episodes, episode.name)
+                    apply_title = False
+                    if target is None and not assume_yes:
+                        fuzzy_match = _best_fuzzy_match(available_aired_episodes, episode.name)
+                        if fuzzy_match is not None:
+                            candidate, ratio = fuzzy_match
+                            current_label = (
+                                episode.path.name if episode.path is not None else episode.name
+                            )
+                            if _confirm_fuzzy_match(current_label, candidate, ratio):
+                                available_aired_episodes.remove(candidate)
+                                target = candidate
+                                apply_title = True
+                    plans.append(
+                        plan_episode_number_update(client, episode, target, apply_title=apply_title)
+                    )
             plans = tuple(plans)
 
+            season_label = f"season {season_number}" if season_number is not None else "all seasons"
             _log_line(
                 f"Episode numbers assigned from TheTVDB aired order: {series_name!r} "
-                f"season {season_number} on {server.name}"
+                f"{season_label} on {server.name}"
             )
             for plan in plans:
                 _describe_plan(plan)
@@ -688,10 +714,9 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--season-number",
-        required=True,
         type=int,
         metavar="N",
-        help="Season number to update.",
+        help="Season number to update. Every season is updated if omitted.",
     )
     parser.add_argument(
         "--server",
@@ -747,7 +772,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.season_number < 0:
+    if args.season_number is not None and args.season_number < 0:
         LOGGER.error("--season-number must not be negative.")
         return 2
 

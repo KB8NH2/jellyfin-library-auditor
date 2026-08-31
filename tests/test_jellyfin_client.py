@@ -678,6 +678,34 @@ class JellyfinClientSeriesLookupTests(unittest.TestCase):
 
         self.assertEqual(matches, ())
 
+    def test_get_series_season_numbers_returns_distinct_sorted_seasons(self) -> None:
+        client = self._make_client()
+        raw_episodes = [
+            {"Id": "e3", "Name": "Third", "ParentIndexNumber": 2, "IndexNumber": 3},
+            {"Id": "e1", "Name": "First", "ParentIndexNumber": 1, "IndexNumber": 1},
+            {"Id": "e2", "Name": "Second", "ParentIndexNumber": 1, "IndexNumber": 2},
+            {"Id": "e-special", "Name": "Special", "ParentIndexNumber": 0, "IndexNumber": 1},
+        ]
+        with patch.object(
+            client._session, "request", return_value=_items_response(raw_episodes)
+        ):
+            season_numbers = client.get_series_season_numbers("series-id")
+
+        self.assertEqual(season_numbers, (0, 1, 2))
+
+    def test_get_series_season_numbers_excludes_episodes_with_no_resolvable_season(self) -> None:
+        client = self._make_client()
+        raw_episodes = [
+            {"Id": "e1", "Name": "First", "ParentIndexNumber": 1, "IndexNumber": 1},
+            {"Id": "e-unresolved", "Name": "Unresolved", "ParentIndexNumber": None, "IndexNumber": 1},
+        ]
+        with patch.object(
+            client._session, "request", return_value=_items_response(raw_episodes)
+        ):
+            season_numbers = client.get_series_season_numbers("series-id")
+
+        self.assertEqual(season_numbers, (1,))
+
     def test_get_series_season_episodes_filters_and_sorts(self) -> None:
         client = self._make_client()
         raw_episodes = [

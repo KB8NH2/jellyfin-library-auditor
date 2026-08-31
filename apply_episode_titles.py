@@ -1,5 +1,8 @@
 #!/usr/bin/python3
-"""CLI to rename one series/season's episode titles to TheTVDB's aired (or DVD) order.
+"""CLI to rename one series' episode titles to TheTVDB's aired (or DVD) order.
+
+Defaults to every season the series has; pass --season-number to scope it
+to just one.
 
 This is the sibling tool to audit.py's ``aired_dvd_order_mismatch`` check:
 where that check only reports an episode whose Jellyfin title doesn't match
@@ -423,7 +426,7 @@ def _describe_plan(plan: EpisodeTitlePlan, *, order_label: str, restore: bool = 
 def run_apply_episode_titles(
     *,
     series_name: str,
-    season_number: int,
+    season_number: int | None,
     server_key: str | None,
     library_name: str | None,
     path_filter: str | None = None,
@@ -431,12 +434,13 @@ def run_apply_episode_titles(
     use_dvd_order: bool = False,
     restore: bool = False,
 ) -> int:
-    """Rename one series/season's episode titles to TheTVDB's aired/DVD order,
+    """Rename one series' episode titles to TheTVDB's aired/DVD order,
     or restore them from each episode's own OriginalTitle backup.
 
     Args:
         series_name: Series display name to match in Jellyfin.
-        season_number: Season number to update.
+        season_number: Season number to update, or ``None`` to update every
+            season the series has.
         server_key: Configured server key from servers.toml, or ``None`` to
             use servers.toml's default_server.
         library_name: Library name to restrict the series search to, or
@@ -513,24 +517,36 @@ def run_apply_episode_titles(
                 match.tvdb_id,
             )
 
-            episodes = client.get_series_season_episodes(match.series_id, season_number)
-            if not episodes:
+            if season_number is not None:
+                season_numbers: tuple[int, ...] = (season_number,)
+            else:
+                season_numbers = client.get_series_season_numbers(match.series_id)
+
+            episodes_by_season = {
+                season: client.get_series_season_episodes(match.series_id, season)
+                for season in season_numbers
+            }
+            if not any(episodes_by_season.values()):
+                season_description = (
+                    f"season {season_number}" if season_number is not None else "any season"
+                )
                 _log_line(
-                    f"No episodes found for {series_name!r} season {season_number} "
+                    f"No episodes found for {series_name!r} {season_description} "
                     f"in library {match.library_name!r}."
                 )
                 return 0
 
             if restore:
                 plans = []
-                for episode in episodes:
-                    LOGGER.debug(
-                        "Checking %s %r (item %s)...",
-                        _format_position((season_number, episode.episode_number)),
-                        episode.name,
-                        episode.id,
-                    )
-                    plans.append(plan_episode_title_restore(client, episode, season_number))
+                for season, episodes in episodes_by_season.items():
+                    for episode in episodes:
+                        LOGGER.debug(
+                            "Checking %s %r (item %s)...",
+                            _format_position((season, episode.episode_number)),
+                            episode.name,
+                            episode.id,
+                        )
+                        plans.append(plan_episode_title_restore(client, episode, season))
                 plans = tuple(plans)
             else:
                 with TvdbClient(
@@ -574,27 +590,26 @@ def run_apply_episode_titles(
                 }
 
                 plans = []
-                for episode in episodes:
-                    LOGGER.debug(
-                        "Checking %s %r (item %s)...",
-                        _format_position((season_number, episode.episode_number)),
-                        episode.name,
-                        episode.id,
-                    )
-                    plans.append(
-                        plan_episode_title_update(client, episode, season_number, target_positions)
-                    )
+                for season, episodes in episodes_by_season.items():
+                    for episode in episodes:
+                        LOGGER.debug(
+                            "Checking %s %r (item %s)...",
+                            _format_position((season, episode.episode_number)),
+                            episode.name,
+                            episode.id,
+                        )
+                        plans.append(
+                            plan_episode_title_update(client, episode, season, target_positions)
+                        )
                 plans = tuple(plans)
 
+            season_label = f"season {season_number}" if season_number is not None else "all seasons"
             if restore:
-                _log_line(
-                    f"Episode titles restore: {series_name!r} "
-                    f"season {season_number} on {server.name}"
-                )
+                _log_line(f"Episode titles restore: {series_name!r} {season_label} on {server.name}")
             else:
                 _log_line(
                     f"Episode titles rename ({order_label}): {series_name!r} "
-                    f"season {season_number} on {server.name}"
+                    f"{season_label} on {server.name}"
                 )
             for plan in plans:
                 _describe_plan(plan, order_label=order_label, restore=restore)
@@ -694,10 +709,9 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--season-number",
-        required=True,
         type=int,
         metavar="N",
-        help="Season number to update.",
+        help="Season number to update. Every season is updated if omitted.",
     )
     parser.add_argument(
         "--server",
@@ -769,7 +783,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.season_number < 0:
+    if args.season_number is not None and args.season_number < 0:
         LOGGER.error("--season-number must not be negative.")
         return 2
 

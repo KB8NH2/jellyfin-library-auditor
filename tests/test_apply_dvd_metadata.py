@@ -626,6 +626,89 @@ class ApplyDvdMetadataCommandTests(unittest.TestCase):
         self.assertEqual(updated_item_id, "ep1")
         self.assertEqual(updated_dto["Name"], "DVD Title")
 
+    def test_omitted_season_number_updates_every_season(self) -> None:
+        """Regression test: --season-number is optional - without it, every
+        season the series has is fetched and updated in one batch.
+        """
+        series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
+        episodes_by_season = {
+            1: (jellyfin.EpisodeSummary(id="ep1", name="Aired Title 1", episode_number=1, path=None),),
+            2: (jellyfin.EpisodeSummary(id="ep2", name="Aired Title 2", episode_number=1, path=None),),
+        }
+        items_by_id = {
+            "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Aired Title 1"},
+            "ep2": {"Id": "ep2", "Path": "/media/show/S02E01.mkv", "Name": "Aired Title 2"},
+        }
+        dvd_episodes = (
+            _make_tvdb_episode(season_number=1, episode_number=1, name="DVD Title 1"),
+            _make_tvdb_episode(season_number=2, episode_number=1, name="DVD Title 2"),
+        )
+        update_calls: list = []
+
+        class FakeClient:
+            def __init__(self, server, **kwargs):
+                self.server = server
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
+                return series_matches
+
+            def get_series_season_numbers(self, series_id):
+                return tuple(sorted(episodes_by_season))
+
+            def get_series_season_episodes(self, series_id, season_number):
+                return episodes_by_season[season_number]
+
+            def get_series_episode_positions(self, series_id):
+                return frozenset()
+
+            def get_item(self, item_id):
+                return items_by_id[item_id]
+
+            def update_item(self, item_id, item_dto):
+                update_calls.append((item_id, item_dto))
+                items_by_id[item_id] = item_dto
+
+        fake_tvdb_client = self._make_fake_tvdb_client(dvd_episodes)
+
+        with patch("apply_dvd_metadata.get_config", return_value=self._make_config()):
+            with patch("apply_dvd_metadata.JellyfinClient", FakeClient):
+                with patch("apply_dvd_metadata.TvdbClient", fake_tvdb_client):
+                    with patch("builtins.input", return_value="y"):
+                        exit_code = apply_dvd_metadata.run_apply_dvd_metadata(
+                            series_name="Breaking Bad",
+                            season_number=None,
+                            server_key=None,
+                            library_name=None,
+                            assume_yes=False,
+                        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(update_calls), 2)
+        updated_ids = {item_id for item_id, _ in update_calls}
+        self.assertEqual(updated_ids, {"ep1", "ep2"})
+        self.assertEqual(items_by_id["ep1"]["Name"], "DVD Title 1")
+        self.assertEqual(items_by_id["ep2"]["Name"], "DVD Title 2")
+
+    def test_season_number_defaults_to_none_when_omitted(self) -> None:
+        parser = apply_dvd_metadata._build_argument_parser()
+
+        args = parser.parse_args(["--series-name", "Breaking Bad"])
+
+        self.assertIsNone(args.season_number)
+
+    def test_main_rejects_negative_season_number(self) -> None:
+        exit_code = apply_dvd_metadata.main(
+            ["--series-name", "Breaking Bad", "--season-number", "-1"]
+        )
+
+        self.assertEqual(exit_code, 2)
+
     def test_uses_better_matching_tvdb_series_over_jellyfins_assigned_id(self) -> None:
         """Regression test: Jellyfin's own assigned TheTVDB id can itself be
         wrong when TheTVDB has more than one series entry sharing a name -

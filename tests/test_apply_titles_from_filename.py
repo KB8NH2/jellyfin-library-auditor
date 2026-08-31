@@ -329,6 +329,88 @@ class RunApplyTitlesFromFilenameCommandTests(unittest.TestCase):
         self.assertEqual(len(update_calls), 1)
         self.assertEqual(update_calls[0][1]["Name"], "Episode Title")
 
+    def test_omitted_season_number_renames_every_season(self) -> None:
+        """Regression test: --season-number is optional - without it, every
+        season the series has is fetched and renamed in one batch.
+        """
+        series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id=None),)
+        episodes_by_season = {
+            1: (
+                jellyfin.SeasonEpisodeSummary(
+                    id="ep1",
+                    name="Wrong Title 1",
+                    path=Path("/media/show/Season 01/Show S01E01 Episode One.mkv"),
+                    episode_number=1,
+                ),
+            ),
+            2: (
+                jellyfin.SeasonEpisodeSummary(
+                    id="ep2",
+                    name="Wrong Title 2",
+                    path=Path("/media/show/Season 02/Show S02E01 Episode Two.mkv"),
+                    episode_number=1,
+                ),
+            ),
+        }
+        items_by_id = {
+            "ep1": {
+                "Id": "ep1",
+                "Path": "/media/show/Season 01/Show S01E01 Episode One.mkv",
+                "Name": "Wrong Title 1",
+            },
+            "ep2": {
+                "Id": "ep2",
+                "Path": "/media/show/Season 02/Show S02E01 Episode Two.mkv",
+                "Name": "Wrong Title 2",
+            },
+        }
+        update_calls: list = []
+
+        class FakeClient:
+            def __init__(self, server, **kwargs):
+                self.server = server
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
+                return series_matches
+
+            def get_series_season_numbers(self, series_id):
+                return tuple(sorted(episodes_by_season))
+
+            def get_series_season_episodes_all(self, series_id, season_number):
+                return episodes_by_season[season_number]
+
+            def get_item(self, item_id):
+                return items_by_id[item_id]
+
+            def update_item(self, item_id, item_dto):
+                update_calls.append((item_id, item_dto))
+                items_by_id[item_id] = item_dto
+
+        with patch("apply_titles_from_filename.get_config", return_value=self._make_config()):
+            with patch("apply_titles_from_filename.JellyfinClient", FakeClient):
+                with patch("builtins.input", return_value="y"):
+                    exit_code = apply_titles_from_filename.run_apply_titles_from_filename(
+                        movie_name=None,
+                        series_name="Show",
+                        season_number=None,
+                        server_key=None,
+                        library_name=None,
+                        assume_yes=False,
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(update_calls), 2)
+        updated_ids = {item_id for item_id, _ in update_calls}
+        self.assertEqual(updated_ids, {"ep1", "ep2"})
+        self.assertEqual(items_by_id["ep1"]["Name"], "Episode One")
+        self.assertEqual(items_by_id["ep2"]["Name"], "Episode Two")
+
     def test_episode_missing_a_path_is_skipped_as_no_target_match(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id=None),)
         episodes = (
@@ -586,10 +668,22 @@ class MainArgumentValidationTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
 
-    def test_rejects_series_name_without_season_number(self) -> None:
-        exit_code = apply_titles_from_filename.main(["--series-name", "Show"])
+    def test_series_name_without_season_number_is_accepted(self) -> None:
+        """Regression test: --season-number is optional - a bare
+        --series-name (meaning "every season") must pass validation instead
+        of being rejected as a usage error.
+        """
+        captured_kwargs: dict = {}
 
-        self.assertEqual(exit_code, 2)
+        def fake_run(**kwargs):
+            captured_kwargs.update(kwargs)
+            return 0
+
+        with patch("apply_titles_from_filename.run_apply_titles_from_filename", fake_run):
+            exit_code = apply_titles_from_filename.main(["--series-name", "Show"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNone(captured_kwargs["season_number"])
 
     def test_rejects_season_number_without_series_name(self) -> None:
         exit_code = apply_titles_from_filename.main(["--movie", "X", "--season-number", "1"])

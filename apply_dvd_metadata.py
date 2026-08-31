@@ -1,5 +1,8 @@
 #!/usr/bin/python3
-"""CLI to switch one series/season's episode metadata between TheTVDB's aired and DVD order.
+"""CLI to switch one series' episode metadata between TheTVDB's aired and DVD order.
+
+Defaults to every season the series has; pass --season-number to scope it
+to just one.
 
 Some series are organized on disk in TheTVDB's DVD order while Jellyfin's
 episode metadata reflects TheTVDB's aired order (or vice versa), which
@@ -568,7 +571,7 @@ def _describe_plan(plan: EpisodePlan, *, restore_aired: bool) -> None:
 def run_apply_dvd_metadata(
     *,
     series_name: str,
-    season_number: int,
+    season_number: int | None,
     server_key: str | None,
     library_name: str | None,
     path_filter: str | None = None,
@@ -576,11 +579,12 @@ def run_apply_dvd_metadata(
     restore_aired: bool = False,
     images: bool = False,
 ) -> int:
-    """Switch TheTVDB's aired/DVD-order Name/Overview for one series' season.
+    """Switch TheTVDB's aired/DVD-order Name/Overview for one series.
 
     Args:
         series_name: Series display name to match in Jellyfin.
-        season_number: Season number to update.
+        season_number: Season number to update, or ``None`` to update every
+            season the series has.
         server_key: Configured server key from servers.toml, or ``None`` to
             use servers.toml's default_server.
         library_name: Library name to restrict the series search to, or
@@ -657,10 +661,21 @@ def run_apply_dvd_metadata(
                 match.tvdb_id,
             )
 
-            episodes = client.get_series_season_episodes(match.series_id, season_number)
-            if not episodes:
+            if season_number is not None:
+                season_numbers: tuple[int, ...] = (season_number,)
+            else:
+                season_numbers = client.get_series_season_numbers(match.series_id)
+
+            episodes_by_season = {
+                season: client.get_series_season_episodes(match.series_id, season)
+                for season in season_numbers
+            }
+            if not any(episodes_by_season.values()):
+                season_description = (
+                    f"season {season_number}" if season_number is not None else "any season"
+                )
                 _log_line(
-                    f"No episodes found for {series_name!r} season {season_number} "
+                    f"No episodes found for {series_name!r} {season_description} "
                     f"in library {match.library_name!r}."
                 )
                 return 0
@@ -710,29 +725,31 @@ def run_apply_dvd_metadata(
                 # still open, mirroring transfer_images.py's plan_image_transfer
                 # fetching the source image during planning, before confirmation.
                 plans = []
-                for episode in episodes:
-                    LOGGER.debug(
-                        "Checking %s %r (item %s)...",
-                        _format_position((season_number, episode.episode_number)),
-                        episode.name,
-                        episode.id,
-                    )
-                    plans.append(
-                        plan_episode_update(
-                            client,
-                            episode,
-                            season_number,
-                            target_positions,
-                            restore_aired=restore_aired,
-                            images=images,
-                            tvdb_client=tvdb_client if images else None,
+                for season, episodes in episodes_by_season.items():
+                    for episode in episodes:
+                        LOGGER.debug(
+                            "Checking %s %r (item %s)...",
+                            _format_position((season, episode.episode_number)),
+                            episode.name,
+                            episode.id,
                         )
-                    )
+                        plans.append(
+                            plan_episode_update(
+                                client,
+                                episode,
+                                season,
+                                target_positions,
+                                restore_aired=restore_aired,
+                                images=images,
+                                tvdb_client=tvdb_client if images else None,
+                            )
+                        )
                 plans = tuple(plans)
 
+            season_label = f"season {season_number}" if season_number is not None else "all seasons"
             _log_line(
                 f"{order_label_title} metadata {verb}: {series_name!r} "
-                f"season {season_number} on {server.name}"
+                f"{season_label} on {server.name}"
             )
             for plan in plans:
                 _describe_plan(plan, restore_aired=restore_aired)
@@ -821,10 +838,9 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--season-number",
-        required=True,
         type=int,
         metavar="N",
-        help="Season number to update.",
+        help="Season number to update. Every season is updated if omitted.",
     )
     parser.add_argument(
         "--server",
@@ -903,7 +919,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.season_number < 0:
+    if args.season_number is not None and args.season_number < 0:
         LOGGER.error("--season-number must not be negative.")
         return 2
 

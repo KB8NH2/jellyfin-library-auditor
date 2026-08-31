@@ -11,8 +11,9 @@ metadata provider - the new title comes entirely from the filename already
 on disk.
 
 Exactly one target must be given: --movie for a single movie, or
---series-name together with --season-number for every episode in one
-season. Whether a rename is even needed is decided with audit.titles_match(),
+--series-name for every episode in a series (add --season-number to scope
+it to one season instead of every season the series has). Whether a rename
+is even needed is decided with audit.titles_match(),
 the same lenient comparison the sibling tools use (punctuation, articles,
 accents, US/UK spelling, roman-numeral part suffixes, and more are all
 treated as equivalent) - an item already reading the same as its
@@ -445,16 +446,20 @@ def _resolve_movie_targets(
 def _resolve_episode_targets(
     client: JellyfinClient,
     series_name: str,
-    season_number: int,
+    season_number: int | None,
     library_name: str | None,
     path_filter: str | None,
     server_name: str,
 ) -> tuple[TitleTarget, ...] | None:
     """Resolve --series-name/--season-number to every episode in that season.
 
+    Args:
+        season_number: Season to resolve, or ``None`` to resolve every
+            season the series has.
+
     Returns:
-        One resolved target per episode in the season (possibly empty when
-        the season has no episodes), or ``None`` when the series could not
+        One resolved target per episode in the season(s) (possibly empty
+        when there are no episodes), or ``None`` when the series could not
         be uniquely resolved (already logged in that case).
     """
     matches = client.find_series(series_name, library_name=library_name, path_filter=path_filter)
@@ -472,22 +477,27 @@ def _resolve_episode_targets(
         return None
 
     match = matches[0]
-    episodes = client.get_series_season_episodes_all(match.series_id, season_number)
+    if season_number is not None:
+        season_numbers: tuple[int, ...] = (season_number,)
+    else:
+        season_numbers = client.get_series_season_numbers(match.series_id)
 
     targets: list[TitleTarget] = []
-    for episode in episodes:
-        if episode.episode_number is not None:
-            label = f"S{season_number:02d}E{episode.episode_number:02d}"
-        else:
-            label = episode.name
+    for season in season_numbers:
+        episodes = client.get_series_season_episodes_all(match.series_id, season)
+        for episode in episodes:
+            if episode.episode_number is not None:
+                label = f"S{season:02d}E{episode.episode_number:02d}"
+            else:
+                label = episode.name
 
-        if episode.path is None or episode.episode_number is None:
-            target_name = None
-        else:
-            target_name = _expected_title_for_episode(
-                episode.path, season_number, episode.episode_number
-            )
-        targets.append((episode.id, label, episode.name, target_name))
+            if episode.path is None or episode.episode_number is None:
+                target_name = None
+            else:
+                target_name = _expected_title_for_episode(
+                    episode.path, season, episode.episode_number
+                )
+            targets.append((episode.id, label, episode.name, target_name))
 
     return tuple(targets)
 
@@ -510,8 +520,9 @@ def run_apply_titles_from_filename(
         movie_name: Movie display name to match in Jellyfin. Mutually
             exclusive with series_name/season_number.
         series_name: Series display name to match in Jellyfin. Mutually
-            exclusive with movie_name; requires season_number.
-        season_number: Season number to update. Requires series_name.
+            exclusive with movie_name.
+        season_number: Season number to update, or ``None`` to update every
+            season the series has. Requires series_name.
         server_key: Configured server key from servers.toml, or ``None`` to
             use servers.toml's default_server.
         library_name: Library name to restrict the movie/series search to,
@@ -532,15 +543,13 @@ def run_apply_titles_from_filename(
         a usage/configuration error.
 
     Raises:
-        ValueError: If season_number is given without series_name, or vice
-            versa, or if neither movie_name nor series_name is given.
+        ValueError: If season_number is given without series_name, or if
+            neither movie_name nor series_name is given.
     """
     if movie_name is not None and series_name is not None:
         raise ValueError("movie_name and series_name are mutually exclusive.")
     if movie_name is None and series_name is None:
         raise ValueError("One of movie_name or series_name is required.")
-    if series_name is not None and season_number is None:
-        raise ValueError("series_name requires season_number.")
     if season_number is not None and series_name is None:
         raise ValueError("season_number requires series_name.")
 
@@ -572,7 +581,10 @@ def run_apply_titles_from_filename(
                 targets = _resolve_episode_targets(
                     client, series_name, season_number, library_name, path_filter, server.name
                 )
-                subject = f"{series_name!r} season {season_number}"
+                season_label = (
+                    f"season {season_number}" if season_number is not None else "all seasons"
+                )
+                subject = f"{series_name!r} {season_label}"
 
             if targets is None:
                 return 1
@@ -667,11 +679,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="apply_titles_from_filename",
         description=(
-            "Rename a movie's or a season's episode titles to the title their "
+            "Rename a movie's or a series' episode titles to the title their "
             "own on-disk filename implies, under Jellyfin's naming convention. "
             "Exactly one target must be given: --movie for a single movie, or "
-            "--series-name together with --season-number for every episode in "
-            "one season. Never contacts TheTVDB or any other internet metadata "
+            "--series-name for every episode in a series (add --season-number "
+            "to scope it to one season instead of every season the series "
+            "has). Never contacts TheTVDB or any other internet metadata "
             "provider. An item already reading the same as its filename-implied "
             "title is left alone - matching is the same lenient comparison "
             "audit.py's checks use (punctuation, articles, accents, US/UK "
@@ -692,13 +705,16 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--series-name",
         metavar="NAME",
-        help="Series name to match, as it appears in Jellyfin. Requires --season-number.",
+        help="Series name to match, as it appears in Jellyfin.",
     )
     parser.add_argument(
         "--season-number",
         type=int,
         metavar="N",
-        help="Season number to update. Requires --series-name.",
+        help=(
+            "Season number to update. Requires --series-name; every season "
+            "is updated if omitted."
+        ),
     )
     parser.add_argument(
         "--server",
@@ -770,9 +786,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.movie is None and args.series_name is None:
         LOGGER.error("Specify either --movie or --series-name/--season-number.")
-        return 2
-    if args.series_name is not None and args.season_number is None:
-        LOGGER.error("--series-name requires --season-number.")
         return 2
     if args.season_number is not None and args.series_name is None:
         LOGGER.error("--season-number requires --series-name.")

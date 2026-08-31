@@ -548,6 +548,76 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
         self.assertEqual(updated_dto["Name"], "Aired Title")
         self.assertEqual(updated_dto["OriginalTitle"], "Wrong Title")
 
+    def test_omitted_season_number_updates_every_season(self) -> None:
+        """Regression test: --season-number is optional - without it, every
+        season the series has is fetched and updated in one batch, not just
+        a single season.
+        """
+        series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
+        episodes_by_season = {
+            1: (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title 1", episode_number=1, path=None),),
+            2: (jellyfin.EpisodeSummary(id="ep2", name="Wrong Title 2", episode_number=1, path=None),),
+        }
+        items_by_id = {
+            "ep1": {"Id": "ep1", "Path": "/media/show/S01E01.mkv", "Name": "Wrong Title 1"},
+            "ep2": {"Id": "ep2", "Path": "/media/show/S02E01.mkv", "Name": "Wrong Title 2"},
+        }
+        aired_episodes = (
+            _make_tvdb_episode(season_number=1, episode_number=1, name="Aired Title 1"),
+            _make_tvdb_episode(season_number=2, episode_number=1, name="Aired Title 2"),
+        )
+        update_calls: list = []
+
+        class FakeClient:
+            def __init__(self, server, **kwargs):
+                self.server = server
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def find_series(self, series_name, *, library_name=None, path_filter=None):
+                return series_matches
+
+            def get_series_season_numbers(self, series_id):
+                return tuple(sorted(episodes_by_season))
+
+            def get_series_season_episodes(self, series_id, season_number):
+                return episodes_by_season[season_number]
+
+            def get_series_episode_positions(self, series_id):
+                return frozenset()
+
+            def get_item(self, item_id):
+                return items_by_id[item_id]
+
+            def update_item(self, item_id, item_dto):
+                update_calls.append((item_id, item_dto))
+                items_by_id[item_id] = item_dto
+
+        fake_tvdb_client = self._make_fake_tvdb_client(aired_episodes, expected_season_type="official")
+
+        with patch("apply_episode_titles.get_config", return_value=self._make_config()):
+            with patch("apply_episode_titles.JellyfinClient", FakeClient):
+                with patch("apply_episode_titles.TvdbClient", fake_tvdb_client):
+                    with patch("builtins.input", return_value="y"):
+                        exit_code = apply_episode_titles.run_apply_episode_titles(
+                            series_name="Breaking Bad",
+                            season_number=None,
+                            server_key=None,
+                            library_name=None,
+                            assume_yes=False,
+                        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(update_calls), 2)
+        updated_ids = {item_id for item_id, _ in update_calls}
+        self.assertEqual(updated_ids, {"ep1", "ep2"})
+        self.assertEqual(items_by_id["ep1"]["Name"], "Aired Title 1")
+        self.assertEqual(items_by_id["ep2"]["Name"], "Aired Title 2")
+
     def test_dvd_order_flag_fetches_dvd_episodes_instead(self) -> None:
         series_matches = (jellyfin.SeriesMatch(library_name="TV Shows", series_id="s1", tvdb_id="81189"),)
         episodes = (jellyfin.EpisodeSummary(id="ep1", name="Wrong Title", episode_number=1, path=None),)
@@ -789,6 +859,20 @@ class ApplyEpisodeTitlesCommandTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(update_calls, [])
+
+    def test_season_number_defaults_to_none_when_omitted(self) -> None:
+        parser = apply_episode_titles._build_argument_parser()
+
+        args = parser.parse_args(["--series-name", "Breaking Bad"])
+
+        self.assertIsNone(args.season_number)
+
+    def test_main_rejects_negative_season_number(self) -> None:
+        exit_code = apply_episode_titles.main(
+            ["--series-name", "Breaking Bad", "--season-number", "-1"]
+        )
+
+        self.assertEqual(exit_code, 2)
 
     def test_main_rejects_restore_combined_with_dvd_order(self) -> None:
         exit_code = apply_episode_titles.main(

@@ -773,6 +773,58 @@ class JellyfinClient:
         match = SEASON_NAME_NUMBER_PATTERN.match(season_name)
         return int(match.group(1)) if match else None
 
+    def get_series_season_numbers(self, series_id: str) -> tuple[int, ...]:
+        """Return every distinct season number with at least one episode in a series.
+
+        Used by apply_*.py's optional ``--season-number``: without a value,
+        those tools process every season a series has instead of just one,
+        looking this up first and then calling get_series_season_episodes
+        (or get_series_season_episodes_all) once per season - an episode
+        Jellyfin couldn't resolve a season number for either way (see
+        _resolved_season_number) is already excluded from every per-season
+        lookup this project makes, so it's excluded here too rather than
+        producing a season entry nothing else could ever actually match.
+
+        Args:
+            series_id: Jellyfin Series item identifier.
+
+        Returns:
+            Season numbers with at least one resolvable episode, sorted
+            ascending (season 0/specials included, if present).
+        """
+        season_numbers: set[int] = set()
+        start_index = 0
+
+        while True:
+            payload = self._request(
+                ITEMS_ENDPOINT,
+                params={
+                    "ParentId": series_id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": EPISODE_ITEM_TYPE,
+                    "StartIndex": start_index,
+                    "Limit": self._page_size,
+                },
+            )
+            raw_items = self._get_required_list(payload, "Items", "episodes response")
+
+            for raw_item in raw_items:
+                season_number = self._resolved_season_number(raw_item)
+                if season_number is not None:
+                    season_numbers.add(season_number)
+
+            total_count = self._get_optional_int(payload, "TotalRecordCount")
+            start_index += len(raw_items)
+
+            if not raw_items:
+                break
+            if total_count is not None and start_index >= total_count:
+                break
+            if len(raw_items) < self._page_size:
+                break
+
+        return tuple(sorted(season_numbers))
+
     def get_series_season_episodes(
         self,
         series_id: str,
