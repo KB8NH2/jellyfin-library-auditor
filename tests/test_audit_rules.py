@@ -662,11 +662,15 @@ class MismatchedTvdbSeriesTests(unittest.TestCase):
 
 
 class MismatchedTvdbTitleTests(unittest.TestCase):
-    """Unlike audit_episode_ordering/aired_dvd_order_mismatch (which only
-    flags a local title matching neither aired nor DVD order), this only
-    ever compares against aired order - the ordering tvdb_cache.json and
-    TheTVDB's own default reflect - and runs unconditionally whenever a
+    """Primarily compares against aired order - the ordering tvdb_cache.json
+    and TheTVDB's own default reflect - and runs unconditionally whenever a
     TheTVDB api_key is configured, not just with --check-episode-order.
+    Unlike audit_episode_ordering/aired_dvd_order_mismatch, a mismatch
+    against aired order alone is enough to flag (DVD-order data isn't
+    required to be present first) - but a local title matching DVD order
+    instead of aired order at that position is still excused, same as that
+    check, so a series correctly organized end-to-end in DVD order isn't
+    flagged as "mismatched" at every single episode.
     """
 
     def test_no_finding_when_local_title_matches_aired_order(self) -> None:
@@ -713,6 +717,89 @@ class MismatchedTvdbTitleTests(unittest.TestCase):
         self.assertIn("Aired Title", finding.message)
         self.assertIn("Something Else Entirely", finding.message)
         self.assertIs(finding.media_item, item)
+
+    def test_no_finding_when_local_title_matches_dvd_order_instead(self) -> None:
+        """Regression test: a series correctly organized end-to-end in DVD
+        order disagrees with aired order at every position by design, so
+        matching DVD order instead must excuse the title, not flag it.
+        """
+        item = _make_item(
+            "DVD Order Title",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=3,
+        )
+        aired_positions = {
+            "Example Series": {
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Aired Title"),),
+            }
+        }
+        dvd_positions = {
+            "Example Series": {
+                (1, 3): (
+                    _make_tvdb_episode(season_number=1, episode_number=3, name="DVD Order Title"),
+                ),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions, dvd_positions)
+
+        self.assertEqual(findings, ())
+
+    def test_flags_when_local_title_matches_neither_aired_nor_dvd_order(self) -> None:
+        item = _make_item(
+            "Something Else Entirely",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=3,
+        )
+        aired_positions = {
+            "Example Series": {
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Aired Title"),),
+            }
+        }
+        dvd_positions = {
+            "Example Series": {
+                (1, 3): (
+                    _make_tvdb_episode(season_number=1, episode_number=3, name="DVD Order Title"),
+                ),
+            }
+        }
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions, dvd_positions)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_name, "mismatched_tvdb_title")
+
+    def test_flags_when_title_differs_from_aired_order_and_dvd_position_is_missing(self) -> None:
+        """A series with no DVD-order data at all for this position still
+        gets flagged on an aired-order mismatch alone - dvd_positions being
+        given (for other series/positions) shouldn't require its own data
+        to be present here too.
+        """
+        item = _make_item(
+            "Something Else Entirely",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=3,
+        )
+        aired_positions = {
+            "Example Series": {
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Aired Title"),),
+            }
+        }
+        dvd_positions: dict = {}
+
+        findings = audit.mismatched_tvdb_title([item], aired_positions, dvd_positions)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_name, "mismatched_tvdb_title")
 
     def test_no_finding_when_no_aired_positions_given(self) -> None:
         item = _make_item(
@@ -906,6 +993,39 @@ class MismatchedTvdbTitleTests(unittest.TestCase):
 
         check_names = {finding.check_name for finding in findings}
         self.assertIn("mismatched_tvdb_series", check_names)
+        self.assertNotIn("mismatched_tvdb_title", check_names)
+
+    def test_audit_library_items_does_not_flag_titles_for_a_dvd_order_series(self) -> None:
+        """Regression test: audit_library_items() must thread dvd_positions
+        through to mismatched_tvdb_title() the same way it already does for
+        aired_positions - otherwise a series correctly organized end-to-end
+        in DVD order gets every single episode falsely flagged as a title
+        mismatch, since its titles never agree with aired order by design.
+        """
+        item = _make_item(
+            "DVD Order Title",
+            is_movie=False,
+            is_episode=True,
+            series_name="Example Series",
+            season_number=1,
+            episode_number=3,
+        )
+        aired_positions = {
+            "Example Series": {
+                (1, 3): (_make_tvdb_episode(season_number=1, episode_number=3, name="Aired Title"),),
+            }
+        }
+        dvd_positions = {
+            "Example Series": {
+                (1, 3): (
+                    _make_tvdb_episode(season_number=1, episode_number=3, name="DVD Order Title"),
+                ),
+            }
+        }
+
+        findings = audit.audit_library_items([item], aired_positions, dvd_positions)
+
+        check_names = {finding.check_name for finding in findings}
         self.assertNotIn("mismatched_tvdb_title", check_names)
 
 

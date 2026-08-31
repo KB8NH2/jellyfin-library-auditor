@@ -311,9 +311,20 @@ def audit_library_items(
         if aired_positions
         else aired_positions
     )
+    trustworthy_dvd_positions = (
+        {
+            series_name: positions
+            for series_name, positions in dvd_positions.items()
+            if series_name not in mismatched_series_names
+        }
+        if dvd_positions
+        else dvd_positions
+    )
     findings.extend(missing_tv_series_seasons(items_tuple, trustworthy_aired_positions))
     findings.extend(missing_tv_season_episodes(items_tuple, trustworthy_aired_positions))
-    findings.extend(mismatched_tvdb_title(items_tuple, trustworthy_aired_positions))
+    findings.extend(
+        mismatched_tvdb_title(items_tuple, trustworthy_aired_positions, trustworthy_dvd_positions)
+    )
     findings.extend(mismatched_series_findings)
     return tuple(findings)
 
@@ -1115,16 +1126,25 @@ def best_matching_tvdb_series(
 def mismatched_tvdb_title(
     items: Iterable[MediaItem],
     aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
+    dvd_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
 ) -> tuple[AuditFinding, ...]:
     """Return findings for local episodes whose title doesn't match TheTVDB's cached aired-order title.
 
-    Unlike :func:`audit_episode_ordering` (which requires a mismatch against
-    *both* aired and DVD order before flagging anything, specifically so a
-    series correctly organized end-to-end in DVD order isn't flagged at
-    every episode), this only ever compares against aired order - the
-    ordering ``tvdb_cache.json`` and TheTVDB's own default reflect. It runs
-    unconditionally whenever a TheTVDB ``api_key`` is configured, the same
-    as :func:`mismatched_tvdb_series`, not just with ``--check-episode-order``.
+    Primarily compares against aired order - the ordering ``tvdb_cache.json``
+    and TheTVDB's own default reflect - and runs unconditionally whenever a
+    TheTVDB ``api_key`` is configured, the same as :func:`mismatched_tvdb_series`,
+    not just with ``--check-episode-order``. Unlike :func:`audit_episode_ordering`,
+    a mismatch against aired order is enough to flag on its own - DVD-order
+    data isn't required to be available first.
+
+    However, a local title matching DVD order instead of aired order at that
+    same position is not flagged: a series correctly organized end-to-end in
+    DVD order is expected to disagree with aired order at every episode, and
+    without this check, every one of its episodes would otherwise read as a
+    false "mismatch". So DVD order is only ever used to *excuse* a title that
+    disagrees with aired order, never to flag one that agrees with aired
+    order - unlike :func:`audit_episode_ordering`, which requires disagreement
+    with both before flagging anything.
 
     Shares :func:`audit_episode_ordering`'s multi-episode-range and
     multi-candidate-series handling (see its docstring for why both matter):
@@ -1139,11 +1159,17 @@ def mismatched_tvdb_title(
         aired_positions: TheTVDB aired-order candidate episodes for each
             series name, keyed by (season_number, episode_number). A series
             absent here (no TheTVDB match, or the lookup failed) is skipped.
+        dvd_positions: TheTVDB DVD-order candidate episodes for each series
+            name, in the same shape as ``aired_positions``. Used only to
+            excuse a title that disagrees with aired order but agrees with
+            DVD order instead; absent or missing-position data just means
+            there's no DVD-order title available to excuse it with.
 
     Returns:
         One finding per local episode (or multi-episode range) whose title
         doesn't match any English-titled candidate combination's TheTVDB
-        aired-order title at its (season, episode(s)) position.
+        aired-order title at its (season, episode(s)) position, and also
+        doesn't match its DVD-order title there.
     """
     if not aired_positions:
         return ()
@@ -1167,6 +1193,15 @@ def mismatched_tvdb_title(
         aired_combined_titles = _combined_candidate_titles(aired_per_position)
         if any(titles_match(item.title, combined) for combined in aired_combined_titles):
             continue
+
+        if dvd_positions:
+            dvd_per_position = _candidates_for_episode_range(
+                dvd_positions.get(item.series_name, {}), item.season_number, episode_numbers
+            )
+            if dvd_per_position is not None:
+                dvd_combined_titles = _combined_candidate_titles(dvd_per_position)
+                if any(titles_match(item.title, combined) for combined in dvd_combined_titles):
+                    continue
 
         if len(episode_numbers) > 1:
             position_label = (
