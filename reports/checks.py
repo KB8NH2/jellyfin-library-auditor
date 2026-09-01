@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from media import expected_episode_title_from_filename
 from media import expected_movie_title_from_filename
+from media import get_display_base_directory
 from media import get_display_episode_number
 
 from . import templates
@@ -67,9 +68,9 @@ def render_check_page(
 def _table_headers(check_name: str) -> tuple[str, ...]:
     """Return the table headers for one check page."""
     if check_name == "missing_episodes":
-        return ("Library", "Series", "Season", "Title", "Details")
+        return ("Library", "Series", "Season", "Base Directory", "Details")
     if check_name == "missing_seasons":
-        return ("Library", "Series", "Title", "Details")
+        return ("Library", "Series", "Base Directory", "Details")
     if check_name == "mismatched_tvdb_series":
         return ("Library", "Series", "Title", "Details")
     if check_name == "mismatched_episode_filename_title":
@@ -100,6 +101,12 @@ def _check_rows(
             continue
         if check_name == "mismatched_movie_filename_title":
             rows.append(_mismatched_movie_filename_title_row(item, media_findings, site_links=site_links))
+            continue
+        if check_name == "missing_seasons":
+            rows.append(_missing_seasons_row(item, media_findings, site_links=site_links))
+            continue
+        if check_name == "missing_episodes":
+            rows.append(_missing_episodes_row(item, media_findings, site_links=site_links))
             continue
         rows.append(
             "\n".join(
@@ -158,18 +165,53 @@ def _mismatched_movie_filename_title_row(
     )
 
 
+def _missing_seasons_row(
+    item: templates.MediaItem,
+    media_findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+) -> str:
+    """Return one table row for the missing seasons check."""
+    return "\n".join(
+        (
+            f'          <tr data-search-row data-search="{templates.row_search_text(media_findings)}">',
+            f'            <td data-sort-value="{templates.escape(templates.check_row_library_sort_value(item))}"><a href="{templates.library_page_href(item.library, site_links=site_links, relative_prefix="../")}">{templates.escape(item.library)}</a></td>',
+            f"            <td>{templates.escape(item.series_name or '')}</td>",
+            f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(get_display_base_directory(item))}</a></td>',
+            f"            <td>{_finding_messages(media_findings)}</td>",
+            "          </tr>",
+        )
+    )
+
+
+def _missing_episodes_row(
+    item: templates.MediaItem,
+    media_findings: tuple,
+    *,
+    site_links: templates.SiteLinks,
+) -> str:
+    """Return one table row for the missing episodes check."""
+    return "\n".join(
+        (
+            f'          <tr data-search-row data-search="{templates.row_search_text(media_findings)}">',
+            f'            <td data-sort-value="{templates.escape(templates.check_row_library_sort_value(item))}"><a href="{templates.library_page_href(item.library, site_links=site_links, relative_prefix="../")}">{templates.escape(item.library)}</a></td>',
+            f"            <td>{templates.escape(item.series_name or '')}</td>",
+            f'            <td data-sort-value="{templates.escape(templates.season_sort_value(item))}">{templates.escape(item.season_name or "")}</td>',
+            f'            <td><a href="{templates.library_row_href(item, site_links=site_links, relative_prefix="../")}"{templates.filename_title_attribute(item)}>{templates.escape(get_display_base_directory(item))}</a></td>',
+            f"            <td>{_finding_messages(media_findings)}</td>",
+            "          </tr>",
+        )
+    )
+
+
 def _optional_row_cells(check_name: str, item: templates.MediaItem) -> tuple[str, ...]:
     """Return any season and episode cells needed for the current check page."""
-    cells: list[str] = []
-    if check_name not in {"missing_seasons", "mismatched_tvdb_series"}:
-        cells.append(
-            f'            <td data-sort-value="{templates.escape(templates.season_sort_value(item))}">{templates.escape(item.season_name or "")}</td>'
-        )
-    if check_name not in {"missing_episodes", "missing_seasons", "mismatched_tvdb_series"}:
-        cells.append(
-            f'            <td data-sort-value="{templates.escape(templates.episode_sort_value(item))}">{templates.escape(get_display_episode_number(item))}</td>'
-        )
-    return tuple(cells)
+    if check_name == "mismatched_tvdb_series":
+        return ()
+    return (
+        f'            <td data-sort-value="{templates.escape(templates.season_sort_value(item))}">{templates.escape(item.season_name or "")}</td>',
+        f'            <td data-sort-value="{templates.escape(templates.episode_sort_value(item))}">{templates.escape(get_display_episode_number(item))}</td>',
+    )
 
 
 def _finding_messages(findings: tuple) -> str:

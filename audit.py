@@ -660,6 +660,24 @@ def titles_match(first: str, second: str) -> bool:
     :data:`_TRAILING_ROMAN_NUMERAL_PATTERN` for the tradeoff this generic
     match accepts.
 
+    Each reading is separately tried with that same trailing standalone
+    roman numeral dropped entirely instead of converted, treating it as a
+    multi-part-episode disambiguator rather than significant title text -
+    the same treatment :func:`normalized_title` already gives a purely
+    numeric parenthetical like "(1)" or a "Part 1"/"Part I" suffix, just for
+    the case where one side spells that same disambiguator as a bare
+    trailing roman numeral with no parentheses or "Part" prefix at all (e.g.
+    metadata titling a two-part episode's first half "Those Who Rend
+    Asunder I" while the filename spells it "Those Who Rend Asunder (1)" -
+    normalized_title() drops the numeric parenthetical on the filename side
+    as a disambiguator, so the bare "I" needs the same treatment to still
+    line up). Kept as an additional reading alongside the arabic-conversion
+    one above rather than replacing it - a title where the numeral genuinely
+    is the title text (e.g. "Chapter I" is its own distinct episode, not a
+    disambiguated half of "Chapter") still needs that reading to line up
+    with an arabic-spelled counterpart, so both stay available and either
+    one matching counts.
+
     Finally, every resulting reading is also tried with all of its
     remaining spaces removed, so two words split apart on one side but
     joined into one on the other (e.g. "Doll House" versus "Dollhouse")
@@ -694,6 +712,9 @@ def _title_comparison_variants(value: str) -> frozenset[str]:
     normalized_forms |= {
         _with_trailing_roman_numeral_as_arabic(form) for form in normalized_forms
     }
+    normalized_forms |= {
+        _without_trailing_roman_numeral(form) for form in normalized_forms
+    }
     variants: set[str] = set()
     for form in normalized_forms:
         for with_or_without_articles in (form, _without_articles(form)):
@@ -721,6 +742,24 @@ def _with_trailing_roman_numeral_as_arabic(normalized_value: str) -> str:
     if numeral_value is None:
         return normalized_value
     return f"{normalized_value[:match.start()]}{numeral_value}"
+
+
+def _without_trailing_roman_numeral(normalized_value: str) -> str:
+    """Return ``normalized_value`` with a trailing standalone roman numeral dropped entirely.
+
+    Treats the numeral as a multi-part-episode disambiguator rather than
+    significant title text - see :func:`_title_comparison_variants` for why
+    this reading is kept alongside, not instead of,
+    :func:`_with_trailing_roman_numeral_as_arabic`. ``normalized_value`` is
+    expected to already be casefolded and whitespace-collapsed, i.e. the
+    output of :func:`normalized_title`.
+    """
+    match = _TRAILING_ROMAN_NUMERAL_PATTERN.search(normalized_value)
+    if match is None:
+        return normalized_value
+    if _roman_numeral_to_int(match.group(0)) is None:
+        return normalized_value
+    return normalized_value[: match.start()].rstrip()
 
 
 def _without_articles(normalized_value: str) -> str:
@@ -804,6 +843,7 @@ def missing_tv_series_seasons(
         )
         if not missing_numbers:
             continue
+        total_seasons = len({number for number in season_numbers if number != 0} | set(missing_numbers))
         representative = min(grouped_items, key=_episode_sort_key)
         findings.append(
             _finding(
@@ -811,7 +851,10 @@ def missing_tv_series_seasons(
                 category=AuditCategory.METADATA,
                 severity=AuditSeverity.WARNING,
                 check_name="missing_seasons",
-                message=f"Missing seasons: {_format_missing_numbers(missing_numbers)}.",
+                message=(
+                    f"Missing seasons: {_format_missing_numbers(missing_numbers)}, "
+                    f"out of {total_seasons} seasons."
+                ),
             )
         )
     return tuple(findings)
@@ -864,6 +907,7 @@ def missing_tv_season_episodes(
         missing_numbers = _missing_numbers(episode_numbers, tvdb_episode_numbers)
         if not missing_numbers:
             continue
+        total_episodes = len(episode_numbers | set(missing_numbers))
         representative = min(grouped_items, key=_episode_sort_key)
         findings.append(
             _finding(
@@ -871,7 +915,10 @@ def missing_tv_season_episodes(
                 category=AuditCategory.METADATA,
                 severity=AuditSeverity.WARNING,
                 check_name="missing_episodes",
-                message=f"Missing episodes: {_format_missing_numbers(missing_numbers)}.",
+                message=(
+                    f"Missing episodes: {_format_missing_numbers(missing_numbers)}, "
+                    f"out of {total_episodes} episodes."
+                ),
             )
         )
     return tuple(findings)
@@ -1171,6 +1218,142 @@ def best_matching_tvdb_series(
     return best_id
 
 
+def identify_tvdb_series_ids(
+    items: Iterable[MediaItem],
+    series_name: str,
+    assigned_ids: Iterable[str],
+    aired_candidates: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]],
+    dvd_candidates: Mapping[str, Mapping[tuple[int, int], TvdbEpisode]] | None = None,
+) -> tuple[str, ...]:
+    """Return every TheTVDB id whose episode titles actually explain this series' local episodes.
+
+    Used by :func:`auditor._fetch_tvdb_episode_positions` to decide which of
+    a series' several same-named TheTVDB ids actually get their episode data
+    merged into the position map local episodes are checked against. A
+    series name can pick up more than one candidate id over time - not just
+    TheTVDB genuinely splitting a long-running show into disjoint eras (e.g.
+    a Jellyfin library holding two distinct Series items sharing one display
+    name, one per era, each with its own assigned id - see
+    :meth:`JellyfinClient.get_series_tvdb_ids`), but also an unrelated
+    same-named show that TheTVDB's search once surfaced as a rejected
+    candidate while looking for a better match for some other series
+    entirely (see :func:`best_matching_tvdb_series`), whose episode list
+    then stays recorded under the name in TheTVDB's episode cache
+    indefinitely (see :meth:`TvdbClient.get_cached_series_ids_by_name`) - or
+    even one Jellyfin itself mistakenly assigned, since its own automatic
+    matching can be thrown off by weakly-titled local metadata just as
+    easily as a human can.
+
+    A candidate qualifies by actually explaining at least one local episode
+    *title* - its own episode title at a local item's (season, episode)
+    position, in either ordering, agreeing with that item's title (see
+    :func:`titles_match`) - not merely by having *some* data at a shared
+    position. Position overlap alone was tried first and reverted: an
+    unrelated same-named show using an ordinary, similarly-sized
+    season/episode grid can cover much of a real series' *position* space
+    by pure numeric coincidence without its *content* having anything to do
+    with it, which let position overlap alone pick - or merge in - the
+    wrong candidate far too easily. Title-matching doesn't have that
+    problem - two unrelated shows coincidentally sharing not just a
+    (season, episode) position but the literal episode title there as well
+    is vanishingly unlikely. Every qualifying candidate is returned, not
+    just the single best one, so a genuine split across ids - including one
+    whose local share happens to reuse (season, episode) numbers a
+    dominant id also uses (e.g. a newer era locally renumbered back to
+    "Season 1" instead of continuing the original's own numbering) - still
+    has each side's real episode checked against its own id's title rather
+    than only the dominant id's unrelated one at that position; see
+    :func:`audit_episode_ordering`'s "matches any candidate" handling for
+    where that pays off.
+
+    When *no* candidate explains even a single local title - most commonly
+    because every local title here is a placeholder Jellyfin never enriched
+    with real episode metadata, leaving nothing for any candidate to
+    actually agree with - there's no title evidence to work from at all, so
+    this falls back to position overlap instead: the single candidate with
+    the least of the series' full local (season, episode) set left
+    unexplained by position alone (checked against both orderings, since
+    some series are organized on disk in TheTVDB's DVD order while local
+    numbers still follow aired order, or vice versa), tie-broken toward a
+    Jellyfin-``assigned_ids`` candidate over one only present in TheTVDB's
+    episode cache. Picking only one id in that fallback - rather than
+    merging every position-overlapping candidate the way an earlier version
+    of this function did - keeps a coincidental position-only collision
+    from ever contaminating a position with an unrelated candidate's
+    episode; with no title evidence available to resolve a collision
+    correctly, :func:`audit_episode_ordering` flagging the position as not
+    found in TheTVDB at all is the safer failure than a guess.
+
+    Args:
+        items: Media items from one audited library.
+        series_name: The series to evaluate candidates for.
+        assigned_ids: Ids Jellyfin has assigned to a Series item under this
+            name - preferred on a tie in the no-title-evidence fallback.
+        aired_candidates: Every candidate TheTVDB id's aired-order episodes,
+            keyed by TheTVDB id, each in the same
+            ``(season_number, episode_number)`` shape as
+            :func:`mismatched_tvdb_series`'s ``aired_positions``.
+        dvd_candidates: The same candidates' DVD-order episodes, in the same
+            shape. A candidate id absent here is scored on its aired-order
+            data alone.
+
+    Returns:
+        Every candidate id that explains at least one local episode title,
+        or - only when none do - a single candidate id chosen by position
+        overlap instead. Every candidate id unchanged when there's no local
+        numbered-episode data to score candidates against at all.
+    """
+    if not aired_candidates:
+        return ()
+    if len(aired_candidates) == 1:
+        return tuple(aired_candidates)
+
+    local_items = _local_numbered_episodes_by_series(items).get(series_name, [])
+    if not local_items:
+        return tuple(aired_candidates)
+
+    title_matched_ids: list[str] = []
+    ratio_by_id: dict[str, float] = {}
+    for candidate_id, positions in aired_candidates.items():
+        secondary_positions = (dvd_candidates or {}).get(candidate_id, {})
+        matched_title_count = sum(
+            1
+            for item in local_items
+            if _candidate_title_matches(positions, secondary_positions, item)
+        )
+        if matched_title_count > 0:
+            title_matched_ids.append(candidate_id)
+            continue
+        unmatched_count, total_count = _unmatched_episode_count(
+            local_items, positions, secondary_positions
+        )
+        ratio_by_id[candidate_id] = unmatched_count / total_count if total_count else 1.0
+
+    if title_matched_ids:
+        return tuple(title_matched_ids)
+
+    assigned = frozenset(assigned_ids)
+    best_id = min(ratio_by_id, key=lambda cid: (ratio_by_id[cid], 0 if cid in assigned else 1))
+    return (best_id,)
+
+
+def _candidate_title_matches(
+    positions: Mapping[tuple[int, int], TvdbEpisode],
+    secondary_positions: Mapping[tuple[int, int], TvdbEpisode],
+    item: MediaItem,
+) -> bool:
+    """Return whether a candidate has an episode at one item's position whose title matches it.
+
+    Checks ``positions`` (aired order) first, falling back to
+    ``secondary_positions`` (DVD order) only when aired has nothing there -
+    either ordering agreeing with the local title is enough to count as a
+    match for :func:`identify_tvdb_series_ids`'s scoring.
+    """
+    position = (item.season_number, item.episode_number)
+    episode = positions.get(position) or secondary_positions.get(position)
+    return episode is not None and titles_match(item.title, episode.name)
+
+
 def mismatched_tvdb_title(
     items: Iterable[MediaItem],
     aired_positions: Mapping[str, Mapping[tuple[int, int], tuple[TvdbEpisode, ...]]] | None = None,
@@ -1356,17 +1539,42 @@ def audit_episode_ordering(
     on the strength of a comparison that can't mean anything would itself be
     the false positive.
 
+    A series name present in ``aired_positions`` at all (even as an empty
+    position map) means TheTVDB series id it's been identified against (see
+    :func:`auditor._fetch_tvdb_episode_positions`) was actually looked up -
+    a local (season, episode) that id has no data for in *either* ordering
+    is flagged too, as its own ``episode_not_in_tvdb`` finding, rather than
+    silently skipped, so a season TheTVDB genuinely doesn't have for the
+    identified series (e.g. a newer era TheTVDB tracks as an entirely
+    separate series, or a season that simply isn't out yet) is surfaced as
+    exactly that, instead of staying invisible or - worse - getting compared
+    against a same-named but unrelated series' totally different episode at
+    that position. Kept a distinct check name from ``aired_dvd_order_mismatch``
+    so CSV/XLSX output can tell "not found at all" apart from "found, and
+    disagrees" (see :func:`reports.generator._csv_rows`'s "NF" designation),
+    even though :func:`reports.generator._actionable_findings` folds it into
+    the same HTML "Aired/DVD Order Mismatch" page a viewer is already
+    looking at. A series name absent from ``aired_positions`` entirely (no
+    id was ever identified for it) is skipped as before - there's nothing to
+    say a specific season is missing from, only that nothing was looked up
+    at all.
+
     Args:
         items: Media items from one audited library.
         aired_positions: TheTVDB aired-order candidate episodes for each
-            series name, keyed by (season_number, episode_number).
+            series name, keyed by (season_number, episode_number). A series
+            name's presence as a key - regardless of whether its value is
+            empty - marks that series as having an identified TheTVDB id.
         dvd_positions: TheTVDB DVD-order candidate episodes for each series
             name, keyed by (season_number, episode_number).
 
     Returns:
-        One finding per local episode (or multi-episode range) whose title
-        doesn't match any English-titled candidate combination's TheTVDB
-        title at its (season, episode(s)) position, in either ordering.
+        One ``aired_dvd_order_mismatch`` finding per local episode (or
+        multi-episode range) whose title doesn't match any English-titled
+        candidate combination's TheTVDB title at its (season, episode(s))
+        position, in either ordering, plus one ``episode_not_in_tvdb``
+        finding per local episode whose identified series has no data at
+        all - in either ordering - at its position.
     """
     findings: list[AuditFinding] = []
 
@@ -1375,11 +1583,43 @@ def audit_episode_ordering(
             continue
         if item.season_number is None or item.episode_number is None:
             continue
+        if item.series_name not in aired_positions:
+            continue
 
         episode_numbers = expected_episode_numbers_from_filename(item) or (item.episode_number,)
+        if len(episode_numbers) > 1:
+            position_label = (
+                f"S{item.season_number:02d}E{episode_numbers[0]:02d}-"
+                f"E{episode_numbers[-1]:02d}"
+            )
+        else:
+            position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
+
+        aired_series_positions = aired_positions[item.series_name]
+        dvd_series_positions = dvd_positions.get(item.series_name, {})
+
+        if _range_entirely_missing(
+            aired_series_positions, item.season_number, episode_numbers
+        ) and _range_entirely_missing(dvd_series_positions, item.season_number, episode_numbers):
+            findings.append(
+                _finding(
+                    item,
+                    category=AuditCategory.EPISODE_ORDER,
+                    severity=AuditSeverity.WARNING,
+                    check_name="episode_not_in_tvdb",
+                    message=(
+                        f'{position_label} is titled "{item.title}", but that season/episode '
+                        "was not found in TheTVDB at all, in either ordering, for the TheTVDB "
+                        f'series identified for "{item.series_name}". Either this content '
+                        "belongs to a different TheTVDB series, or TheTVDB doesn't have this "
+                        "season yet."
+                    ),
+                )
+            )
+            continue
 
         aired_per_position = _candidates_for_episode_range(
-            aired_positions.get(item.series_name, {}), item.season_number, episode_numbers
+            aired_series_positions, item.season_number, episode_numbers
         )
         if aired_per_position is None:
             continue
@@ -1389,7 +1629,7 @@ def audit_episode_ordering(
             continue
 
         dvd_per_position = _candidates_for_episode_range(
-            dvd_positions.get(item.series_name, {}), item.season_number, episode_numbers
+            dvd_series_positions, item.season_number, episode_numbers
         )
         if dvd_per_position is None:
             continue
@@ -1397,14 +1637,6 @@ def audit_episode_ordering(
         dvd_combined_titles = _combined_candidate_titles(dvd_per_position)
         if any(titles_match(item.title, combined) for combined in dvd_combined_titles):
             continue
-
-        if len(episode_numbers) > 1:
-            position_label = (
-                f"S{item.season_number:02d}E{episode_numbers[0]:02d}-"
-                f"E{episode_numbers[-1]:02d}"
-            )
-        else:
-            position_label = f"S{item.season_number:02d}E{item.episode_number:02d}"
 
         message = (
             f'{position_label} is titled "{item.title}", which matches neither TheTVDB\'s '
@@ -1473,6 +1705,28 @@ def _candidates_for_episode_range(
             return None
         per_position_candidates.append(candidates)
     return tuple(per_position_candidates)
+
+
+def _range_entirely_missing(
+    positions: Mapping[tuple[int, int], tuple[TvdbEpisode, ...]],
+    season_number: int,
+    episode_numbers: tuple[int, ...],
+) -> bool:
+    """Return whether every position in a range has no TheTVDB data at all.
+
+    Unlike :func:`_candidates_for_episode_range`'s ``None`` result, this
+    checks the raw, unfiltered position data - so a position with only a
+    non-English-titled candidate (or a partial range, where only some
+    positions have data) does not count as missing here. Used by
+    :func:`audit_episode_ordering` to tell "this position genuinely isn't in
+    the identified TheTVDB series at all" apart from those other two cases,
+    which stay silent instead (see :func:`_candidates_for_episode_range`'s
+    docstring for why guessing on a partial range would be wrong, and
+    :func:`_has_non_english_only_candidates` for the non-English case).
+    """
+    return all(
+        not positions.get((season_number, episode_number)) for episode_number in episode_numbers
+    )
 
 
 def _has_non_english_only_candidates(
@@ -1622,6 +1876,7 @@ __all__ = [
     "audit_library_items",
     "audit_media_item",
     "best_matching_tvdb_series",
+    "identify_tvdb_series_ids",
     "is_untranslated_tvdb_title",
     "mismatched_episode_filename_title",
     "mismatched_movie_filename_title",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -278,7 +279,12 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     TheTVDB position has data but none of it in English (see
     audit.mismatched_tvdb_title's "tvdb_title_not_english" finding) - same
     reasoning as "N/A", just for a narrower cause (untranslated rather than
-    absent).
+    absent). "Aired/DVD Order Mismatch" reads "NF" instead of "Yes"/"No" for
+    an episode whose identified TheTVDB series has no data at all - in
+    either ordering - at that (season, episode) position (see
+    audit.audit_episode_ordering's "episode_not_in_tvdb" finding): distinct
+    from "No" (a real comparison was made and it matched) and "Yes" (a real
+    comparison was made and it didn't).
     """
     checks_by_item = _check_names_by_item(result.findings)
     mismatched_tvdb_series_names = frozenset(
@@ -315,7 +321,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                     series_name=item.series_name,
                     tvdb_series=result.tvdb_available_series,
                 ),
-                _yes_no("aired_dvd_order_mismatch" in check_names),
+                _order_mismatch_yes_no(check_names),
                 _yes_no("missing_episode_number" in check_names),
                 _yes_no("missing_seasons" in check_names),
                 _yes_no("missing_episodes" in check_names),
@@ -342,9 +348,20 @@ def _actionable_findings(findings: tuple) -> tuple:
     translation on file), so it would only clutter the dashboard/check
     pages. It still reaches the CSV/XLSX "NoE" designation, which reads
     straight from AuditServerResult.findings rather than this filtered set.
+
+    "episode_not_in_tvdb" is folded into "aired_dvd_order_mismatch" here -
+    the opposite treatment from "tvdb_title_not_english" above - since a
+    season/episode TheTVDB has no data for at all belongs in the same
+    "verify this content" table as one TheTVDB disagrees with, distinguished
+    only by its own message text once there. Kept as its own check name on
+    the finding itself (and so in AuditServerResult.findings, same as
+    "tvdb_title_not_english") purely so CSV/XLSX output can still tell the
+    two apart via its own "NF" designation.
     """
     return tuple(
-        finding
+        replace(finding, check_name="aired_dvd_order_mismatch")
+        if finding.check_name == "episode_not_in_tvdb"
+        else finding
         for finding in findings
         if finding.check_name not in NON_ACTIONABLE_CHECKS
     )
@@ -493,6 +510,23 @@ def _server_display_name(server_url: str) -> str:
 def _yes_no(value: bool) -> str:
     """Return Yes or No for CSV fields."""
     return "Yes" if value else "No"
+
+
+def _order_mismatch_yes_no(check_names: frozenset[str]) -> str:
+    """Return Yes/No/NF for the "Aired/DVD Order Mismatch" CSV field.
+
+    "NF" when the TheTVDB series identified for this item simply has no
+    data at all - in either ordering - at this item's (season, episode)
+    position (see audit.audit_episode_ordering's "episode_not_in_tvdb"
+    finding, folded into the same HTML "Aired/DVD Order Mismatch" page by
+    _actionable_findings but kept as its own check name on the finding
+    itself for exactly this) - distinct from "No" (a real comparison was
+    made and the title matched) and "Yes" (a real comparison was made and
+    it didn't).
+    """
+    if "episode_not_in_tvdb" in check_names:
+        return "NF"
+    return _yes_no("aired_dvd_order_mismatch" in check_names)
 
 
 def _tvdb_yes_no(

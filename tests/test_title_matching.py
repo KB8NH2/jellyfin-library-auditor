@@ -649,6 +649,29 @@ class MismatchedEpisodeFilenameTitleTests(unittest.TestCase):
 
         self.assertIsNone(audit.mismatched_episode_filename_title(item))
 
+    def test_does_not_flag_paren_number_versus_bare_trailing_roman_numeral(self) -> None:
+        """Regression test: a bare trailing roman numeral with no "Part"
+        prefix (e.g. metadata titling a two-part episode's first half
+        "Those Who Rend Asunder I") must line up with a plain numeric
+        parenthetical disambiguator on the other side (e.g. the filename
+        spelling it "Those Who Rend Asunder (1)") the same way it already
+        lines up with a "Part I"-style suffix - normalized_title() drops the
+        numeric parenthetical as a disambiguator entirely, so the bare roman
+        numeral needs the same "drop it" reading, not just conversion to its
+        arabic equivalent, to still match.
+        """
+        item = _make_item(
+            title="Those Who Rend Asunder I",
+            is_movie=False,
+            is_episode=True,
+            path=Path("Claymore - S01E09 - Those Who Rend Asunder (1).mkv"),
+            series_name="Claymore",
+            season_number=1,
+            episode_number=9,
+        )
+
+        self.assertIsNone(audit.mismatched_episode_filename_title(item))
+
     def test_does_not_flag_trailing_roman_numeral_past_the_old_fixed_range(self) -> None:
         """Regression test: a bare trailing roman numeral must convert for
         any value, not just a small enumerated range - Star Wars: Clone Wars

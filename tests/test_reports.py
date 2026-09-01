@@ -356,6 +356,56 @@ class ReportGenerationTests(unittest.TestCase):
         # Unaffected column - not a "no English title" concern.
         self.assertEqual(rows[0][header.index("Mismatched TheTVDB Series")], "No")
 
+    def test_csv_rows_show_nf_for_aired_dvd_order_mismatch_when_season_not_in_tvdb(self) -> None:
+        """Regression test: a local episode whose identified TheTVDB series
+        has no data at all - in either ordering - at its position (see
+        audit.audit_episode_ordering's "episode_not_in_tvdb" finding) must
+        read "NF" for Aired/DVD Order Mismatch - distinct from "No" (a real
+        comparison was made and the title matched) and "Yes" (a real
+        comparison was made and it didn't).
+        """
+        not_found_episode = _make_item(
+            title="Doctor Who",
+            item_id="episode-not-found",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Doctor Who",
+            season_number=14,
+            episode_number=1,
+            path=Path("TV Shows/Doctor Who/Season 14/Doctor Who S14E01.mkv"),
+        )
+        library_result = LibraryAuditResult(
+            library=_make_library(library_id="tv", name="TV Shows", collection_type="tv"),
+            media_items_processed=1,
+            audited_items=(not_found_episode,),
+            items_with_english_subtitles=0,
+            items_with_local_nfo=0,
+            items_with_local_backdrop=0,
+            findings=(
+                _make_finding(
+                    category=AuditCategory.EPISODE_ORDER,
+                    severity=AuditSeverity.WARNING,
+                    title="Doctor Who",
+                    check_name="episode_not_in_tvdb",
+                    message="Season 14 not found in TheTVDB.",
+                    media_item=not_found_episode,
+                ),
+            ),
+            tvdb_available_series=frozenset({"Doctor Who"}),
+        )
+        result = AuditServerResult(
+            libraries_audited=1,
+            media_items_processed=1,
+            library_results=(library_result,),
+            findings=library_result.findings,
+        )
+
+        rows = report_generator._csv_rows(result)
+
+        header = report_generator.CSV_HEADER
+        self.assertEqual(rows[0][header.index("Aired/DVD Order Mismatch")], "NF")
+
     def test_csv_row_shows_episode_range_for_combined_episode_file(self) -> None:
         """A range value like "5-7" is exactly the shape Excel's automatic
         type detection likes to reinterpret as a date (e.g. "5-6" commonly
@@ -433,6 +483,37 @@ class ReportGenerationTests(unittest.TestCase):
         missing_backdrop already isn't.
         """
         self.assertIn("tvdb_title_not_english", report_generator.NON_ACTIONABLE_CHECKS)
+
+    def test_episode_not_in_tvdb_is_folded_into_aired_dvd_order_mismatch_for_html(self) -> None:
+        """Regression test: unlike "tvdb_title_not_english" above,
+        "episode_not_in_tvdb" belongs in the same "verify this content"
+        table a viewer already has open for aired_dvd_order_mismatch, not
+        hidden or given its own page - it's kept as a distinct check_name on
+        the finding itself only so CSV/XLSX output can still tell it apart
+        (its own "NF" designation, see _order_mismatch_yes_no)."""
+        item = _make_item(
+            title="Doctor Who",
+            library="TV Shows",
+            is_movie=False,
+            is_episode=True,
+            series_name="Doctor Who",
+            season_number=14,
+            episode_number=1,
+        )
+        finding = _make_finding(
+            category=AuditCategory.EPISODE_ORDER,
+            severity=AuditSeverity.WARNING,
+            title="Doctor Who",
+            message="Season 14 not found in TheTVDB.",
+            check_name="episode_not_in_tvdb",
+            media_item=item,
+        )
+
+        actionable = report_generator._actionable_findings((finding,))
+
+        self.assertEqual(len(actionable), 1)
+        self.assertEqual(actionable[0].check_name, "aired_dvd_order_mismatch")
+        self.assertEqual(actionable[0].message, finding.message)
 
     def test_write_html_report_creates_simplified_site_tree(self) -> None:
         movie_item = _make_item(title="Alien", library="Movies")
@@ -849,7 +930,7 @@ class ReportGenerationTests(unittest.TestCase):
             category=AuditCategory.METADATA,
             severity=AuditSeverity.WARNING,
             title="Pilot",
-            message="Missing episodes: 2, 4-5.",
+            message="Missing episodes: 2, 4-5, out of 5 episodes.",
             check_name="missing_episodes",
             media_item=_make_item(
                 title="Pilot",
@@ -860,6 +941,7 @@ class ReportGenerationTests(unittest.TestCase):
                 season_name="Season 1",
                 season_number=1,
                 episode_number=1,
+                path=Path("TV Shows/Breaking Bad/Season 01/Breaking Bad S01E01.mkv"),
             ),
         )
         site_links = report_generator._site_links(
@@ -880,9 +962,12 @@ class ReportGenerationTests(unittest.TestCase):
         )
 
         self.assertIn(">Details</button></th>", html)
-        self.assertIn("Missing episodes: 2, 4-5.", html)
+        self.assertIn("Missing episodes: 2, 4-5, out of 5 episodes.", html)
         self.assertIn(">Season</button></th>", html)
+        self.assertIn(">Base Directory</button></th>", html)
+        self.assertNotIn(">Title</button></th>", html)
         self.assertNotIn(">Episode</button></th>", html)
+        self.assertIn(">Breaking Bad<", html)
         self.assertNotIn('data-sort-value="1">1</td>', html)
 
     def test_check_page_hides_season_and_episode_for_missing_seasons(self) -> None:
@@ -890,7 +975,7 @@ class ReportGenerationTests(unittest.TestCase):
             category=AuditCategory.METADATA,
             severity=AuditSeverity.WARNING,
             title="Pilot",
-            message="Missing seasons: 2.",
+            message="Missing seasons: 2, out of 3 seasons.",
             check_name="missing_seasons",
             media_item=_make_item(
                 title="Pilot",
@@ -901,6 +986,7 @@ class ReportGenerationTests(unittest.TestCase):
                 season_name="Season 1",
                 season_number=1,
                 episode_number=1,
+                path=Path("TV Shows/Breaking Bad/Season 01/Breaking Bad S01E01.mkv"),
             ),
         )
         site_links = report_generator._site_links(
@@ -921,9 +1007,12 @@ class ReportGenerationTests(unittest.TestCase):
         )
 
         self.assertIn(">Details</button></th>", html)
+        self.assertIn(">Base Directory</button></th>", html)
+        self.assertNotIn(">Title</button></th>", html)
         self.assertNotIn(">Season</button></th>", html)
         self.assertNotIn(">Episode</button></th>", html)
-        self.assertIn("Missing seasons: 2.", html)
+        self.assertIn(">Breaking Bad<", html)
+        self.assertIn("Missing seasons: 2, out of 3 seasons.", html)
 
     def test_check_page_shows_suggested_title_column_for_mismatched_filename_title(
         self,

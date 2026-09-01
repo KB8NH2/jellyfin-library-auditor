@@ -95,7 +95,7 @@ class MissingTvSeriesSeasonsTests(unittest.TestCase):
         findings = audit.missing_tv_series_seasons(items)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].message, "Missing seasons: 2.")
+        self.assertEqual(findings[0].message, "Missing seasons: 2, out of 3 seasons.")
 
     def test_no_finding_when_local_seasons_are_the_last_ones_and_no_tvdb_data(self) -> None:
         items = (
@@ -152,7 +152,7 @@ class MissingTvSeriesSeasonsTests(unittest.TestCase):
         findings = audit.missing_tv_series_seasons(items, aired_positions)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].message, "Missing seasons: 3-4.")
+        self.assertEqual(findings[0].message, "Missing seasons: 3-4, out of 4 seasons.")
 
     def test_no_finding_when_local_seasons_match_tvdb_data_exactly(self) -> None:
         items = (
@@ -251,7 +251,7 @@ class MissingTvSeriesSeasonsTests(unittest.TestCase):
         findings = audit.missing_tv_series_seasons(items, aired_positions)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].message, "Missing seasons: 2.")
+        self.assertEqual(findings[0].message, "Missing seasons: 2, out of 2 seasons.")
 
     def test_falls_back_to_internal_gaps_for_a_series_not_on_tvdb(self) -> None:
         items = (
@@ -281,7 +281,7 @@ class MissingTvSeriesSeasonsTests(unittest.TestCase):
         findings = audit.missing_tv_series_seasons(items, aired_positions)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].message, "Missing seasons: 2.")
+        self.assertEqual(findings[0].message, "Missing seasons: 2, out of 3 seasons.")
 
 
 class MissingTvSeasonEpisodesTests(unittest.TestCase):
@@ -308,7 +308,7 @@ class MissingTvSeasonEpisodesTests(unittest.TestCase):
         findings = audit.missing_tv_season_episodes(items)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].message, "Missing episodes: 2.")
+        self.assertEqual(findings[0].message, "Missing episodes: 2, out of 3 episodes.")
 
     def test_no_finding_when_local_episodes_are_the_last_ones_and_no_tvdb_data(self) -> None:
         items = (
@@ -365,7 +365,7 @@ class MissingTvSeasonEpisodesTests(unittest.TestCase):
         findings = audit.missing_tv_season_episodes(items, aired_positions)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].message, "Missing episodes: 3-4.")
+        self.assertEqual(findings[0].message, "Missing episodes: 3-4, out of 4 episodes.")
 
     def test_no_finding_when_local_episodes_match_tvdb_data_exactly(self) -> None:
         items = (
@@ -416,7 +416,7 @@ class MissingTvSeasonEpisodesTests(unittest.TestCase):
         findings = audit.missing_tv_season_episodes(items, aired_positions)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].message, "Missing episodes: 2.")
+        self.assertEqual(findings[0].message, "Missing episodes: 2, out of 3 episodes.")
 
 
 class MismatchedTvdbSeriesTests(unittest.TestCase):
@@ -1228,6 +1228,251 @@ class BestMatchingTvdbSeriesTests(unittest.TestCase):
         best_id = audit.best_matching_tvdb_series(items, "Mismatched Show", candidates)
 
         self.assertEqual(best_id, "perfect-id")
+
+
+class IdentifyTvdbSeriesIdsTests(unittest.TestCase):
+    def _make_series_items(self, count: int, *, series_name: str = "Doctor Who") -> tuple:
+        return tuple(
+            _make_item(
+                f"Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                series_name=series_name,
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(1, count + 1)
+        )
+
+    def test_excludes_an_id_that_explains_no_local_titles(self) -> None:
+        """A cached id left over from an unrelated show's rejected
+        "better match" search shouldn't qualify just because it happens to
+        share a couple of (season, episode) positions with the real series
+        - its episode titles don't match anything locally, so it earns no
+        title-match credit at all and is dropped - see
+        auditor._fetch_tvdb_episode_positions."""
+        items = self._make_series_items(25) + (
+            _make_item(
+                "Doctor Who",
+                is_movie=False,
+                is_episode=True,
+                series_name="Doctor Who",
+                season_number=14,
+                episode_number=1,
+            ),
+            _make_item(
+                "Doctor Who",
+                is_movie=False,
+                is_episode=True,
+                series_name="Doctor Who",
+                season_number=14,
+                episode_number=2,
+            ),
+        )
+        candidates = {
+            "revival-id": {
+                (1, number): _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                for number in range(1, 26)
+            },
+            "classic-id": {
+                (14, 1): _make_tvdb_episode(
+                    season_number=14, episode_number=1, name="The Masque of Mandragora (1)"
+                ),
+                (14, 2): _make_tvdb_episode(
+                    season_number=14, episode_number=2, name="The Masque of Mandragora (2)"
+                ),
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids(items, "Doctor Who", ("revival-id",), candidates)
+
+        self.assertEqual(identified_ids, ("revival-id",))
+
+    def test_picks_the_id_whose_titles_actually_match_over_one_that_merely_overlaps_in_position(
+        self,
+    ) -> None:
+        """Regression test: an unrelated same-named show using a
+        similarly-sized season/episode grid can cover just as much of the
+        real series' local *position* space as the genuinely correct id
+        does, without its *content* having anything to do with it - ordinary
+        small season/episode numbering makes this common, not rare. Position
+        overlap alone can't tell these apart; the wrong candidate's episode
+        titles are what give it away."""
+        items = self._make_series_items(20)
+        candidates = {
+            "wrong-id": {
+                (1, number): _make_tvdb_episode(
+                    season_number=1, episode_number=number, name=f"Unrelated Title {number}"
+                )
+                for number in range(1, 21)
+            },
+            "correct-id": {
+                (1, number): _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                for number in range(1, 21)
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids(items, "Doctor Who", (), candidates)
+
+        self.assertEqual(identified_ids, ("correct-id",))
+
+    def test_returns_both_ids_when_a_newer_era_reuses_the_dominant_eras_numbering(self) -> None:
+        """Regression test: a newer era doesn't have to be numbered in its
+        own disjoint range to be recognized - even when it reuses (season,
+        episode) numbers the dominant era's id also has real data at (e.g. a
+        Disney+-era relaunch locally renumbered back to "Season 1" instead
+        of continuing the original's own numbering), both ids qualify by
+        title and both stay in the merge, so each local episode is checked
+        against its own era's title rather than the dominant era's unrelated
+        one at that position."""
+        items = self._make_series_items(90) + tuple(
+            _make_item(
+                f"New Era Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                series_name="Doctor Who",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(91, 93)
+        )
+        candidates = {
+            "revival-id": {
+                (1, number): _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                for number in range(1, 91)
+            }
+            | {
+                (1, number): _make_tvdb_episode(
+                    season_number=1, episode_number=number, name=f"Unrelated Episode {number}"
+                )
+                for number in range(91, 93)
+            },
+            "new-era-id": {
+                (1, number): _make_tvdb_episode(
+                    season_number=1, episode_number=number, name=f"New Era Episode {number}"
+                )
+                for number in range(91, 93)
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids(
+            items, "Doctor Who", ("revival-id", "new-era-id"), candidates
+        )
+
+        self.assertEqual(set(identified_ids), {"revival-id", "new-era-id"})
+
+    def test_returns_both_ids_of_a_genuine_disjoint_split(self) -> None:
+        """A genuine split-era show has each id explaining only its own
+        disjoint half by title - both qualify, and both stay in the merge."""
+        items = self._make_series_items(8)
+        candidates = {
+            "classic-id": {
+                (1, number): _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                for number in range(1, 5)
+            },
+            "reboot-id": {
+                (1, number): _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                for number in range(5, 9)
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids(items, "Doctor Who", (), candidates)
+
+        self.assertEqual(set(identified_ids), {"classic-id", "reboot-id"})
+
+    def test_a_dvd_order_title_match_is_enough_to_qualify(self) -> None:
+        """A series organized on disk in DVD order won't align with any
+        candidate's aired-order episode list, even the genuinely correct
+        one - so a candidate must also be checked against DVD order before
+        concluding it explains nothing."""
+        items = self._make_series_items(20)
+        aired_candidates = {
+            "only-id": {
+                (99, number): _make_tvdb_episode(season_number=99, episode_number=number, name=f"Aired {number}")
+                for number in range(1, 21)
+            },
+            "decoy-id": {},
+        }
+        dvd_candidates = {
+            "only-id": {
+                (1, number): _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                for number in range(1, 21)
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids(
+            items, "Doctor Who", (), aired_candidates, dvd_candidates
+        )
+
+        self.assertEqual(identified_ids, ("only-id",))
+
+    def test_falls_back_to_position_overlap_and_assigned_tiebreak_with_no_title_evidence(
+        self,
+    ) -> None:
+        """When every local title is a placeholder Jellyfin never enriched
+        with real episode metadata, there's no title evidence to work from
+        at all - this falls back to position overlap, tie-broken toward an
+        id Jellyfin has actually assigned, and returns only that one id
+        rather than merging every position-overlapping candidate (with no
+        title evidence to resolve a collision correctly, silence is safer
+        than a guess)."""
+        items = tuple(
+            _make_item(
+                "Doctor Who",
+                is_movie=False,
+                is_episode=True,
+                series_name="Doctor Who",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(1, 3)
+        )
+        candidates = {
+            "assigned-id": {
+                (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Rose"),
+                (1, 2): _make_tvdb_episode(season_number=1, episode_number=2, name="The End of the World"),
+            },
+            "cached-id": {
+                (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Space Babies"),
+                (1, 2): _make_tvdb_episode(season_number=1, episode_number=2, name="The Devil's Chord"),
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids(
+            items, "Doctor Who", ("assigned-id",), candidates
+        )
+
+        self.assertEqual(identified_ids, ("assigned-id",))
+
+    def test_returns_empty_with_no_candidates(self) -> None:
+        identified_ids = audit.identify_tvdb_series_ids((), "Doctor Who", (), {})
+
+        self.assertEqual(identified_ids, ())
+
+    def test_returns_the_single_candidate_trivially(self) -> None:
+        candidates = {
+            "only-id": {
+                (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Episode 1"),
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids((), "Doctor Who", (), candidates)
+
+        self.assertEqual(identified_ids, ("only-id",))
+
+    def test_returns_every_candidate_when_series_has_no_local_episodes(self) -> None:
+        candidates = {
+            "some-id": {
+                (1, 1): _make_tvdb_episode(season_number=1, episode_number=1, name="Episode 1"),
+            },
+            "other-id": {
+                (2, 1): _make_tvdb_episode(season_number=2, episode_number=1, name="Episode 1"),
+            },
+        }
+
+        identified_ids = audit.identify_tvdb_series_ids((), "Doctor Who", (), candidates)
+
+        self.assertEqual(set(identified_ids), {"some-id", "other-id"})
 
 
 class EpisodeOrderingTests(unittest.TestCase):

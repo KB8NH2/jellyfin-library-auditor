@@ -452,9 +452,9 @@ class LibraryAuditResultTests(unittest.TestCase):
         ]
 
         self.assertEqual(len(missing_seasons), 1)
-        self.assertEqual(missing_seasons[0].message, "Missing seasons: 2.")
+        self.assertEqual(missing_seasons[0].message, "Missing seasons: 2, out of 3 seasons.")
         self.assertEqual(len(missing_episodes), 1)
-        self.assertEqual(missing_episodes[0].message, "Missing episodes: 2.")
+        self.assertEqual(missing_episodes[0].message, "Missing episodes: 2, out of 3 episodes.")
 
     def test_audit_library_result_includes_episode_ordering_findings_when_tvdb_client_given(
         self,
@@ -512,19 +512,17 @@ class LibraryAuditResultTests(unittest.TestCase):
             [("12345", "dvd"), ("12345", "official")],
         )
 
-    def test_audit_library_result_merges_cached_series_id_not_assigned_in_jellyfin(
+    def test_audit_library_result_prefers_a_cached_id_whose_title_actually_matches(
         self,
     ) -> None:
-        """A same-named id only known from the TheTVDB cache still gets merged in.
-
-        Regression test: Jellyfin's Series item was only ever assigned one
-        TheTVDB id, but the episode cache also knows of another id recorded
-        under the same series name (e.g. left behind by an earlier
-        mismatched_tvdb_series suggestion search). That second id's episodes
-        must still be merged into the position map the local title is
-        checked against - otherwise a show TheTVDB split across ids (like a
-        long-running series relaunch) looks like a mismatch even though the
-        cache already has the data to explain it.
+        """A same-named id only known from TheTVDB's episode cache (e.g. left
+        behind by an earlier mismatched_tvdb_series suggestion search, never
+        actually assigned to anything in this library) is preferred over the
+        id Jellyfin itself assigned when the cached one's episode title
+        actually matches the local title and the assigned one's doesn't:
+        title-matching (see identify_tvdb_series_ids) is a strong enough
+        signal on its own to identify the right id even when Jellyfin's own
+        assignment is the wrong one.
         """
         library = _make_library(
             library_id="shows",
@@ -679,7 +677,7 @@ class LibraryAuditResultTests(unittest.TestCase):
         ]
 
         self.assertEqual(len(missing_episodes), 1)
-        self.assertEqual(missing_episodes[0].message, "Missing episodes: 3.")
+        self.assertEqual(missing_episodes[0].message, "Missing episodes: 3, out of 3 episodes.")
 
     def test_audit_library_result_flags_missing_trailing_seasons_using_tvdb_data(
         self,
@@ -729,7 +727,7 @@ class LibraryAuditResultTests(unittest.TestCase):
         ]
 
         self.assertEqual(len(missing_seasons), 1)
-        self.assertEqual(missing_seasons[0].message, "Missing seasons: 2.")
+        self.assertEqual(missing_seasons[0].message, "Missing seasons: 2, out of 2 seasons.")
 
     def test_audit_library_result_skips_series_when_tvdb_lookup_fails(self) -> None:
         library = _make_library(
@@ -785,14 +783,14 @@ class LibraryAuditResultTests(unittest.TestCase):
     def test_audit_library_result_merges_positions_from_multiple_tvdb_ids_sharing_a_name(
         self,
     ) -> None:
-        """Regression test: a Jellyfin library can have two distinct Series
-        items sharing one display name (e.g. TheTVDB splitting a
-        long-running show into a new entry for a later era while an older
-        entry keeps the earlier episodes, both still titled the same in
-        Jellyfin). Collapsing that to a single TheTVDB id previously meant
-        every local episode belonging to whichever id lost the race got
-        flagged as a mismatch, and which id "won" wasn't even stable across
-        runs."""
+        """A Jellyfin library can have two distinct Series items sharing one
+        display name (e.g. TheTVDB splitting a long-running show into a new
+        entry for a later era while an older entry keeps the earlier
+        episodes, both still titled the same in Jellyfin). Both ids' episode
+        titles genuinely match their own share of the local episodes, so
+        both qualify (see audit.identify_tvdb_series_ids) and both get
+        merged in - every local episode is checked against its own era's
+        title rather than only whichever id happened to be looked up."""
         library = _make_library(
             library_id="shows",
             name="TV Shows",
@@ -822,6 +820,9 @@ class LibraryAuditResultTests(unittest.TestCase):
             def get_cached_series_ids_by_name(self, name: str) -> tuple[str, ...]:
                 return ()
 
+            def search_series(self, name: str):
+                return ()
+
             def get_series_episodes(self, series_id: str, season_type: str, *, series_name: str | None = None):
                 del season_type
                 if series_id == "classic-id":
@@ -834,12 +835,265 @@ class LibraryAuditResultTests(unittest.TestCase):
                     for number in range(5, 9)
                 )
 
-        result = auditor._audit_library_result(FakeClient(), library, tvdb_client=FakeTvdbClient())
+        result = auditor._audit_library_result(
+            FakeClient(), library, tvdb_client=FakeTvdbClient(), check_episode_order=True
+        )
 
-        mismatched = [
-            finding for finding in result.findings if finding.check_name == "mismatched_tvdb_series"
+        check_names = {finding.check_name for finding in result.findings}
+        self.assertNotIn("aired_dvd_order_mismatch", check_names)
+        self.assertNotIn("episode_not_in_tvdb", check_names)
+
+    def test_audit_library_result_flags_a_season_missing_from_tvdb_instead_of_guessing(
+        self,
+    ) -> None:
+        """Regression test: TheTVDB's episode cache can hold an id that was
+        only ever a *rejected* search candidate from a past "better match"
+        lookup for some other, unrelated same-named show (e.g. a decades-old
+        show sharing an exact name with the one actually in this library).
+        That id's episodes used to get merged in unconditionally right
+        alongside the correctly-assigned id's, so on the rare (season,
+        episode) position both happen to share, the unrelated id's totally
+        different episode title could make a correctly-matched local episode
+        look like an aired/DVD order mismatch. Since the local season 14
+        episodes here have a placeholder title Jellyfin never enriched with
+        a real one, there's no title evidence connecting them to *either*
+        candidate id, so the unrelated id is excluded from the merge
+        entirely and those two episodes are reported as not found in
+        TheTVDB at all - not silently skipped, and not compared against the
+        unrelated id's totally different episode either."""
+        library = _make_library(
+            library_id="shows",
+            name="TV Shows",
+            collection_type="tvshows",
+        )
+        season_one_items = tuple(
+            _make_item(
+                title=f"Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Doctor Who",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(1, 26)
+        )
+        season_fourteen_items = tuple(
+            _make_item(
+                title="Doctor Who",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Doctor Who",
+                season_number=14,
+                episode_number=number,
+            )
+            for number in range(1, 3)
+        )
+        items = season_one_items + season_fourteen_items
+
+        class FakeClient:
+            def get_library_items(self, library_id: str) -> tuple[MediaItem, ...]:
+                return items
+
+            def get_series_tvdb_ids(self, library_id: str) -> dict[str, tuple[str, ...]]:
+                return {"Doctor Who": ("revival-id",)}
+
+        class FakeTvdbClient:
+            def get_cached_series_ids_by_name(self, name: str) -> tuple[str, ...]:
+                return ("classic-id",)
+
+            def get_series_episodes(self, series_id: str, season_type: str, *, series_name: str | None = None):
+                del season_type
+                if series_id == "revival-id":
+                    return tuple(
+                        _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                        for number in range(1, 26)
+                    )
+                return (
+                    _make_tvdb_episode(
+                        season_number=14, episode_number=1, name="The Masque of Mandragora (1)"
+                    ),
+                    _make_tvdb_episode(
+                        season_number=14, episode_number=2, name="The Masque of Mandragora (2)"
+                    ),
+                )
+
+        result = auditor._audit_library_result(
+            FakeClient(), library, tvdb_client=FakeTvdbClient(), check_episode_order=True
+        )
+
+        not_found = [
+            finding for finding in result.findings if finding.check_name == "episode_not_in_tvdb"
         ]
-        self.assertEqual(mismatched, [])
+        self.assertEqual(len(not_found), 2)
+        self.assertEqual(
+            {finding.media_item.episode_number for finding in not_found}, {1, 2}
+        )
+        for finding in not_found:
+            self.assertIn("was not found in TheTVDB at all", finding.message)
+            self.assertNotIn("Masque of Mandragora", finding.message)
+        self.assertEqual(
+            [finding for finding in result.findings if finding.check_name == "mismatched_tvdb_series"],
+            [],
+        )
+
+    def test_audit_library_result_recognizes_a_much_smaller_second_era(
+        self,
+    ) -> None:
+        """TheTVDB can split a long-running show into more than one series
+        entry by era (e.g. a modern relaunch getting its own entry distinct
+        from the earlier revival), each separately assigned to its own
+        Jellyfin Series item under the same display name. The smaller era's
+        episode titles genuinely match its own local episodes, so it
+        qualifies for the merge (see audit.identify_tvdb_series_ids)
+        regardless of how small its share of the library is next to the
+        dominant era - it isn't dropped, and isn't compared against the
+        dominant era's unrelated episodes either."""
+        library = _make_library(
+            library_id="shows",
+            name="TV Shows",
+            collection_type="tvshows",
+        )
+        revival_era_items = tuple(
+            _make_item(
+                title=f"Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Doctor Who",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(1, 91)
+        )
+        new_era_items = tuple(
+            _make_item(
+                title=f"New Era Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Doctor Who",
+                season_number=14,
+                episode_number=number,
+            )
+            for number in range(1, 3)
+        )
+        items = revival_era_items + new_era_items
+
+        class FakeClient:
+            def get_library_items(self, library_id: str) -> tuple[MediaItem, ...]:
+                return items
+
+            def get_series_tvdb_ids(self, library_id: str) -> dict[str, tuple[str, ...]]:
+                return {"Doctor Who": ("revival-id", "new-era-id")}
+
+        class FakeTvdbClient:
+            def get_cached_series_ids_by_name(self, name: str) -> tuple[str, ...]:
+                return ()
+
+            def get_series_episodes(self, series_id: str, season_type: str, *, series_name: str | None = None):
+                del season_type
+                if series_id == "revival-id":
+                    return tuple(
+                        _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                        for number in range(1, 91)
+                    )
+                return tuple(
+                    _make_tvdb_episode(
+                        season_number=14, episode_number=number, name=f"New Era Episode {number}"
+                    )
+                    for number in range(1, 3)
+                )
+
+        result = auditor._audit_library_result(
+            FakeClient(), library, tvdb_client=FakeTvdbClient(), check_episode_order=True
+        )
+
+        check_names = {finding.check_name for finding in result.findings}
+        self.assertNotIn("aired_dvd_order_mismatch", check_names)
+        self.assertNotIn("episode_not_in_tvdb", check_names)
+
+    def test_audit_library_result_matches_a_second_era_that_reuses_the_dominant_eras_numbering(
+        self,
+    ) -> None:
+        """Regression test: a newer era locally renumbered back to
+        "Season 1" (e.g. a Disney+-era relaunch) instead of continuing the
+        original series' own numbering shares (season, episode) positions
+        with the dominant era's real episodes, not just an unused gap. Both
+        ids still qualify by title (see audit.identify_tvdb_series_ids) and
+        get merged in, so each local episode is checked against its own
+        era's title at that position rather than only the dominant era's
+        unrelated one - previously this produced a false
+        aired_dvd_order_mismatch against the dominant era's episode."""
+        library = _make_library(
+            library_id="shows",
+            name="TV Shows",
+            collection_type="tvshows",
+        )
+        revival_era_items = tuple(
+            _make_item(
+                title=f"Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Doctor Who",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(1, 91)
+        )
+        new_era_items = tuple(
+            _make_item(
+                title=f"New Era Episode {number}",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Doctor Who",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(91, 93)
+        )
+        items = revival_era_items + new_era_items
+
+        class FakeClient:
+            def get_library_items(self, library_id: str) -> tuple[MediaItem, ...]:
+                return items
+
+            def get_series_tvdb_ids(self, library_id: str) -> dict[str, tuple[str, ...]]:
+                return {"Doctor Who": ("revival-id", "new-era-id")}
+
+        class FakeTvdbClient:
+            def get_cached_series_ids_by_name(self, name: str) -> tuple[str, ...]:
+                return ()
+
+            def get_series_episodes(self, series_id: str, season_type: str, *, series_name: str | None = None):
+                del season_type
+                if series_id == "revival-id":
+                    return tuple(
+                        _make_tvdb_episode(season_number=1, episode_number=number, name=f"Episode {number}")
+                        for number in range(1, 91)
+                    ) + tuple(
+                        _make_tvdb_episode(
+                            season_number=1, episode_number=number, name=f"Unrelated Episode {number}"
+                        )
+                        for number in range(91, 93)
+                    )
+                return tuple(
+                    _make_tvdb_episode(
+                        season_number=1, episode_number=number, name=f"New Era Episode {number}"
+                    )
+                    for number in range(91, 93)
+                )
+
+        result = auditor._audit_library_result(
+            FakeClient(), library, tvdb_client=FakeTvdbClient(), check_episode_order=True
+        )
+
+        check_names = {finding.check_name for finding in result.findings}
+        self.assertNotIn("aired_dvd_order_mismatch", check_names)
+        self.assertNotIn("episode_not_in_tvdb", check_names)
 
     def test_audit_library_result_enriches_mismatched_series_finding_with_a_better_match(
         self,
