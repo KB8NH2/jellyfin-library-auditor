@@ -1,23 +1,50 @@
 #!/usr/bin/python3
-"""CLI to switch one series' episode metadata between TheTVDB's aired and DVD order.
+"""CLI to apply TheTVDB metadata to one series' episodes: aired order, DVD order, or restore.
+
+Exactly one of --aired, --dvd, or --restore selects the mode:
+
+--aired and --dvd each overwrite Name and Overview with TheTVDB's aired-order
+or DVD-order values (respectively) at each episode's existing (season,
+episode) position, via a fresh TheTVDB lookup - useful for a series stored on
+disk in one ordering but currently labeled with the other's titles.
+
+--restore undoes a previous --dvd (or --aired) apply: it prefers each
+episode's own OriginalTitle backup for Name - the title this tool backed up
+there the last time it changed Name - over a fresh TheTVDB lookup, since the
+backup reflects exactly what the episode had before being changed. When
+there's no backup at all, it falls back to a fresh TheTVDB aired-order
+lookup, the same as --aired would use. Overview has no local backup, so it
+always comes from TheTVDB's aired-order data when available, regardless of
+where Name came from. Because of this, --restore also needs a TheTVDB
+api_key and does contact TheTVDB, whenever there's actually something to
+restore or sync.
 
 Defaults to every season the series has; pass --season-number to scope it
 to just one.
 
-Some series are organized on disk in TheTVDB's DVD order while Jellyfin's
-episode metadata reflects TheTVDB's aired order (or vice versa), which
---check-episode-order can detect but not fix. This module looks up TheTVDB's
-DVD-order episode at each of a season's existing (season, episode) positions
-and overwrites that episode's Name/Overview with the DVD-order values,
-leaving the episode's own season/episode numbers untouched. Before changing
-Name, it backs up the episode's current Name into OriginalTitle; --aired
-reverses the process, preferring that backup over a fresh TheTVDB aired-order
-lookup so an inadvertent reordering can be undone with the exact title the
-episode had before. --images additionally replaces each episode's Primary
-image with TheTVDB's image for the target-order episode, when TheTVDB has
-one - unlike Name, there is no local backup for the pre-change image, so
---aired --images can only restore it when TheTVDB still reports an
-aired-order image at that position.
+Episode/season numbers are never touched, so this only corrects what an
+episode is called and described as, not where it lives. --images
+additionally replaces each episode's Primary image with TheTVDB's image for
+the target-order episode, when TheTVDB has one, independently of whether
+Name/Overview change this run - unlike Name, there is no local backup for
+the pre-change image, so --restore --images can only restore it when
+TheTVDB still reports an aired-order image at that position.
+
+Whether Name is even worth rewriting is decided with audit.titles_match(),
+the same lenient comparison audit.py's aired_dvd_order_mismatch check uses
+(punctuation, articles, accents, US/UK spelling, and more are all treated as
+equivalent) - an episode already reading the same as the target title under
+those rules is left alone rather than being rewritten to TheTVDB's exact
+spelling for no practical benefit. Overview has no such lenient comparison -
+it's prose, not a short label, so it's compared for exact equality.
+
+A candidate title still in its original, untranslated language (see
+audit.is_untranslated_tvdb_title) is never written to Name, even though
+TheTVDB reports a name there - there's no separate flag in TheTVDB's
+response saying a title fell back to the original language, and writing
+foreign-script text into an otherwise-English library's metadata would be a
+worse outcome than leaving Name alone. This never blocks Overview/image,
+which are independent of Name's source in every mode.
 
 Jellyfin's own assigned TheTVDB id for the series isn't trusted blindly:
 when TheTVDB has more than one series entry sharing the exact same name
@@ -43,8 +70,10 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 from audit import is_untranslated_tvdb_title
+from audit import titles_match
 from config import ConfigError
 from config import get_config
 from jellyfin import EpisodeSummary
@@ -61,15 +90,17 @@ from tvdb import TvdbError
 from tvdb_series_resolution import resolve_series_tvdb_id
 
 
-LOGGER = logging.getLogger("apply_dvd_metadata")
+LOGGER = logging.getLogger("apply_tvdb_metadata")
+
+Mode = Literal["aired", "dvd", "restore"]
 
 # Append-only record of every apply attempt, mirroring
 # transfer_metadata.py's METADATA_TRANSFER_LOG_FILE convention.
-DVD_METADATA_LOG_FILE = Path("dvd_metadata_apply.log")
+METADATA_LOG_FILE = Path("tvdb_metadata_apply.log")
 
 # Fields this tool ever writes, and therefore diffs/locks. OriginalTitle only
-# ever changes as a side effect of a DVD-order Name change (see
-# build_dvd_merged_item_dto), never on its own.
+# ever changes as a side effect of a Name change (see build_merged_item_dto),
+# never on its own.
 METADATA_FIELDS = ("Name", "Overview", "OriginalTitle")
 
 
@@ -90,8 +121,8 @@ def _log_line(message: str, *, error: bool = False) -> None:
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     level = "ERROR" if error else "INFO"
-    with DVD_METADATA_LOG_FILE.open("a", encoding="utf-8") as log_file:
-        log_file.write(f"{timestamp} {level} apply_dvd_metadata: {message}\n")
+    with METADATA_LOG_FILE.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"{timestamp} {level} apply_tvdb_metadata: {message}\n")
 
 
 # Jellyfin deserializes LockedFields into its own MetadataField enum
@@ -126,41 +157,42 @@ def _lock_changed_fields(
     )
 
 
-def build_dvd_merged_item_dto(
+def build_merged_item_dto(
     destination_dto: Mapping[str, Any],
-    dvd_episodes: tuple[TvdbEpisode, ...],
+    *,
+    target_name: str | None,
+    target_overview: str | None,
 ) -> dict[str, Any]:
-    """Return the destination episode document set to its DVD-order values.
+    """Return the destination episode document set to its target Name/Overview.
 
     Mirrors transfer_metadata.build_merged_item_dto: starts from a full copy
     of the destination document minus NON_EDITABLE_ITEM_FIELDS, and only
-    overwrites a field when TheTVDB actually has a value for it, so a field
-    TheTVDB doesn't report doesn't clobber a real value already on the
+    overwrites a field when a target value was actually resolved for it, so
+    a field with no target value doesn't clobber a real value already on the
     destination.
 
-    Before overwriting Name, the episode's current Name is copied into
-    OriginalTitle, so --aired can restore the exact pre-edit title later
+    Name is only rewritten when it doesn't already read the same as
+    ``target_name`` under audit.titles_match()'s lenient rules - an episode
+    already equivalent to the target title is left alone rather than
+    rewritten to TheTVDB's exact spelling for no practical benefit. Before
+    overwriting Name, the episode's current Name is copied into
+    OriginalTitle, so a later --restore can recover the exact pre-edit title
     instead of relying on a fresh (and possibly since-changed) TheTVDB
-    aired-order lookup. This does mean a genuine original-language title
-    already stored in OriginalTitle is overwritten - this tool repurposes
-    that field specifically as its own undo backup.
+    lookup. This does mean a genuine original-language title already stored
+    in OriginalTitle is overwritten - this tool repurposes that field
+    specifically as its own undo backup.
 
-    A multi-episode item (see plan_episode_update) is passed every position
-    it covers' TvdbEpisode, in order - Name is joined from every position's
-    title with " / " and Overview from every position's synopsis with a
-    blank line, matching the combined style Jellyfin itself already uses for
-    a multi-episode item's own metadata. Each field is only touched when
-    TheTVDB actually has it at *every* position in the range - joining from
-    only some of them would silently drop the missing position's part of
-    the combined value instead of just leaving the field alone. An ordinary
-    single-episode item is just the one-element case of the same logic.
+    Overview has no lenient comparison - it's prose, not a short label - so
+    it's only rewritten when it's genuinely different by exact comparison.
 
     Args:
         destination_dto: Full episode item document read from Jellyfin.
-        dvd_episodes: TheTVDB DVD-order episode(s) at this item's
-            position(s), one per episode number a multi-episode filename
-            marker implies (or just one, for an ordinary single-episode
-            item).
+        target_name: The title to rename toward, or ``None`` when nothing
+            usable was resolved for this position (already excludes a
+            blank/untranslated title or an incomplete multi-episode range -
+            see plan_episode_update).
+        target_overview: The overview to sync toward, or ``None`` when
+            nothing usable was resolved for this position.
 
     Returns:
         A new item document ready to send back to the server.
@@ -173,15 +205,13 @@ def build_dvd_merged_item_dto(
 
     changed_fields: list[str] = []
     current_name = destination_dto.get("Name")
-    combined_name = _combined_name(dvd_episodes)
-    if combined_name and combined_name != current_name:
+    if target_name and not titles_match(target_name, str(current_name or "")):
         merged_dto["OriginalTitle"] = current_name
-        merged_dto["Name"] = combined_name
+        merged_dto["Name"] = target_name
         changed_fields.extend(("OriginalTitle", "Name"))
 
-    combined_overview = _combined_overview(dvd_episodes)
-    if combined_overview is not None and combined_overview != destination_dto.get("Overview"):
-        merged_dto["Overview"] = combined_overview
+    if target_overview is not None and target_overview != destination_dto.get("Overview"):
+        merged_dto["Overview"] = target_overview
         changed_fields.append("Overview")
 
     _lock_changed_fields(destination_dto, merged_dto, changed_fields)
@@ -192,8 +222,7 @@ def _combined_name(episodes: tuple[TvdbEpisode, ...]) -> str | None:
     """Return every episode's title joined with " / ", or ``None`` if any is blank or untranslated.
 
     A blank (or missing) title at any position means there's nothing usable
-    to join there - mirrors the single-episode ``if dvd_episode.name`` check
-    this generalizes. A title still in its original, untranslated language
+    to join there. A title still in its original, untranslated language
     (see audit.is_untranslated_tvdb_title) is treated the same way - TheTVDB
     silently falls back to a series' original-language name when there's no
     English translation on file, and writing foreign-script text into an
@@ -226,64 +255,13 @@ def _has_untranslated_name(episodes: tuple[TvdbEpisode, ...] | None) -> bool:
 def _combined_overview(episodes: tuple[TvdbEpisode, ...]) -> str | None:
     """Return every episode's overview joined with a blank line, or ``None``.
 
-    ``None`` only when any position's overview is genuinely absent (unlike
-    _combined_name, an empty-string overview is a real value to write, not
-    a missing one - mirrors the single-episode ``if dvd_episode.overview is
-    not None`` check this generalizes).
+    ``None`` only when any position's overview is genuinely absent (an
+    empty-string overview is a real value to write, not a missing one).
     """
     overviews = [episode.overview for episode in episodes]
     if any(overview is None for overview in overviews):
         return None
     return "\n\n".join(overviews)
-
-
-def build_aired_restore_merged_item_dto(
-    destination_dto: Mapping[str, Any],
-    original_title: str | None,
-    aired_episodes: tuple[TvdbEpisode, ...] | None,
-) -> dict[str, Any]:
-    """Return the destination episode document restored toward aired order.
-
-    Prefers the episode's own OriginalTitle - the Name this tool backed up
-    there during a previous DVD-order apply - over TheTVDB's aired-order
-    title, since it reflects exactly what this item had before being
-    changed rather than a fresh (and possibly slightly different) TheTVDB
-    lookup. That backup is already the item's own combined title for a
-    multi-episode item (see build_dvd_merged_item_dto), so it needs no
-    recombining here - only the TheTVDB fallback (used when there's no
-    backup at all) does. Overview has no such backup, so it always comes
-    from TheTVDB's aired-order data when available, combined the same way
-    build_dvd_merged_item_dto combines it.
-
-    Args:
-        destination_dto: Full episode item document read from Jellyfin.
-        original_title: The episode's current OriginalTitle, or ``None``.
-        aired_episodes: TheTVDB aired-order episode(s) at this item's
-            position(s), or ``None`` when TheTVDB has nothing there (or, for
-            a multi-episode item, not at every position it covers).
-
-    Returns:
-        A new item document ready to send back to the server.
-    """
-    merged_dto = {
-        field: value
-        for field, value in destination_dto.items()
-        if field not in NON_EDITABLE_ITEM_FIELDS
-    }
-
-    changed_fields: list[str] = []
-    target_name = original_title or (_combined_name(aired_episodes) if aired_episodes else None)
-    if target_name and target_name != destination_dto.get("Name"):
-        merged_dto["Name"] = target_name
-        changed_fields.append("Name")
-
-    combined_overview = _combined_overview(aired_episodes) if aired_episodes else None
-    if combined_overview is not None and combined_overview != destination_dto.get("Overview"):
-        merged_dto["Overview"] = combined_overview
-        changed_fields.append("Overview")
-
-    _lock_changed_fields(destination_dto, merged_dto, changed_fields)
-    return merged_dto
 
 
 def _changed_fields(
@@ -298,18 +276,20 @@ def _changed_fields(
 class EpisodePlan:
     """A computed, not-yet-applied metadata update for one episode.
 
-    Separating planning from applying lets the whole season's changes be
-    previewed and confirmed in one batch before anything is written.
+    Separating planning from applying lets the whole batch's changes be
+    previewed and confirmed before anything is written.
     """
 
     episode_id: str
     position: tuple[int, int]
     current_name: str
+    target_name: str | None
     merged_dto: dict[str, Any] | None
     changes: tuple[tuple[str, Any, Any], ...]
     rejected_reason: str | None
     no_target_match: bool
     no_english_title: bool = False
+    already_matches: bool = False
     image_bytes: bytes | None = None
     image_content_type: str | None = None
     previous_primary_image_tag: str | None = None
@@ -331,14 +311,20 @@ class EpisodePlan:
 
     @property
     def is_actionable(self) -> bool:
-        """Return whether this plan should actually be applied."""
+        """Return whether this plan should actually be applied.
+
+        ``no_english_title`` never blocks this on its own - it only means
+        Name was left out of ``merged_dto``, but Overview/image are
+        independent of Name's source in every mode, so a real Overview or
+        image change can still be worth applying even when Name is blocked
+        this way.
+        """
         return (
             not self.no_target_match
+            and not self.already_matches
             and not self.is_rejected
             and (self.has_changes or self.has_image_change)
         )
-
-
 
 
 def plan_episode_update(
@@ -347,22 +333,36 @@ def plan_episode_update(
     season_number: int,
     target_positions: Mapping[tuple[int, int], TvdbEpisode],
     *,
-    restore_aired: bool,
+    mode: Mode,
     images: bool = False,
     tvdb_client: TvdbClient | None = None,
 ) -> EpisodePlan:
     """Compute one episode's metadata update, without writing anything.
+
+    A single video file can span more than one episode, e.g.
+    ``Show S01E17-E18 Title.mkv`` - Jellyfin's own episode_number for such an
+    item is just the range's first episode (17 here), so acting toward only
+    that one position's TheTVDB data would silently drop the second
+    episode's title/overview instead of producing the combined values a
+    multi-episode item's metadata is supposed to read (see
+    media.expected_episode_numbers_from_text). Every position the filename
+    implies is required to have TheTVDB data before an update is planned at
+    all - a partial combination built from only some of the range would be
+    guessing.
 
     Args:
         client: Client for the server the episode lives on.
         episode: The Jellyfin episode to plan an update for.
         season_number: The season this episode belongs to.
         target_positions: TheTVDB episodes for this series in the target
-            ordering ("dvd" when applying, "official" when restoring with
-            --aired), keyed by (season_number, episode_number) as TheTVDB
-            reports them for that ordering.
-        restore_aired: Restore toward aired order (preferring the episode's
-            own OriginalTitle backup) instead of applying DVD order.
+            ordering ("dvd" for --dvd, "official" for --aired/--restore),
+            keyed by (season_number, episode_number) as TheTVDB reports them
+            for that ordering.
+        mode: "aired"/"dvd" always use a fresh TheTVDB lookup for Name.
+            "restore" prefers each episode's own OriginalTitle backup for
+            Name, falling back to a fresh TheTVDB aired-order lookup when
+            there's no backup. Overview/image always come from TheTVDB in
+            every mode, independent of where Name came from.
         images: Also plan replacing the episode's Primary image with
             TheTVDB's image for the target-order episode at this position,
             when TheTVDB has one. Runs independently of whether Name/Overview
@@ -375,14 +375,9 @@ def plan_episode_update(
         A plan describing what would change and whether it's safe to apply.
         ``no_english_title`` is set when TheTVDB's Name at this position
         (any position, for a multi-episode item) is present but still in
-        its original, untranslated language (see
-        audit.is_untranslated_tvdb_title) - Name is left unchanged in that
-        case, same protection :func:`apply_episode_titles.plan_episode_title_update`
-        gives its own renames. Unlike that sibling tool, this one still
-        updates Overview/image independently even when Name is blocked this
-        way - ``no_english_title`` doesn't affect ``is_actionable`` here,
-        since a real Overview or image change can still be worth applying
-        on its own.
+        its original, untranslated language - Name is left unchanged in
+        that case, but Overview/image can still apply independently, so
+        ``no_english_title`` never affects ``is_actionable`` on its own.
     """
     position = (season_number, episode.episode_number)
     episode_numbers = (
@@ -408,16 +403,17 @@ def plan_episode_update(
     # first position, the same one Jellyfin's own episode_number reflects.
     target_episode = target_episodes[0] if target_episodes else None
 
-    if not restore_aired and target_episodes is None:
-        # DVD mode has no fallback data source - OriginalTitle only ever
-        # holds a backup made during a *previous* DVD apply - so missing
-        # TheTVDB DVD-order data at this position (or, for a multi-episode
-        # item, any position it covers) is always a hard skip, without
-        # needing to fetch the item at all.
+    if mode != "restore" and target_episodes is None:
+        # --aired/--dvd have no fallback data source - OriginalTitle only
+        # ever holds a backup made during a *previous* apply - so missing
+        # TheTVDB data at this position (or, for a multi-episode item, any
+        # position it covers) is always a hard skip, without needing to
+        # fetch the item at all.
         return EpisodePlan(
             episode_id=episode.id,
             position=position,
             current_name=episode.name,
+            target_name=None,
             merged_dto=None,
             changes=(),
             rejected_reason=None,
@@ -426,13 +422,14 @@ def plan_episode_update(
 
     destination_dto = client.get_item(episode.id)
 
-    if restore_aired:
+    if mode == "restore":
         original_title = destination_dto.get("OriginalTitle") or None
         if target_episodes is None and original_title is None:
             return EpisodePlan(
                 episode_id=episode.id,
                 position=position,
                 current_name=str(destination_dto.get("Name", episode.name)),
+                target_name=None,
                 merged_dto=None,
                 changes=(),
                 rejected_reason=None,
@@ -442,12 +439,15 @@ def plan_episode_update(
         # backup to prefer instead - a backup already restores Name without
         # ever consulting TheTVDB, so its language is never in question.
         no_english_title = original_title is None and _has_untranslated_name(target_episodes)
-        merged_dto = build_aired_restore_merged_item_dto(
-            destination_dto, original_title, target_episodes
-        )
+        target_name = original_title or (_combined_name(target_episodes) if target_episodes else None)
     else:
         no_english_title = _has_untranslated_name(target_episodes)
-        merged_dto = build_dvd_merged_item_dto(destination_dto, target_episodes)
+        target_name = _combined_name(target_episodes)
+
+    target_overview = _combined_overview(target_episodes) if target_episodes else None
+    merged_dto = build_merged_item_dto(
+        destination_dto, target_name=target_name, target_overview=target_overview
+    )
 
     image_bytes: bytes | None = None
     image_content_type: str | None = None
@@ -465,15 +465,18 @@ def plan_episode_update(
                 error=True,
             )
 
+    changes = _changed_fields(destination_dto, merged_dto)
     return EpisodePlan(
         episode_id=episode.id,
         position=position,
         current_name=str(destination_dto.get("Name", episode.name)),
+        target_name=target_name,
         merged_dto=merged_dto,
-        changes=_changed_fields(destination_dto, merged_dto),
+        changes=changes,
         rejected_reason=_rejected_reason(merged_dto),
         no_target_match=False,
         no_english_title=no_english_title,
+        already_matches=not changes and image_bytes is None,
         image_bytes=image_bytes,
         image_content_type=image_content_type,
         previous_primary_image_tag=previous_primary_image_tag,
@@ -535,18 +538,18 @@ def _format_position(position: tuple[int, int]) -> str:
     return f"S{season_number:02d}E{episode_number:02d}"
 
 
-def _describe_plan(plan: EpisodePlan, *, restore_aired: bool) -> None:
+def _describe_plan(plan: EpisodePlan, *, mode: Mode) -> None:
     """Log one episode's planned outcome."""
     label = _format_position(plan.position)
-    order_label = "aired order" if restore_aired else "DVD order"
+    order_label = "aired order" if mode in ("aired", "restore") else "DVD order"
     if plan.no_target_match:
-        if restore_aired:
+        if mode == "restore":
             _log_line(
                 f"  {label}: no backup title and no TheTVDB aired-order match "
                 "at this position - skipped."
             )
         else:
-            _log_line(f"  {label}: no DVD-order match at this position - skipped.")
+            _log_line(f"  {label}: no TheTVDB {order_label} match at this position - skipped.")
         return
     if plan.is_rejected:
         _log_line(f"  {label}: rejected: {plan.rejected_reason}", error=True)
@@ -555,9 +558,8 @@ def _describe_plan(plan: EpisodePlan, *, restore_aired: bool) -> None:
         _log_line(
             f"  {label}: TheTVDB has no English title at this position - Name left unchanged."
         )
-    if not plan.has_changes and not plan.has_image_change:
-        if not plan.no_english_title:
-            _log_line(f"  {label}: already matches {order_label}.")
+    if plan.already_matches:
+        _log_line(f"  {label}: already matches {order_label} title {plan.target_name!r}.")
         return
     for field, old_value, new_value in plan.changes:
         _log_line(f"  {label} {field}: {old_value!r} -> {new_value!r}")
@@ -568,7 +570,7 @@ def _describe_plan(plan: EpisodePlan, *, restore_aired: bool) -> None:
         )
 
 
-def run_apply_dvd_metadata(
+def run_apply_tvdb_metadata(
     *,
     series_name: str,
     season_number: int | None,
@@ -576,10 +578,10 @@ def run_apply_dvd_metadata(
     library_name: str | None,
     path_filter: str | None = None,
     assume_yes: bool,
-    restore_aired: bool = False,
+    mode: Mode,
     images: bool = False,
 ) -> int:
-    """Switch TheTVDB's aired/DVD-order Name/Overview for one series.
+    """Apply TheTVDB's aired/DVD-order (or a restore of) Name/Overview for one series.
 
     Args:
         series_name: Series display name to match in Jellyfin.
@@ -593,8 +595,9 @@ def run_apply_dvd_metadata(
             (case-insensitively) is considered - disambiguates a series name
             that matches more than one show.
         assume_yes: Skip the interactive confirmation prompt when ``True``.
-        restore_aired: Restore toward aired order (preferring each episode's
-            own OriginalTitle backup) instead of applying DVD order.
+        mode: "aired" or "dvd" apply that ordering's TheTVDB values via a
+            fresh lookup; "restore" prefers each episode's own OriginalTitle
+            backup for Name, falling back to a fresh aired-order lookup.
         images: Also replace each episode's Primary image with TheTVDB's
             image for the target-order episode, when TheTVDB has one.
 
@@ -617,16 +620,16 @@ def run_apply_dvd_metadata(
 
     if not app_config.tvdb.api_key:
         _log_line(
-            "apply_dvd_metadata requires api_key to be set in the [tvdb] "
+            "apply_tvdb_metadata requires api_key to be set in the [tvdb] "
             "table of servers.toml.",
             error=True,
         )
         return 2
 
-    order_label = "aired-order" if restore_aired else "DVD-order"
-    order_label_title = "Aired-order" if restore_aired else "DVD-order"
-    verb = "restore" if restore_aired else "update"
-    past_participle = "restored" if restore_aired else "updated"
+    order_label = "aired-order" if mode in ("aired", "restore") else "DVD-order"
+    order_label_title = "Aired-order" if mode in ("aired", "restore") else "DVD-order"
+    verb = "restore" if mode == "restore" else "update"
+    past_participle = "restored" if mode == "restore" else "updated"
 
     try:
         with JellyfinClient(server) as client:
@@ -680,7 +683,7 @@ def run_apply_dvd_metadata(
                 )
                 return 0
 
-            season_type = "official" if restore_aired else "dvd"
+            season_type = "dvd" if mode == "dvd" else "official"
             with TvdbClient(
                 app_config.tvdb.api_key,
                 cache=TvdbEpisodeCache(ttl=timedelta(days=app_config.tvdb.cache_ttl_days)),
@@ -739,7 +742,7 @@ def run_apply_dvd_metadata(
                                 episode,
                                 season,
                                 target_positions,
-                                restore_aired=restore_aired,
+                                mode=mode,
                                 images=images,
                                 tvdb_client=tvdb_client if images else None,
                             )
@@ -752,7 +755,7 @@ def run_apply_dvd_metadata(
                 f"{season_label} on {server.name}"
             )
             for plan in plans:
-                _describe_plan(plan, restore_aired=restore_aired)
+                _describe_plan(plan, mode=mode)
 
             actionable_plans = tuple(plan for plan in plans if plan.is_actionable)
             rejected_plans = tuple(plan for plan in plans if plan.is_rejected)
@@ -799,12 +802,14 @@ def run_apply_dvd_metadata(
                 else:
                     _log_line(f"  {_format_position(plan.position)}: {past_participle}.")
 
+            already_matching_count = sum(1 for plan in plans if plan.already_matches)
             no_match_count = sum(1 for plan in plans if plan.no_target_match)
             no_english_title_count = sum(1 for plan in plans if plan.no_english_title)
             _log_line(
                 f"{order_label_title} metadata {verb} complete: "
                 f"{len(actionable_plans) - failed} {past_participle}, {failed} failed, "
-                f"{len(rejected_plans)} rejected, {no_match_count} with no {order_label} match, "
+                f"{len(rejected_plans)} rejected, {already_matching_count} already matching, "
+                f"{no_match_count} with no {order_label} match, "
                 f"{no_english_title_count} with no English title available (Name left unchanged)."
             )
 
@@ -815,18 +820,24 @@ def run_apply_dvd_metadata(
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
-    """Return the command-line parser for the apply_dvd_metadata entrypoint."""
+    """Return the command-line parser for the apply_tvdb_metadata entrypoint."""
     parser = argparse.ArgumentParser(
-        prog="apply_dvd_metadata",
+        prog="apply_tvdb_metadata",
         description=(
-            "Overwrite one series/season's episode Name and Overview with "
-            "TheTVDB's DVD-order values at each existing season/episode "
-            "position - for a season stored on disk in DVD order but "
-            "currently labeled with aired-order titles. Episode/season "
-            "numbers are never changed. Before changing Name, the episode's "
-            "current Name is backed up into OriginalTitle; --aired reverses "
-            "the process, preferring that backup over a fresh TheTVDB "
-            "aired-order lookup so an inadvertent reordering can be undone."
+            "Apply TheTVDB metadata to one series' episodes: --aired or --dvd "
+            "overwrite Name and Overview with TheTVDB's aired-order or "
+            "DVD-order values (a fresh lookup each time); --restore prefers "
+            "each episode's own OriginalTitle backup for Name, falling back "
+            "to a fresh TheTVDB aired-order lookup when there's no backup, "
+            "and always syncs Overview from TheTVDB's aired-order data too. "
+            "Exactly one of --aired/--dvd/--restore is required. Episode/season "
+            "numbers are never changed. An episode already reading the same "
+            "as the target title is left alone - matching is the same "
+            "lenient comparison audit.py's aired_dvd_order_mismatch check "
+            "uses (punctuation, articles, accents, US/UK spelling, and more "
+            "are all treated as equivalent), not an exact string match. "
+            "Before an actual Name change, the episode's current Name is "
+            "backed up into OriginalTitle."
         ),
         exit_on_error=False,
     )
@@ -867,11 +878,22 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--aired",
         action="store_true",
+        help="Apply TheTVDB's aired-order Name/Overview via a fresh lookup.",
+    )
+    parser.add_argument(
+        "--dvd",
+        action="store_true",
+        help="Apply TheTVDB's DVD-order Name/Overview via a fresh lookup.",
+    )
+    parser.add_argument(
+        "--restore",
+        action="store_true",
         help=(
-            "Restore toward TheTVDB's aired order instead of applying DVD "
-            "order, undoing a previous apply. Prefers each episode's own "
-            "OriginalTitle backup over a fresh TheTVDB aired-order lookup "
-            "when one is present."
+            "Restore toward aired order, preferring each episode's own "
+            "OriginalTitle backup for Name over a fresh TheTVDB aired-order "
+            "lookup when one is present. Overview always comes from "
+            "TheTVDB's aired-order data. Requires a TheTVDB api_key, same "
+            "as --aired/--dvd."
         ),
     )
     parser.add_argument(
@@ -883,8 +905,9 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "independently of whether Name/Overview change this run, so it "
             "also fixes an episode's image after a previous apply already "
             "corrected its title. There is no local backup for the "
-            "pre-change image, so --aired --images can only restore it when "
-            "TheTVDB still reports an aired-order image at that position."
+            "pre-change image, so --restore --images can only restore it "
+            "when TheTVDB still reports an aired-order image at that "
+            "position."
         ),
     )
     parser.add_argument(
@@ -898,14 +921,14 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         help=(
             "Print verbose progress to the console (which item is being "
             "checked, calls to Jellyfin and TheTVDB) - console only, never "
-            "written to dvd_metadata_apply.log."
+            "written to tvdb_metadata_apply.log."
         ),
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the DVD-order metadata apply workflow and return an exit code."""
+    """Run the TheTVDB metadata apply workflow and return an exit code."""
     configure_logging()
     parser = _build_argument_parser()
     _log_line(f"Command: {parser.prog} {shlex.join(argv if argv is not None else sys.argv[1:])}")
@@ -923,14 +946,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOGGER.error("--season-number must not be negative.")
         return 2
 
-    return run_apply_dvd_metadata(
+    mode_flags = {"aired": args.aired, "dvd": args.dvd, "restore": args.restore}
+    selected_modes = [name for name, selected in mode_flags.items() if selected]
+    if len(selected_modes) != 1:
+        LOGGER.error("Specify exactly one of --aired, --dvd, or --restore.")
+        return 2
+
+    return run_apply_tvdb_metadata(
         series_name=args.series_name,
         season_number=args.season_number,
         server_key=args.server,
         library_name=args.library,
         path_filter=args.path,
         assume_yes=args.yes,
-        restore_aired=args.aired,
+        mode=selected_modes[0],
         images=args.images,
     )
 

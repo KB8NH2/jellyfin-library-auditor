@@ -200,7 +200,7 @@ class StaleTitleResolutionTests(unittest.TestCase):
     def test_locked_name_item_is_refreshed_from_a_per_item_lookup(self) -> None:
         """Regression test: the /Items listing can still show an item's
         pre-rename Name for a while after apply_titles_from_filename.py (or
-        apply_episode_titles.py/apply_dvd_metadata.py) locks and changes it,
+        apply_tvdb_metadata.py) locks and changes it,
         even though Jellyfin's own UI already shows the new title. A locked
         Name is exactly the signal that the extra per-item request is
         worth it - unlocked items are never re-checked.

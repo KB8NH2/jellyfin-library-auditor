@@ -24,7 +24,7 @@ instead of being guessed at automatically; confirming one also overwrites
 the episode's Name with TheTVDB's title, since a fuzzy match by definition
 means the two titles weren't already equivalent. Every other run of the
 match (exact/article-insensitive) leaves Name untouched, and Overview and
-every other field are always left untouched (see apply_dvd_metadata.py for
+every other field are always left untouched (see apply_tvdb_metadata.py for
 fixing those).
 
 Jellyfin's own assigned TheTVDB id for the series isn't trusted blindly:
@@ -84,7 +84,7 @@ EPISODE_NUMBER_APPLY_LOG_FILE = Path("episode_numbers_apply.log")
 METADATA_FIELDS = ("IndexNumber", "Name")
 
 # Jellyfin deserializes LockedFields into its own MetadataField enum; Name is
-# a member (mirrors apply_dvd_metadata.LOCKABLE_METADATA_FIELDS).
+# a member (mirrors apply_tvdb_metadata.LOCKABLE_METADATA_FIELDS).
 _NAME_LOCK_FIELD = "Name"
 
 _LEADING_ARTICLE_PATTERN = re.compile(r"^(?:the|an?)\s+")
@@ -230,7 +230,7 @@ def build_episode_number_merged_item_dto(
 ) -> dict[str, Any]:
     """Return the destination episode document with IndexNumber set.
 
-    Mirrors apply_dvd_metadata.build_dvd_merged_item_dto: starts from a full
+    Mirrors apply_tvdb_metadata.build_merged_item_dto: starts from a full
     copy of the destination document minus NON_EDITABLE_ITEM_FIELDS, so every
     other field round-trips back to the server unchanged.
 
@@ -393,7 +393,7 @@ def _verify_applied(client: JellyfinClient, plan: EpisodeNumberPlan) -> tuple[st
 
     A successful HTTP response from update_item only means Jellyfin accepted
     the write, not that the value stuck - a locked/provider-owned field can
-    silently keep its old value. Mirrors apply_dvd_metadata._verify_applied.
+    silently keep its old value. Mirrors apply_tvdb_metadata._verify_applied.
 
     Args:
         client: Client for the server the episode lives on.

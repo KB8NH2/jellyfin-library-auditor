@@ -1,7 +1,7 @@
 """Shared TheTVDB series-id resolution for the apply_*.py tools.
 
-apply_dvd_metadata.py, apply_episode_titles.py, and apply_episode_numbers.py
-all look up a series by name in Jellyfin, then act using whatever TheTVDB id
+apply_tvdb_metadata.py and apply_episode_numbers.py both look up a series by
+name in Jellyfin, then act using whatever TheTVDB id
 Jellyfin has assigned to it - but that assigned id can itself be wrong,
 since TheTVDB sometimes has more than one series entry sharing the exact
 same name (e.g. a decades-old show and a from-scratch modern revival, each
@@ -72,7 +72,7 @@ def resolve_series_tvdb_id(
             when TheTVDB's search doesn't itself surface it.
         logger: Logger to report a skipped TheTVDB lookup to, so the
             warning is attributed to the calling tool (e.g.
-            "apply_dvd_metadata") rather than this shared module.
+            "apply_tvdb_metadata") rather than this shared module.
 
     Returns:
         The best-fitting TheTVDB id, or ``assigned_tvdb_id`` unchanged when

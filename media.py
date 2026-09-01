@@ -399,7 +399,7 @@ def expected_episode_numbers_from_text(
     The lower-level counterpart to :func:`expected_episode_numbers_from_filename`,
     for a caller that only has a raw path/filename string and season/episode
     numbers on hand rather than a full :class:`MediaItem` - e.g.
-    apply_episode_titles.py/apply_dvd_metadata.py, working from
+    apply_tvdb_metadata.py, working from
     ``jellyfin.EpisodeSummary`` while planning a rename.
 
     Doesn't assume ``episode_number`` is the first (leftmost) number in the

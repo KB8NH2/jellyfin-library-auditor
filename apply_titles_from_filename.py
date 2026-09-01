@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """CLI to rename a movie's or episode's title(s) to what their filename implies.
 
-This is the filename-only sibling to apply_episode_titles.py: instead of
+This is the filename-only sibling to apply_tvdb_metadata.py: instead of
 renaming toward TheTVDB's aired/DVD-order title, it renames toward the title
 media.expected_episode_title_from_filename()/expected_movie_title_from_filename()
 derive from the item's own on-disk filename under Jellyfin's naming
@@ -19,7 +19,7 @@ accents, US/UK spelling, roman-numeral part suffixes, and more are all
 treated as equivalent) - an item already reading the same as its
 filename-implied title under those rules is left alone. Before an actual
 rename, the item's current Name is backed up into OriginalTitle, the same
-convention apply_dvd_metadata.py/apply_episode_titles.py use; see
+convention apply_tvdb_metadata.py uses; see
 title_backup.py for the shared rename/backup/restore logic.
 
 --restore reverses a previous rename: it sets each item's Name back to its
@@ -58,7 +58,7 @@ from transfer_metadata import rejected_reason as _rejected_reason
 LOGGER = logging.getLogger("apply_titles_from_filename")
 
 # Append-only record of every apply attempt, mirroring
-# apply_episode_titles.py's EPISODE_TITLES_LOG_FILE convention.
+# apply_tvdb_metadata.py's METADATA_LOG_FILE convention.
 TITLES_FROM_FILENAME_LOG_FILE = Path("titles_from_filename_apply.log")
 
 # Fields this tool ever writes, and therefore diffs/locks. OriginalTitle only
@@ -359,7 +359,7 @@ def _verify_applied(client: JellyfinClient, plan: FilenameTitlePlan) -> tuple[st
 
     A successful HTTP response from update_item only means Jellyfin accepted
     the write, not that the value stuck - a locked/provider-owned field can
-    silently keep its old value. Mirrors apply_episode_titles.py's identical
+    silently keep its old value. Mirrors apply_tvdb_metadata.py's identical
     check for the same reason.
 
     Args:

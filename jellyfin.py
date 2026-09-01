@@ -977,8 +977,8 @@ class JellyfinClient:
         this spans every season of the series in one call, since it exists
         to answer a different question - not "what episodes does this one
         season have" but "which TheTVDB series id actually explains this
-        series' local episodes overall". apply_episode_titles.py and
-        apply_dvd_metadata.py use it for exactly that: when more than one
+        series' local episodes overall". apply_tvdb_metadata.py and
+        apply_episode_numbers.py use it for exactly that: when more than one
         TheTVDB series shares this series' name, whichever one's positions
         overlap this set best is the one to trust, since Jellyfin's own
         assigned TheTVDB id can itself be the wrong one.
@@ -1366,7 +1366,7 @@ class JellyfinClient:
         Jellyfin's /Items listing endpoint (whole-library or scoped to a
         ParentId) can lag behind a field edit made outside a normal library
         scan - a direct API PATCH (as apply_episode_numbers.py and
-        apply_dvd_metadata.py do) or a manual edit in the Jellyfin UI - in
+        apply_tvdb_metadata.py do) or a manual edit in the Jellyfin UI - in
         either direction: it can omit an IndexNumber that is actually set,
         or keep showing a value that was since cleared. A per-item GET reads
         the current value directly and isn't affected by this lag.
@@ -1405,8 +1405,8 @@ class JellyfinClient:
         Mirrors _resolve_missing_episode_number()'s reasoning for the same
         underlying cause: the /Items listing can lag behind a field edit
         made outside a normal library scan - a direct API PATCH (as
-        apply_dvd_metadata.py, apply_episode_titles.py, and
-        apply_titles_from_filename.py all do when renaming an item) or a
+        apply_tvdb_metadata.py and apply_titles_from_filename.py both do
+        when renaming an item) or a
         manual edit in the Jellyfin UI. Every one of those tools locks Name
         immediately after changing it specifically so a metadata provider's
         next refresh can't silently revert it, so a locked Name is exactly

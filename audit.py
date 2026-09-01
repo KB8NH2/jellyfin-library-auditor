@@ -1432,7 +1432,7 @@ def is_untranslated_tvdb_title(title: str) -> bool:
     See :data:`_NON_ENGLISH_SCRIPT_PATTERN` - TheTVDB silently falls back to
     a series' original-language name for any episode with no English
     translation on file, with no separate flag in the API response saying
-    that happened. Public so apply_episode_titles.py/apply_dvd_metadata.py
+    that happened. Public so apply_tvdb_metadata.py
     can refuse to rename a Jellyfin item's title to text in a script its
     metadata almost certainly isn't otherwise written in - the same
     protection :func:`mismatched_tvdb_title` already gives comparisons via

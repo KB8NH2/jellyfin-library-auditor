@@ -1,11 +1,12 @@
-"""Shared Name/OriginalTitle backup-and-rename logic for the apply_*_titles tools.
+"""Shared Name/OriginalTitle backup-and-rename logic for apply_titles_from_filename.py.
 
-Both apply_episode_titles.py and apply_titles_from_filename.py rename an
-item's Name and need the exact same LockedFields safety handling to keep the
-rename from being silently reverted by an internet metadata provider's next
+apply_titles_from_filename.py renames an item's Name and needs the same
+LockedFields safety handling apply_tvdb_metadata.py uses to keep the rename
+from being silently reverted by an internet metadata provider's next
 refresh - see transfer_metadata.lock_changed_fields() for why. Extracted
-here so that logic, and the OriginalTitle backup/restore convention built on
-top of it, is defined in exactly one place rather than copy-pasted per tool.
+here (rather than just living in apply_titles_from_filename.py) so the
+OriginalTitle backup/restore convention it's built on is defined in exactly
+one place, in case a future Name-only tool needs it too.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ def build_title_merged_item_dto(
     Mirrors transfer_metadata.build_merged_item_dto: starts from a full copy
     of the destination document minus NON_EDITABLE_ITEM_FIELDS. Before
     overwriting Name, the item's current Name is copied into OriginalTitle,
-    the same backup convention apply_dvd_metadata.py uses - this does mean a
+    the same backup convention apply_tvdb_metadata.py uses - this does mean a
     genuine original-language title already stored in OriginalTitle is
     overwritten, since these tools repurpose that field as their own undo
     backup.

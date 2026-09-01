@@ -1,7 +1,7 @@
 """Tests for tvdb_series_resolution.py.
 
-Shared by apply_dvd_metadata.py, apply_episode_titles.py, and
-apply_episode_numbers.py - covering it here covers all three call sites.
+Shared by apply_tvdb_metadata.py and apply_episode_numbers.py - covering it
+here covers both call sites.
 """
 
 from __future__ import annotations
@@ -154,8 +154,8 @@ class ResolveSeriesTvdbIdTests(unittest.TestCase):
 
     def test_logs_a_warning_through_the_caller_supplied_logger_on_search_failure(self) -> None:
         """Regression test: a skipped-lookup warning must be attributed to
-        whichever tool called this (apply_dvd_metadata, apply_episode_titles,
-        apply_episode_numbers), not to tvdb_series_resolution itself - the
+        whichever tool called this (apply_tvdb_metadata, apply_episode_numbers),
+        not to tvdb_series_resolution itself - the
         logger is a required parameter specifically so each call site's
         warning shows up in that tool's own log output.
         """

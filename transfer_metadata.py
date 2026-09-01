@@ -240,8 +240,8 @@ def _changed_fields(
 def rejected_reason(merged_dto: Mapping[str, Any]) -> str | None:
     """Return why a merged episode document is unsafe to write, or ``None``.
 
-    Shared by apply_dvd_metadata.py, apply_episode_titles.py, and
-    apply_episode_numbers.py - each computes this identically for its own
+    Shared by apply_tvdb_metadata.py and apply_episode_numbers.py - each
+    computes this identically for its own
     from-scratch merged episode document. Kept separate from this module's
     own inline rejection check in plan_transfer(), which is worded for a
     generic "destination item" rather than specifically an episode.
