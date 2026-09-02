@@ -265,9 +265,18 @@ class SeriesSummarySheetTests(unittest.TestCase):
 
         self.assertEqual(
             header,
-            ("Library", "Series", "Missing Seasons", "Missing Episodes", "Missing Subtitles", "Complete"),
+            (
+                "Library",
+                "Series",
+                "Number of Seasons",
+                "Total Number of Episodes",
+                "Missing Seasons",
+                "Missing Episodes",
+                "Missing Subtitles",
+                "Complete",
+            ),
         )
-        self.assertEqual(row, ("TV Shows", "Complete Show", 0, 0, 0, "Yes"))
+        self.assertEqual(row, ("TV Shows", "Complete Show", 1, 1, 0, 0, 0, "Yes"))
 
     def test_marks_a_series_incomplete_when_any_episode_is_missing_subtitles(self) -> None:
         """Regression test: "Missing Subtitles" counts how many episodes of
@@ -320,7 +329,7 @@ class SeriesSummarySheetTests(unittest.TestCase):
             sheet = workbook["Primary Series Summary"]
             rows = [tuple(cell.value for cell in row) for row in sheet.iter_rows(min_row=2, max_row=2)]
 
-        self.assertEqual(rows, [("TV Shows", "Partial Show", 0, 0, 1, "No")])
+        self.assertEqual(rows, [("TV Shows", "Partial Show", 1, 2, 0, 0, 1, "No")])
 
     def test_marks_a_series_incomplete_when_a_season_is_missing(self) -> None:
         """Regression test: "Missing Seasons" holds the actual count of
@@ -363,7 +372,7 @@ class SeriesSummarySheetTests(unittest.TestCase):
             sheet = workbook["Primary Series Summary"]
             row = tuple(cell.value for cell in sheet[2])
 
-        self.assertEqual(row, ("TV Shows", "Show With A Gap", 4, 0, 0, "No"))
+        self.assertEqual(row, ("TV Shows", "Show With A Gap", 1, 1, 4, 0, 0, "No"))
 
     def test_sums_missing_episodes_across_multiple_seasons_of_one_series(self) -> None:
         """Regression test: missing_tv_season_episodes() produces one
@@ -414,7 +423,57 @@ class SeriesSummarySheetTests(unittest.TestCase):
             sheet = workbook["Primary Series Summary"]
             row = tuple(cell.value for cell in sheet[2])
 
-        self.assertEqual(row, ("TV Shows", "Show With Two Gaps", 0, 3, 0, "No"))
+        self.assertEqual(row, ("TV Shows", "Show With Two Gaps", 1, 1, 0, 3, 0, "No"))
+
+    def test_number_of_seasons_and_episodes_reflect_distinct_local_counts(self) -> None:
+        """Regression test: "Number of Seasons" counts distinct season
+        numbers present locally (2, here - seasons 1 and 2 - not 5, the
+        number of episode files), and "Total Number of Episodes" counts
+        every local episode file for the series, regardless of any missing
+        seasons/episodes/subtitles findings."""
+        items = tuple(
+            _make_item(
+                f"S1E{number}",
+                item_id=f"s1e{number}",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Big Show",
+                season_number=1,
+                episode_number=number,
+            )
+            for number in range(1, 4)
+        ) + tuple(
+            _make_item(
+                f"S2E{number}",
+                item_id=f"s2e{number}",
+                is_movie=False,
+                is_episode=True,
+                library="TV Shows",
+                series_name="Big Show",
+                season_number=2,
+                episode_number=number,
+            )
+            for number in range(1, 3)
+        )
+        result = _make_single_library_result(
+            items,
+            library_id="lib1",
+            library_name="TV Shows",
+            collection_type="tvshows",
+            server_name="Primary",
+            server_key="primary",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary Series Summary"]
+            row = tuple(cell.value for cell in sheet[2])
+
+        self.assertEqual(row, ("TV Shows", "Big Show", 2, 5, 0, 0, 0, "Yes"))
 
     def test_excludes_movies_from_the_summary(self) -> None:
         movie = _make_item("A Movie", is_movie=True, is_episode=False, library="Movies")
@@ -484,8 +543,15 @@ class SeriesSummarySheetTests(unittest.TestCase):
 
         self.assertEqual(totals_row[0], "Totals")
         header = xlsx_report.SERIES_SUMMARY_HEADER
-        self.assertEqual(totals_row[header.index("Complete")], '=COUNTIF(F2:F3,"Yes")')
-        self.assertEqual(totals_row[header.index("Missing Subtitles")], "=SUM(E2:E3)")
+        complete_letter = openpyxl.utils.get_column_letter(header.index("Complete") + 1)
+        subtitles_letter = openpyxl.utils.get_column_letter(header.index("Missing Subtitles") + 1)
+        self.assertEqual(
+            totals_row[header.index("Complete")], f'=COUNTIF({complete_letter}2:{complete_letter}3,"Yes")'
+        )
+        self.assertEqual(
+            totals_row[header.index("Missing Subtitles")],
+            f"=SUM({subtitles_letter}2:{subtitles_letter}3)",
+        )
 
 
 if __name__ == "__main__":

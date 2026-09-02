@@ -16,16 +16,19 @@ exists in the server's own audit CSV, which stays a plain per-item export.
 
 Each server also gets a second, smaller "<label> Series Summary" worksheet:
 one row per TV series (movies excluded - there's nothing to roll up), with
-"Missing Seasons"/"Missing Episodes" holding how many individual
-seasons/episodes are missing across that series (summed from
-audit.missing_number_count() on that series' missing_seasons/
-missing_episodes finding message(s), since that's the only place the
-count is recorded - see that function's docstring) and "Missing Subtitles"
-holding how many of the series' episodes lack one, with a "Complete" column
-that's "Yes" only when all three are 0 - collapsing a per-episode Yes/No
-sprawl to one row per series, so a fully-clean series (every numbered
-season and episode present, every episode with an English subtitle track)
-is a single glance instead of a per-episode scan.
+"Number of Seasons"/"Total Number of Episodes" holding how many distinct
+seasons and episode files that series has locally (context for the counts
+next to them, not a problem indicator on their own), "Missing
+Seasons"/"Missing Episodes" holding how many individual seasons/episodes
+are missing across that series (summed from audit.missing_number_count()
+on that series' missing_seasons/missing_episodes finding message(s), since
+that's the only place the count is recorded - see that function's
+docstring), "Missing Subtitles" holding how many of the series' episodes
+lack one, and a "Complete" column that's "Yes" only when all three missing
+counts are 0 - collapsing a per-episode Yes/No sprawl to one row per
+series, so a fully-clean series (every numbered season and episode
+present, every episode with an English subtitle track) is a single glance
+instead of a per-episode scan.
 """
 
 from __future__ import annotations
@@ -62,13 +65,23 @@ COMPLETE_COLUMN_LABEL = "Complete"
 SERIES_SUMMARY_HEADER = (
     "Library",
     "Series",
+    "Number of Seasons",
+    "Total Number of Episodes",
     "Missing Seasons",
     "Missing Episodes",
     "Missing Subtitles",
     COMPLETE_COLUMN_LABEL,
 )
 
-_SERIES_SUMMARY_COUNT_COLUMNS = frozenset({"Missing Seasons", "Missing Episodes", "Missing Subtitles"})
+# Purely informational counts (how big the series is) - summed in the
+# Totals row like the problem counts below, but never highlighted, since a
+# high count here isn't a problem to fix.
+_SERIES_SUMMARY_INFO_COUNT_COLUMNS = frozenset({"Number of Seasons", "Total Number of Episodes"})
+# How much of the series is missing - highlighted yellow when greater than
+# 0, same as a server sheet's own Yes/No columns.
+_SERIES_SUMMARY_PROBLEM_COUNT_COLUMNS = frozenset(
+    {"Missing Seasons", "Missing Episodes", "Missing Subtitles"}
+)
 _SERVER_IDENTITY_COLUMNS = frozenset(
     {"Library", "Base Directory", "Base Filename", "Series", "Title", "Season", "Episode"}
 )
@@ -243,6 +256,11 @@ def _series_summary_rows(
 ) -> tuple[tuple[object, ...], ...]:
     """Return one row per TV series, rolled up from its episodes and findings.
 
+    "Number of Seasons"/"Total Number of Episodes" hold how many distinct
+    seasons and how many episode files that series has locally - context for
+    the counts next to them, not problem indicators on their own (a big
+    show isn't a "problem" the way a missing season is).
+
     "Missing Seasons"/"Missing Episodes" hold how many individual
     seasons/episodes are missing for that series - summed from
     audit.missing_number_count() on that series' missing_seasons/
@@ -251,9 +269,9 @@ def _series_summary_rows(
     produces at most one). "Missing Subtitles" holds how many of the
     series' episodes are missing English subtitles - one
     missing_english_subtitles finding per affected episode, simply counted.
-    "Complete" reads "Yes" only when all three are 0 - every numbered season
-    and episode is present on disk, and every one of those episodes has an
-    English subtitle track.
+    "Complete" reads "Yes" only when all three missing counts are 0 - every
+    numbered season and episode is present on disk, and every one of those
+    episodes has an English subtitle track.
 
     Every TV series with at least one local episode gets a row, even with
     all-zero counts - a fully clean series must still show up as
@@ -267,11 +285,16 @@ def _series_summary_rows(
         findings: Every finding produced for that same server - see
             results.AuditServerResult.findings.
     """
-    series_keys: dict[tuple[str, str], None] = {}
+    season_numbers: dict[tuple[str, str], set[int]] = {}
+    episode_counts: dict[tuple[str, str], int] = {}
     for item in items:
         if not item.is_episode or not item.series_name:
             continue
-        series_keys.setdefault((item.library, item.series_name), None)
+        key = (item.library, item.series_name)
+        season_numbers.setdefault(key, set())
+        if item.season_number is not None:
+            season_numbers[key].add(item.season_number)
+        episode_counts[key] = episode_counts.get(key, 0) + 1
 
     missing_seasons_counts: dict[tuple[str, str], int] = {}
     missing_episodes_counts: dict[tuple[str, str], int] = {}
@@ -294,7 +317,7 @@ def _series_summary_rows(
 
     summary_rows = []
     for library, series_name in sorted(
-        series_keys, key=lambda key: (key[0].casefold(), key[1].casefold())
+        season_numbers, key=lambda key: (key[0].casefold(), key[1].casefold())
     ):
         key = (library, series_name)
         missing_seasons = missing_seasons_counts.get(key, 0)
@@ -305,6 +328,8 @@ def _series_summary_rows(
             (
                 library,
                 series_name,
+                len(season_numbers[key]),
+                episode_counts[key],
                 missing_seasons,
                 missing_episodes,
                 missing_subtitles,
@@ -322,13 +347,15 @@ def _add_series_summary_conditional_formatting(
     "Missing Seasons"/"Missing Episodes"/"Missing Subtitles" get a yellow
     background when their count is greater than 0 (a problem to fix);
     "Complete" gets the opposite - a green background on "Yes" - since
-    there it's the desirable outcome, not a problem.
+    there it's the desirable outcome, not a problem. "Number of
+    Seasons"/"Total Number of Episodes" are purely informational and never
+    highlighted - a big show isn't a problem.
     """
     if last_row < 2:
         return
     for index, column_name in enumerate(header):
         column_letter = get_column_letter(index + 1)
-        if column_name in _SERIES_SUMMARY_COUNT_COLUMNS:
+        if column_name in _SERIES_SUMMARY_PROBLEM_COUNT_COLUMNS:
             sheet.conditional_formatting.add(
                 f"{column_letter}2:{column_letter}{last_row}",
                 CellIsRule(operator="greaterThan", formula=["0"], fill=_YELLOW_FILL),
@@ -345,21 +372,23 @@ def _add_series_summary_totals_row(
 ) -> None:
     """Write a "Totals" row directly below the series summary table.
 
-    Each count column ("Missing Seasons"/"Missing Episodes"/"Missing
-    Subtitles") gets the sum of its per-series counts; "Complete" gets a
-    count of its own "Yes" cells, same as a server sheet's Yes/No columns.
-    Deliberately left out of the table's own ref, same reason as
-    _add_totals_row(): a row inside the table would participate in the
-    table's own sort/filter, which could otherwise scatter this row away
-    from the bottom of the sheet.
+    Every count column - "Number of Seasons"/"Total Number of Episodes" as
+    well as "Missing Seasons"/"Missing Episodes"/"Missing Subtitles" - gets
+    the sum of its per-series counts; "Complete" gets a count of its own
+    "Yes" cells, same as a server sheet's Yes/No columns. Deliberately left
+    out of the table's own ref, same reason as _add_totals_row(): a row
+    inside the table would participate in the table's own sort/filter,
+    which could otherwise scatter this row away from the bottom of the
+    sheet.
     """
     totals_row = last_row + 1
     sheet.cell(row=totals_row, column=1, value=TOTALS_ROW_LABEL)
 
     has_data_rows = last_row >= 2
+    count_columns = _SERIES_SUMMARY_INFO_COUNT_COLUMNS | _SERIES_SUMMARY_PROBLEM_COUNT_COLUMNS
     for index, column_name in enumerate(header):
         column_letter = get_column_letter(index + 1)
-        if column_name in _SERIES_SUMMARY_COUNT_COLUMNS:
+        if column_name in count_columns:
             value = (
                 f"=SUM({column_letter}2:{column_letter}{last_row})" if has_data_rows else 0
             )
