@@ -16,12 +16,16 @@ exists in the server's own audit CSV, which stays a plain per-item export.
 
 Each server also gets a second, smaller "<label> Series Summary" worksheet:
 one row per TV series (movies excluded - there's nothing to roll up), with
-"Missing Seasons"/"Missing Episodes"/"Missing Subtitles" reading "Yes" when
-*any* of that series' episode rows do, and a "Complete" column that's "Yes"
-only when none of them do - a per-episode Yes/No, in other words, collapsed
-to one row per series so a fully-clean series (every numbered season and
-episode present, every episode with an English subtitle track) is a single
-glance instead of a per-episode scan.
+"Missing Seasons"/"Missing Episodes" holding how many individual
+seasons/episodes are missing across that series (summed from
+audit.missing_number_count() on that series' missing_seasons/
+missing_episodes finding message(s), since that's the only place the
+count is recorded - see that function's docstring) and "Missing Subtitles"
+holding how many of the series' episodes lack one, with a "Complete" column
+that's "Yes" only when all three are 0 - collapsing a per-episode Yes/No
+sprawl to one row per series, so a fully-clean series (every numbered
+season and episode present, every episode with an English subtitle track)
+is a single glance instead of a per-episode scan.
 """
 
 from __future__ import annotations
@@ -40,7 +44,10 @@ from openpyxl.worksheet.table import Table
 from openpyxl.worksheet.table import TableStyleInfo
 from openpyxl.worksheet.worksheet import Worksheet
 
+from audit import missing_number_count
+from audit_types import AuditFinding
 import compare_csv_files
+from models import MediaItem
 from output_layout import audit_results_xlsx_path
 from reports.generator import CSV_HEADER
 from reports.generator import _csv_rows
@@ -61,6 +68,7 @@ SERIES_SUMMARY_HEADER = (
     COMPLETE_COLUMN_LABEL,
 )
 
+_SERIES_SUMMARY_COUNT_COLUMNS = frozenset({"Missing Seasons", "Missing Episodes", "Missing Subtitles"})
 _SERVER_IDENTITY_COLUMNS = frozenset(
     {"Library", "Base Directory", "Base Filename", "Series", "Title", "Season", "Episode"}
 )
@@ -132,7 +140,8 @@ def write_audit_results_workbook(
         _write_series_summary_sheet(
             workbook,
             label=label,
-            rows=rows,
+            items=result.audited_items,
+            findings=result.findings,
             used_sheet_titles=used_sheet_titles,
             used_table_names=used_table_names,
         )
@@ -205,12 +214,13 @@ def _write_series_summary_sheet(
     workbook: Workbook,
     *,
     label: str,
-    rows: tuple[tuple[str, ...], ...],
+    items: tuple[MediaItem, ...],
+    findings: tuple[AuditFinding, ...],
     used_sheet_titles: set[str],
     used_table_names: set[str],
 ) -> None:
     """Write one server's per-series completeness rollup to a new worksheet."""
-    summary_rows = _series_summary_rows(rows)
+    summary_rows = _series_summary_rows(items, findings)
     sheet_label = f"{label} {SERIES_SUMMARY_SHEET_SUFFIX}"
     sheet = workbook.create_sheet(_unique_sheet_title(sheet_label, used_sheet_titles))
 
@@ -224,90 +234,147 @@ def _write_series_summary_sheet(
 
     _add_series_summary_conditional_formatting(sheet, SERIES_SUMMARY_HEADER, last_row)
     _add_wrap_center_alignment(sheet, SERIES_SUMMARY_HEADER, last_row)
-    _add_totals_row(
-        sheet,
-        yes_no_indices=_yes_no_column_indices(SERIES_SUMMARY_HEADER),
-        last_row=last_row,
-    )
+    _add_series_summary_totals_row(sheet, SERIES_SUMMARY_HEADER, last_row)
 
 
 def _series_summary_rows(
-    rows: tuple[tuple[str, ...], ...],
-) -> tuple[tuple[str, ...], ...]:
-    """Return one row per TV series, rolled up from per-episode CSV rows.
+    items: tuple[MediaItem, ...],
+    findings: tuple[AuditFinding, ...],
+) -> tuple[tuple[object, ...], ...]:
+    """Return one row per TV series, rolled up from its episodes and findings.
 
-    A series reads "Yes" for "Missing Seasons"/"Missing Episodes"/"Missing
-    Subtitles" when *any* of its episode rows does, and "Complete" only when
-    *none* of them do - i.e. every numbered season and episode is present on
-    disk, and every one of those episodes has an English subtitle track.
-    Movies (a blank Series column) contribute nothing to this rollup - there
-    are no seasons/episodes to be complete or incomplete about.
+    "Missing Seasons"/"Missing Episodes" hold how many individual
+    seasons/episodes are missing for that series - summed from
+    audit.missing_number_count() on that series' missing_seasons/
+    missing_episodes finding message(s) (missing_episodes can produce more
+    than one finding per series, one per season with a gap; missing_seasons
+    produces at most one). "Missing Subtitles" holds how many of the
+    series' episodes are missing English subtitles - one
+    missing_english_subtitles finding per affected episode, simply counted.
+    "Complete" reads "Yes" only when all three are 0 - every numbered season
+    and episode is present on disk, and every one of those episodes has an
+    English subtitle track.
+
+    Every TV series with at least one local episode gets a row, even with
+    all-zero counts - a fully clean series must still show up as
+    "Complete", not be silently absent. Movies (no series name) contribute
+    nothing - there are no seasons/episodes to be complete or incomplete
+    about.
+
+    Args:
+        items: Every media item audited for one server (movies and
+            episodes alike) - see results.AuditServerResult.audited_items.
+        findings: Every finding produced for that same server - see
+            results.AuditServerResult.findings.
     """
-    library_index = CSV_HEADER.index("Library")
-    series_index = CSV_HEADER.index("Series")
-    missing_seasons_index = CSV_HEADER.index("Missing Seasons")
-    missing_episodes_index = CSV_HEADER.index("Missing Episodes")
-    missing_subtitles_index = CSV_HEADER.index("Missing Subtitles")
+    series_keys: dict[tuple[str, str], None] = {}
+    for item in items:
+        if not item.is_episode or not item.series_name:
+            continue
+        series_keys.setdefault((item.library, item.series_name), None)
 
-    aggregates: dict[tuple[str, str], dict[str, bool]] = {}
-    for row in rows:
-        series_name = row[series_index]
+    missing_seasons_counts: dict[tuple[str, str], int] = {}
+    missing_episodes_counts: dict[tuple[str, str], int] = {}
+    missing_subtitles_counts: dict[tuple[str, str], int] = {}
+    for finding in findings:
+        series_name = finding.media_item.series_name
         if not series_name:
             continue
-        state = aggregates.setdefault(
-            (row[library_index], series_name),
-            {"missing_seasons": False, "missing_episodes": False, "missing_subtitles": False},
-        )
-        state["missing_seasons"] |= row[missing_seasons_index] == "Yes"
-        state["missing_episodes"] |= row[missing_episodes_index] == "Yes"
-        state["missing_subtitles"] |= row[missing_subtitles_index] == "Yes"
+        key = (finding.media_item.library, series_name)
+        if finding.check_name == "missing_seasons":
+            missing_seasons_counts[key] = missing_seasons_counts.get(
+                key, 0
+            ) + (missing_number_count(finding.message) or 0)
+        elif finding.check_name == "missing_episodes":
+            missing_episodes_counts[key] = missing_episodes_counts.get(
+                key, 0
+            ) + (missing_number_count(finding.message) or 0)
+        elif finding.check_name == "missing_english_subtitles":
+            missing_subtitles_counts[key] = missing_subtitles_counts.get(key, 0) + 1
 
     summary_rows = []
-    for (library, series_name), state in sorted(
-        aggregates.items(), key=lambda entry: (entry[0][0].casefold(), entry[0][1].casefold())
+    for library, series_name in sorted(
+        series_keys, key=lambda key: (key[0].casefold(), key[1].casefold())
     ):
-        complete = not (
-            state["missing_seasons"] or state["missing_episodes"] or state["missing_subtitles"]
-        )
+        key = (library, series_name)
+        missing_seasons = missing_seasons_counts.get(key, 0)
+        missing_episodes = missing_episodes_counts.get(key, 0)
+        missing_subtitles = missing_subtitles_counts.get(key, 0)
+        complete = missing_seasons == 0 and missing_episodes == 0 and missing_subtitles == 0
         summary_rows.append(
             (
                 library,
                 series_name,
-                _yes_no(state["missing_seasons"]),
-                _yes_no(state["missing_episodes"]),
-                _yes_no(state["missing_subtitles"]),
-                _yes_no(complete),
+                missing_seasons,
+                missing_episodes,
+                missing_subtitles,
+                "Yes" if complete else "No",
             )
         )
     return tuple(summary_rows)
 
 
-def _yes_no(value: bool) -> str:
-    """Return "Yes"/"No" for a series-summary cell."""
-    return "Yes" if value else "No"
-
-
 def _add_series_summary_conditional_formatting(
     sheet: Worksheet, header: tuple[str, ...], last_row: int
 ) -> None:
-    """Highlight the series summary sheet's Yes/No columns.
+    """Highlight the series summary sheet's problem cells.
 
-    "Missing Seasons"/"Missing Episodes"/"Missing Subtitles" get the same
-    yellow-on-"Yes" treatment as a server sheet's own Yes/No columns (a
-    problem to fix); "Complete" gets the opposite - a green background on
-    "Yes" - since there it's the desirable outcome, not a problem.
+    "Missing Seasons"/"Missing Episodes"/"Missing Subtitles" get a yellow
+    background when their count is greater than 0 (a problem to fix);
+    "Complete" gets the opposite - a green background on "Yes" - since
+    there it's the desirable outcome, not a problem.
     """
     if last_row < 2:
         return
     for index, column_name in enumerate(header):
-        if column_name in _SERVER_IDENTITY_COLUMNS:
-            continue
         column_letter = get_column_letter(index + 1)
-        fill = _GREEN_FILL if column_name == COMPLETE_COLUMN_LABEL else _YELLOW_FILL
-        sheet.conditional_formatting.add(
-            f"{column_letter}2:{column_letter}{last_row}",
-            CellIsRule(operator="equal", formula=['"Yes"'], fill=fill),
-        )
+        if column_name in _SERIES_SUMMARY_COUNT_COLUMNS:
+            sheet.conditional_formatting.add(
+                f"{column_letter}2:{column_letter}{last_row}",
+                CellIsRule(operator="greaterThan", formula=["0"], fill=_YELLOW_FILL),
+            )
+        elif column_name == COMPLETE_COLUMN_LABEL:
+            sheet.conditional_formatting.add(
+                f"{column_letter}2:{column_letter}{last_row}",
+                CellIsRule(operator="equal", formula=['"Yes"'], fill=_GREEN_FILL),
+            )
+
+
+def _add_series_summary_totals_row(
+    sheet: Worksheet, header: tuple[str, ...], last_row: int
+) -> None:
+    """Write a "Totals" row directly below the series summary table.
+
+    Each count column ("Missing Seasons"/"Missing Episodes"/"Missing
+    Subtitles") gets the sum of its per-series counts; "Complete" gets a
+    count of its own "Yes" cells, same as a server sheet's Yes/No columns.
+    Deliberately left out of the table's own ref, same reason as
+    _add_totals_row(): a row inside the table would participate in the
+    table's own sort/filter, which could otherwise scatter this row away
+    from the bottom of the sheet.
+    """
+    totals_row = last_row + 1
+    sheet.cell(row=totals_row, column=1, value=TOTALS_ROW_LABEL)
+
+    has_data_rows = last_row >= 2
+    for index, column_name in enumerate(header):
+        column_letter = get_column_letter(index + 1)
+        if column_name in _SERIES_SUMMARY_COUNT_COLUMNS:
+            value = (
+                f"=SUM({column_letter}2:{column_letter}{last_row})" if has_data_rows else 0
+            )
+            sheet.cell(row=totals_row, column=index + 1, value=value)
+        elif column_name == COMPLETE_COLUMN_LABEL:
+            value = (
+                f'=COUNTIF({column_letter}2:{column_letter}{last_row},"Yes")'
+                if has_data_rows
+                else 0
+            )
+            sheet.cell(row=totals_row, column=index + 1, value=value)
+
+    for cell in sheet[totals_row]:
+        cell.font = _TOTALS_ROW_FONT
+        cell.alignment = _WRAP_CENTER_ALIGNMENT
 
 
 def _write_diffs_sheet(
@@ -348,7 +415,7 @@ def _write_table(
     sheet: Worksheet,
     *,
     header: tuple[str, ...],
-    rows: tuple[tuple[str, ...], ...],
+    rows: tuple[tuple[object, ...], ...],
     table_name: str,
 ) -> int:
     """Write a header/rows table to ``sheet`` as a named Excel Table.
@@ -383,15 +450,14 @@ def _add_totals_row(
     sheet: Worksheet,
     *,
     yes_no_indices: tuple[int, ...],
+    problems_column_index: int,
     last_row: int,
-    problems_column_index: int | None = None,
 ) -> None:
     """Write a "Totals" row directly below the table.
 
     Each Yes/No column gets a count of its own "Yes" cells; the Problems
-    column, when given (a server sheet has one, the series summary sheet
-    doesn't), gets the sum of its per-row counts (so it equals the same
-    total either way). Deliberately left out of the table's own ref - a row
+    column gets the sum of its per-row counts (so it equals the same total
+    either way). Deliberately left out of the table's own ref - a row
     inside the table would participate in the table's own sort/filter,
     which could otherwise scatter this row away from the bottom of the
     sheet.
@@ -412,14 +478,13 @@ def _add_totals_row(
         )
         sheet.cell(row=totals_row, column=index + 1, value=value)
 
-    if problems_column_index is not None:
-        problems_column_letter = get_column_letter(problems_column_index + 1)
-        problems_value = (
-            f"=SUM({problems_column_letter}2:{problems_column_letter}{last_row})"
-            if has_data_rows
-            else 0
-        )
-        sheet.cell(row=totals_row, column=problems_column_index + 1, value=problems_value)
+    problems_column_letter = get_column_letter(problems_column_index + 1)
+    problems_value = (
+        f"=SUM({problems_column_letter}2:{problems_column_letter}{last_row})"
+        if has_data_rows
+        else 0
+    )
+    sheet.cell(row=totals_row, column=problems_column_index + 1, value=problems_value)
 
     for cell in sheet[totals_row]:
         cell.font = _TOTALS_ROW_FONT
@@ -543,9 +608,14 @@ def _unique_table_name(label: str, used_names: set[str]) -> str:
     return name
 
 
-def _column_width(column_name: str, rows: tuple[tuple[str, ...], ...], index: int) -> float:
-    """Return a content-fitted column width, capped so long paths stay usable."""
-    longest = max((len(row[index]) for row in rows), default=0)
+def _column_width(column_name: str, rows: tuple[tuple[object, ...], ...], index: int) -> float:
+    """Return a content-fitted column width, capped so long paths stay usable.
+
+    ``str()``-converts each cell before measuring rather than assuming a
+    string, since the series summary sheet's count columns hold real ``int``
+    values rather than pre-formatted text.
+    """
+    longest = max((len(str(row[index])) for row in rows), default=0)
     return min(max(len(column_name), longest) + 2, _MAX_COLUMN_WIDTH)
 
 

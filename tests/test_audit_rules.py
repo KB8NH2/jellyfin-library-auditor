@@ -284,6 +284,31 @@ class MissingTvSeriesSeasonsTests(unittest.TestCase):
         self.assertEqual(findings[0].message, "Missing seasons: 2, out of 3 seasons.")
 
 
+class MissingNumberCountTests(unittest.TestCase):
+    def test_counts_a_single_missing_number(self) -> None:
+        self.assertEqual(audit.missing_number_count("Missing seasons: 2, out of 3 seasons."), 1)
+
+    def test_counts_every_number_in_a_range(self) -> None:
+        """Regression test: a collapsed range like "4-6" names 3 individual
+        seasons missing (4, 5, and 6), not 1 comma-separated segment."""
+        self.assertEqual(
+            audit.missing_number_count("Missing seasons: 3-4, out of 4 seasons."), 2
+        )
+
+    def test_sums_multiple_comma_separated_segments(self) -> None:
+        self.assertEqual(
+            audit.missing_number_count("Missing episodes: 2, 4-6, out of 8 episodes."), 4
+        )
+
+    def test_works_for_missing_episodes_messages_too(self) -> None:
+        self.assertEqual(
+            audit.missing_number_count("Missing episodes: 5, out of 10 episodes."), 1
+        )
+
+    def test_returns_none_for_an_unrelated_message(self) -> None:
+        self.assertIsNone(audit.missing_number_count("Missing English subtitles."))
+
+
 class MissingTvSeasonEpisodesTests(unittest.TestCase):
     def test_flags_only_internal_gaps_without_tvdb_data(self) -> None:
         items = (

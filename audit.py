@@ -1829,6 +1829,51 @@ def _format_number_range(start: int, end: int) -> str:
     return f"{start}-{end}"
 
 
+_MISSING_NUMBERS_MESSAGE_PATTERN = re.compile(
+    r"^Missing (?:seasons|episodes): (.+), out of \d+ (?:seasons|episodes)\.$"
+)
+
+
+def missing_number_count(message: str) -> int | None:
+    """Return how many individual seasons/episodes a missing_seasons/missing_episodes message names.
+
+    The inverse of :func:`_format_missing_numbers`: e.g. "Missing seasons:
+    2, 4-6, out of 8 seasons." names 4 individual seasons missing (2, 4, 5,
+    and 6), not the 2 comma-separated segments the message text has - a
+    range collapses to one segment in the message, but each number in it
+    still counts on its own here. Used by xlsx_report.py's series summary
+    sheet, which only has each finding's ``message`` to work with (not the
+    original ``missing_numbers`` set :func:`missing_tv_series_seasons`/
+    :func:`missing_tv_season_episodes` computed it from), since
+    :class:`audit_types.AuditFinding` has no separate structured field for
+    it.
+
+    Args:
+        message: A finding's ``message``, expected to be one
+            ``missing_tv_series_seasons``/``missing_tv_season_episodes``
+            produced (i.e. its ``check_name`` is "missing_seasons" or
+            "missing_episodes") - the shape this parses is specific to
+            those two.
+
+    Returns:
+        The count, or ``None`` when ``message`` doesn't match that exact
+        shape at all (defensive - a caller should never see this for any
+        other check's finding).
+    """
+    match = _MISSING_NUMBERS_MESSAGE_PATTERN.match(message)
+    if match is None:
+        return None
+    return sum(_count_number_range(segment) for segment in match.group(1).split(", "))
+
+
+def _count_number_range(segment: str) -> int:
+    """Return how many individual numbers one :func:`_format_missing_numbers` segment represents."""
+    if "-" not in segment:
+        return 1
+    start_text, end_text = segment.split("-", 1)
+    return int(end_text) - int(start_text) + 1
+
+
 def _episode_sort_key(item: MediaItem) -> tuple[str, int, int, str]:
     """Return a stable sort key for episode representative selection."""
     return (
@@ -1885,6 +1930,7 @@ __all__ = [
     "missing_backdrop",
     "missing_english_subtitles",
     "missing_episode_number",
+    "missing_number_count",
     "missing_tv_season_episodes",
     "missing_tv_series_seasons",
     "missing_primary_image",

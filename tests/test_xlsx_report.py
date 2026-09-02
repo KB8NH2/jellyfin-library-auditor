@@ -267,12 +267,13 @@ class SeriesSummarySheetTests(unittest.TestCase):
             header,
             ("Library", "Series", "Missing Seasons", "Missing Episodes", "Missing Subtitles", "Complete"),
         )
-        self.assertEqual(row, ("TV Shows", "Complete Show", "No", "No", "No", "Yes"))
+        self.assertEqual(row, ("TV Shows", "Complete Show", 0, 0, 0, "Yes"))
 
     def test_marks_a_series_incomplete_when_any_episode_is_missing_subtitles(self) -> None:
-        """Regression test: a series reads "Complete" = "No" as soon as any
-        one of its episodes is missing English subtitles, even when every
-        other episode has them and no seasons/episodes are missing.
+        """Regression test: "Missing Subtitles" counts how many episodes of
+        the series are missing English subtitles - here 1 of 2 - and the
+        series reads "Complete" = "No" as soon as that count is nonzero,
+        even when no seasons/episodes are missing.
         """
         subtitled_episode = _make_item(
             "Ep1",
@@ -319,9 +320,14 @@ class SeriesSummarySheetTests(unittest.TestCase):
             sheet = workbook["Primary Series Summary"]
             rows = [tuple(cell.value for cell in row) for row in sheet.iter_rows(min_row=2, max_row=2)]
 
-        self.assertEqual(rows, [("TV Shows", "Partial Show", "No", "No", "Yes", "No")])
+        self.assertEqual(rows, [("TV Shows", "Partial Show", 0, 0, 1, "No")])
 
     def test_marks_a_series_incomplete_when_a_season_is_missing(self) -> None:
+        """Regression test: "Missing Seasons" holds the actual count of
+        missing seasons (2, 4, and 6 - three individual seasons, even though
+        the range collapses to two comma-separated segments in the
+        message), not just a Yes/No flag.
+        """
         item = _make_item(
             "Ep1",
             is_movie=False,
@@ -336,7 +342,7 @@ class SeriesSummarySheetTests(unittest.TestCase):
             severity=AuditSeverity.WARNING,
             title="Ep1",
             check_name="missing_seasons",
-            message="Missing seasons: 2, out of 2 seasons.",
+            message="Missing seasons: 2, 4-6, out of 7 seasons.",
             media_item=item,
         )
         result = _make_single_library_result(
@@ -357,7 +363,58 @@ class SeriesSummarySheetTests(unittest.TestCase):
             sheet = workbook["Primary Series Summary"]
             row = tuple(cell.value for cell in sheet[2])
 
-        self.assertEqual(row, ("TV Shows", "Show With A Gap", "Yes", "No", "No", "No"))
+        self.assertEqual(row, ("TV Shows", "Show With A Gap", 4, 0, 0, "No"))
+
+    def test_sums_missing_episodes_across_multiple_seasons_of_one_series(self) -> None:
+        """Regression test: missing_tv_season_episodes() produces one
+        finding per season with a gap, so a series missing episodes in two
+        different seasons has two missing_episodes findings - "Missing
+        Episodes" must sum both, not just reflect the last one seen.
+        """
+        item = _make_item(
+            "Ep1",
+            is_movie=False,
+            is_episode=True,
+            library="TV Shows",
+            series_name="Show With Two Gaps",
+            season_number=1,
+            episode_number=1,
+        )
+        season_one_finding = _make_finding(
+            category=AuditCategory.METADATA,
+            severity=AuditSeverity.WARNING,
+            title="Ep1",
+            check_name="missing_episodes",
+            message="Missing episodes: 2, out of 3 episodes.",
+            media_item=item,
+        )
+        season_two_finding = _make_finding(
+            category=AuditCategory.METADATA,
+            severity=AuditSeverity.WARNING,
+            title="Ep1",
+            check_name="missing_episodes",
+            message="Missing episodes: 3-4, out of 4 episodes.",
+            media_item=item,
+        )
+        result = _make_single_library_result(
+            (item,),
+            library_id="lib1",
+            library_name="TV Shows",
+            collection_type="tvshows",
+            server_name="Primary",
+            server_key="primary",
+            findings=(season_one_finding, season_two_finding),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary Series Summary"]
+            row = tuple(cell.value for cell in sheet[2])
+
+        self.assertEqual(row, ("TV Shows", "Show With Two Gaps", 0, 3, 0, "No"))
 
     def test_excludes_movies_from_the_summary(self) -> None:
         movie = _make_item("A Movie", is_movie=True, is_episode=False, library="Movies")
@@ -428,7 +485,7 @@ class SeriesSummarySheetTests(unittest.TestCase):
         self.assertEqual(totals_row[0], "Totals")
         header = xlsx_report.SERIES_SUMMARY_HEADER
         self.assertEqual(totals_row[header.index("Complete")], '=COUNTIF(F2:F3,"Yes")')
-        self.assertEqual(totals_row[header.index("Missing Subtitles")], '=COUNTIF(E2:E3,"Yes")')
+        self.assertEqual(totals_row[header.index("Missing Subtitles")], "=SUM(E2:E3)")
 
 
 if __name__ == "__main__":
