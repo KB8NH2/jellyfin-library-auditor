@@ -10,8 +10,11 @@ from unittest.mock import patch
 import openpyxl
 
 import xlsx_report
+from audit_types import AuditCategory
+from audit_types import AuditSeverity
 from reports.generator import CSV_HEADER
 
+from tests.helpers import _make_finding
 from tests.helpers import _make_item
 from tests.helpers import _make_single_library_result
 
@@ -228,6 +231,204 @@ class WriteAuditResultsWorkbookTests(unittest.TestCase):
             header = tuple(cell.value for cell in sheet[1])
 
         self.assertEqual(header, CSV_HEADER + ("Problems",))
+
+
+class SeriesSummarySheetTests(unittest.TestCase):
+    def test_marks_a_series_complete_when_nothing_is_missing(self) -> None:
+        item = _make_item(
+            "Ep1",
+            is_movie=False,
+            is_episode=True,
+            library="TV Shows",
+            series_name="Complete Show",
+            season_number=1,
+            episode_number=1,
+        )
+        result = _make_single_library_result(
+            (item,),
+            library_id="lib1",
+            library_name="TV Shows",
+            collection_type="tvshows",
+            server_name="Primary",
+            server_key="primary",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            self.assertIn("Primary Series Summary", workbook.sheetnames)
+            sheet = workbook["Primary Series Summary"]
+            header = tuple(cell.value for cell in sheet[1])
+            row = tuple(cell.value for cell in sheet[2])
+
+        self.assertEqual(
+            header,
+            ("Library", "Series", "Missing Seasons", "Missing Episodes", "Missing Subtitles", "Complete"),
+        )
+        self.assertEqual(row, ("TV Shows", "Complete Show", "No", "No", "No", "Yes"))
+
+    def test_marks_a_series_incomplete_when_any_episode_is_missing_subtitles(self) -> None:
+        """Regression test: a series reads "Complete" = "No" as soon as any
+        one of its episodes is missing English subtitles, even when every
+        other episode has them and no seasons/episodes are missing.
+        """
+        subtitled_episode = _make_item(
+            "Ep1",
+            item_id="ep1",
+            is_movie=False,
+            is_episode=True,
+            library="TV Shows",
+            series_name="Partial Show",
+            season_number=1,
+            episode_number=1,
+        )
+        unsubtitled_episode = _make_item(
+            "Ep2",
+            item_id="ep2",
+            is_movie=False,
+            is_episode=True,
+            library="TV Shows",
+            series_name="Partial Show",
+            season_number=1,
+            episode_number=2,
+        )
+        finding = _make_finding(
+            category=AuditCategory.SUBTITLES,
+            severity=AuditSeverity.WARNING,
+            title="Ep2",
+            check_name="missing_english_subtitles",
+            media_item=unsubtitled_episode,
+        )
+        result = _make_single_library_result(
+            (subtitled_episode, unsubtitled_episode),
+            library_id="lib1",
+            library_name="TV Shows",
+            collection_type="tvshows",
+            server_name="Primary",
+            server_key="primary",
+            findings=(finding,),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary Series Summary"]
+            rows = [tuple(cell.value for cell in row) for row in sheet.iter_rows(min_row=2, max_row=2)]
+
+        self.assertEqual(rows, [("TV Shows", "Partial Show", "No", "No", "Yes", "No")])
+
+    def test_marks_a_series_incomplete_when_a_season_is_missing(self) -> None:
+        item = _make_item(
+            "Ep1",
+            is_movie=False,
+            is_episode=True,
+            library="TV Shows",
+            series_name="Show With A Gap",
+            season_number=1,
+            episode_number=1,
+        )
+        finding = _make_finding(
+            category=AuditCategory.METADATA,
+            severity=AuditSeverity.WARNING,
+            title="Ep1",
+            check_name="missing_seasons",
+            message="Missing seasons: 2, out of 2 seasons.",
+            media_item=item,
+        )
+        result = _make_single_library_result(
+            (item,),
+            library_id="lib1",
+            library_name="TV Shows",
+            collection_type="tvshows",
+            server_name="Primary",
+            server_key="primary",
+            findings=(finding,),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary Series Summary"]
+            row = tuple(cell.value for cell in sheet[2])
+
+        self.assertEqual(row, ("TV Shows", "Show With A Gap", "Yes", "No", "No", "No"))
+
+    def test_excludes_movies_from_the_summary(self) -> None:
+        movie = _make_item("A Movie", is_movie=True, is_episode=False, library="Movies")
+        result = _make_single_library_result(
+            (movie,),
+            library_id="lib1",
+            library_name="Movies",
+            collection_type="movies",
+            server_name="Primary",
+            server_key="primary",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary Series Summary"]
+
+        self.assertEqual(sheet.max_row, 2)  # header row + Totals row only
+
+    def test_totals_row_counts_incomplete_and_complete_series(self) -> None:
+        complete_item = _make_item(
+            "Ep1",
+            item_id="complete-ep1",
+            is_movie=False,
+            is_episode=True,
+            library="TV Shows",
+            series_name="Complete Show",
+            season_number=1,
+            episode_number=1,
+        )
+        incomplete_item = _make_item(
+            "Ep1",
+            item_id="incomplete-ep1",
+            is_movie=False,
+            is_episode=True,
+            library="TV Shows",
+            series_name="Incomplete Show",
+            season_number=1,
+            episode_number=1,
+        )
+        finding = _make_finding(
+            category=AuditCategory.SUBTITLES,
+            severity=AuditSeverity.WARNING,
+            title="Ep1",
+            check_name="missing_english_subtitles",
+            media_item=incomplete_item,
+        )
+        result = _make_single_library_result(
+            (complete_item, incomplete_item),
+            library_id="lib1",
+            library_name="TV Shows",
+            collection_type="tvshows",
+            server_name="Primary",
+            server_key="primary",
+            findings=(finding,),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary Series Summary"]
+            totals_row = tuple(cell.value for cell in sheet[4])
+
+        self.assertEqual(totals_row[0], "Totals")
+        header = xlsx_report.SERIES_SUMMARY_HEADER
+        self.assertEqual(totals_row[header.index("Complete")], '=COUNTIF(F2:F3,"Yes")')
+        self.assertEqual(totals_row[header.index("Missing Subtitles")], '=COUNTIF(E2:E3,"Yes")')
 
 
 if __name__ == "__main__":

@@ -13,6 +13,15 @@ through Title get. A server sheet also gets a "Problems" column (a per-row
 count of that row's "Yes" cells) and a "Totals" row below the table (a
 per-column count of "Yes" cells, plus the sum of "Problems") - neither
 exists in the server's own audit CSV, which stays a plain per-item export.
+
+Each server also gets a second, smaller "<label> Series Summary" worksheet:
+one row per TV series (movies excluded - there's nothing to roll up), with
+"Missing Seasons"/"Missing Episodes"/"Missing Subtitles" reading "Yes" when
+*any* of that series' episode rows do, and a "Complete" column that's "Yes"
+only when none of them do - a per-episode Yes/No, in other words, collapsed
+to one row per series so a fully-clean series (every numbered season and
+episode present, every episode with an English subtitle track) is a single
+glance instead of a per-episode scan.
 """
 
 from __future__ import annotations
@@ -41,11 +50,22 @@ from results import AuditServerResult
 DIFFS_SHEET_LABEL = "diffs"
 PROBLEMS_COLUMN_LABEL = "Problems"
 TOTALS_ROW_LABEL = "Totals"
+SERIES_SUMMARY_SHEET_SUFFIX = "Series Summary"
+COMPLETE_COLUMN_LABEL = "Complete"
+SERIES_SUMMARY_HEADER = (
+    "Library",
+    "Series",
+    "Missing Seasons",
+    "Missing Episodes",
+    "Missing Subtitles",
+    COMPLETE_COLUMN_LABEL,
+)
 
 _SERVER_IDENTITY_COLUMNS = frozenset(
     {"Library", "Base Directory", "Base Filename", "Series", "Title", "Season", "Episode"}
 )
 _YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
+_GREEN_FILL = PatternFill(start_color="FFC6EFCE", end_color="FFC6EFCE", fill_type="solid")
 _INVALID_SHEET_NAME_CHARS = re.compile(r"[:\\/?*\[\]]")
 _INVALID_TABLE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 _MAX_SHEET_NAME_LENGTH = 31
@@ -101,10 +121,18 @@ def write_audit_results_workbook(
 
     for result in server_results:
         label = _server_label(result)
+        rows = _csv_rows(result)
         _write_server_sheet(
             workbook,
             label=label,
-            rows=_csv_rows(result),
+            rows=rows,
+            used_sheet_titles=used_sheet_titles,
+            used_table_names=used_table_names,
+        )
+        _write_series_summary_sheet(
+            workbook,
+            label=label,
+            rows=rows,
             used_sheet_titles=used_sheet_titles,
             used_table_names=used_table_names,
         )
@@ -171,6 +199,115 @@ def _write_server_sheet(
         problems_column_index=len(CSV_HEADER),
         last_row=last_row,
     )
+
+
+def _write_series_summary_sheet(
+    workbook: Workbook,
+    *,
+    label: str,
+    rows: tuple[tuple[str, ...], ...],
+    used_sheet_titles: set[str],
+    used_table_names: set[str],
+) -> None:
+    """Write one server's per-series completeness rollup to a new worksheet."""
+    summary_rows = _series_summary_rows(rows)
+    sheet_label = f"{label} {SERIES_SUMMARY_SHEET_SUFFIX}"
+    sheet = workbook.create_sheet(_unique_sheet_title(sheet_label, used_sheet_titles))
+
+    last_row = _write_table(
+        sheet,
+        header=SERIES_SUMMARY_HEADER,
+        rows=summary_rows,
+        table_name=_unique_table_name(sheet_label, used_table_names),
+    )
+    _set_fixed_width_after_title(sheet, SERIES_SUMMARY_HEADER, start_column="Series")
+
+    _add_series_summary_conditional_formatting(sheet, SERIES_SUMMARY_HEADER, last_row)
+    _add_wrap_center_alignment(sheet, SERIES_SUMMARY_HEADER, last_row)
+    _add_totals_row(
+        sheet,
+        yes_no_indices=_yes_no_column_indices(SERIES_SUMMARY_HEADER),
+        last_row=last_row,
+    )
+
+
+def _series_summary_rows(
+    rows: tuple[tuple[str, ...], ...],
+) -> tuple[tuple[str, ...], ...]:
+    """Return one row per TV series, rolled up from per-episode CSV rows.
+
+    A series reads "Yes" for "Missing Seasons"/"Missing Episodes"/"Missing
+    Subtitles" when *any* of its episode rows does, and "Complete" only when
+    *none* of them do - i.e. every numbered season and episode is present on
+    disk, and every one of those episodes has an English subtitle track.
+    Movies (a blank Series column) contribute nothing to this rollup - there
+    are no seasons/episodes to be complete or incomplete about.
+    """
+    library_index = CSV_HEADER.index("Library")
+    series_index = CSV_HEADER.index("Series")
+    missing_seasons_index = CSV_HEADER.index("Missing Seasons")
+    missing_episodes_index = CSV_HEADER.index("Missing Episodes")
+    missing_subtitles_index = CSV_HEADER.index("Missing Subtitles")
+
+    aggregates: dict[tuple[str, str], dict[str, bool]] = {}
+    for row in rows:
+        series_name = row[series_index]
+        if not series_name:
+            continue
+        state = aggregates.setdefault(
+            (row[library_index], series_name),
+            {"missing_seasons": False, "missing_episodes": False, "missing_subtitles": False},
+        )
+        state["missing_seasons"] |= row[missing_seasons_index] == "Yes"
+        state["missing_episodes"] |= row[missing_episodes_index] == "Yes"
+        state["missing_subtitles"] |= row[missing_subtitles_index] == "Yes"
+
+    summary_rows = []
+    for (library, series_name), state in sorted(
+        aggregates.items(), key=lambda entry: (entry[0][0].casefold(), entry[0][1].casefold())
+    ):
+        complete = not (
+            state["missing_seasons"] or state["missing_episodes"] or state["missing_subtitles"]
+        )
+        summary_rows.append(
+            (
+                library,
+                series_name,
+                _yes_no(state["missing_seasons"]),
+                _yes_no(state["missing_episodes"]),
+                _yes_no(state["missing_subtitles"]),
+                _yes_no(complete),
+            )
+        )
+    return tuple(summary_rows)
+
+
+def _yes_no(value: bool) -> str:
+    """Return "Yes"/"No" for a series-summary cell."""
+    return "Yes" if value else "No"
+
+
+def _add_series_summary_conditional_formatting(
+    sheet: Worksheet, header: tuple[str, ...], last_row: int
+) -> None:
+    """Highlight the series summary sheet's Yes/No columns.
+
+    "Missing Seasons"/"Missing Episodes"/"Missing Subtitles" get the same
+    yellow-on-"Yes" treatment as a server sheet's own Yes/No columns (a
+    problem to fix); "Complete" gets the opposite - a green background on
+    "Yes" - since there it's the desirable outcome, not a problem.
+    """
+    if last_row < 2:
+        return
+    for index, column_name in enumerate(header):
+        if column_name in _SERVER_IDENTITY_COLUMNS:
+            continue
+        column_letter = get_column_letter(index + 1)
+        fill = _GREEN_FILL if column_name == COMPLETE_COLUMN_LABEL else _YELLOW_FILL
+        sheet.conditional_formatting.add(
+            f"{column_letter}2:{column_letter}{last_row}",
+            CellIsRule(operator="equal", formula=['"Yes"'], fill=fill),
+        )
 
 
 def _write_diffs_sheet(
@@ -246,14 +383,15 @@ def _add_totals_row(
     sheet: Worksheet,
     *,
     yes_no_indices: tuple[int, ...],
-    problems_column_index: int,
     last_row: int,
+    problems_column_index: int | None = None,
 ) -> None:
     """Write a "Totals" row directly below the table.
 
     Each Yes/No column gets a count of its own "Yes" cells; the Problems
-    column gets the sum of its per-row counts (so it equals the same total
-    either way). Deliberately left out of the table's own ref - a row
+    column, when given (a server sheet has one, the series summary sheet
+    doesn't), gets the sum of its per-row counts (so it equals the same
+    total either way). Deliberately left out of the table's own ref - a row
     inside the table would participate in the table's own sort/filter,
     which could otherwise scatter this row away from the bottom of the
     sheet.
@@ -274,13 +412,14 @@ def _add_totals_row(
         )
         sheet.cell(row=totals_row, column=index + 1, value=value)
 
-    problems_column_letter = get_column_letter(problems_column_index + 1)
-    problems_value = (
-        f"=SUM({problems_column_letter}2:{problems_column_letter}{last_row})"
-        if has_data_rows
-        else 0
-    )
-    sheet.cell(row=totals_row, column=problems_column_index + 1, value=problems_value)
+    if problems_column_index is not None:
+        problems_column_letter = get_column_letter(problems_column_index + 1)
+        problems_value = (
+            f"=SUM({problems_column_letter}2:{problems_column_letter}{last_row})"
+            if has_data_rows
+            else 0
+        )
+        sheet.cell(row=totals_row, column=problems_column_index + 1, value=problems_value)
 
     for cell in sheet[totals_row]:
         cell.font = _TOTALS_ROW_FONT
@@ -350,19 +489,23 @@ def _add_wrap_center_alignment(sheet: Worksheet, header: tuple[str, ...], last_r
             sheet[f"{column_letter}{row}"].alignment = _WRAP_CENTER_ALIGNMENT
 
 
-def _set_fixed_width_after_title(sheet: Worksheet, header: tuple[str, ...]) -> None:
-    """Set every column after "Title" to a fixed width.
+def _set_fixed_width_after_title(
+    sheet: Worksheet, header: tuple[str, ...], *, start_column: str = _FIXED_WIDTH_START_COLUMN
+) -> None:
+    """Set every column after ``start_column`` to a fixed width.
 
     Overrides the generic content-fitted width _write_table() gives every
     column by default - a Yes/No or short numeric column doesn't need
     content-fit sizing, and a fixed width keeps those columns visually
     consistent regardless of what happens to be in them. Columns up through
-    Title (Library, Base Directory, Base Filename, Series, Title) keep their
+    ``start_column`` (Library, Base Directory, Base Filename, Series, Title
+    on a server/diffs sheet; Library, Series on the series summary sheet,
+    passed explicitly since it has no Title column of its own) keep their
     content-fitted width, since those can genuinely vary a lot in length.
     """
-    if _FIXED_WIDTH_START_COLUMN not in header:
+    if start_column not in header:
         return
-    start_index = header.index(_FIXED_WIDTH_START_COLUMN) + 1
+    start_index = header.index(start_column) + 1
     for index in range(start_index, len(header)):
         column_letter = get_column_letter(index + 1)
         sheet.column_dimensions[column_letter].width = _FIXED_COLUMN_WIDTH_AFTER_TITLE
