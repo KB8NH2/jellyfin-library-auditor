@@ -403,7 +403,7 @@ class JellyfinClient:
         self._session.headers.update(
             {
                 "Accept": "application/json",
-                "X-Emby-Token": server.api_key,
+                "Authorization": f'MediaBrowser Token="{server.api_key}"',
             }
         )
 
@@ -711,6 +711,7 @@ class JellyfinClient:
                     "ParentId": library.id,
                     "Recursive": "true",
                     "IncludeItemTypes": MOVIE_ITEM_TYPE,
+                    "CollapseBoxSetItems": "false",
                     "Fields": MOVIE_MATCH_FIELDS,
                     "StartIndex": start_index,
                     "Limit": self._page_size,
@@ -1333,6 +1334,7 @@ class JellyfinClient:
                     "ParentId": library.id,
                     "Recursive": "true",
                     "IncludeItemTypes": ITEM_TYPES,
+                    "CollapseBoxSetItems": "false",
                     "Fields": ITEM_FIELDS,
                     "StartIndex": start_index,
                     "Limit": self._page_size,
@@ -1680,9 +1682,17 @@ class JellyfinClient:
 
         item_type = self._get_required_str(item_data, "Type", "media item").lower()
         if item_type not in {"movie", "episode"}:
-            raise JellyfinResponseError(
-                f"Unsupported Jellyfin item type {item_type!r} in media item."
+            # Jellyfin's IncludeItemTypes filter is not fully reliable (e.g. as of
+            # 12.0, per-library BoxSets/collections can be returned by a recursive
+            # items query even when IncludeItemTypes=Movie,Episode was requested).
+            # Skip anything outside the two types this auditor understands instead
+            # of failing the whole run.
+            LOGGER.debug(
+                "Skipping Jellyfin item type %r in library %r.",
+                item_type,
+                library.name,
             )
+            return None
 
         subtitle_tracks: list[SubtitleTrack] = []
         audio_tracks: list[AudioTrack] = []
