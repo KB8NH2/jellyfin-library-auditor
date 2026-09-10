@@ -143,6 +143,44 @@ class CompareCsvFilesBaseDirectoryAndFilenameTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare_csv_files.diff_header_and_rows(header_a, rows_a, header_a, rows_a)
 
+    def test_matches_rows_across_differing_file_extensions(self) -> None:
+        """Two servers can store the same episode under different
+        containers (e.g. a .mkv remux vs. the original .mp4); that must
+        still match as one item and surface as a mismatch row rather than
+        as two spurious "missing from the other server" rows."""
+        header_a = ("Library", "Base Directory", "Base Filename", "Missing Subtitles")
+        rows_a = (("TV Shows", "Show Name", "Show.S01E01.mkv", "Yes"),)
+        header_b = ("Library", "Base Directory", "Base Filename", "Missing Subtitles")
+        rows_b = (("TV Shows", "Show Name", "Show.S01E01.mp4", "No"),)
+
+        diff_header, diff_rows = compare_csv_files.diff_header_and_rows(
+            header_a, rows_a, header_b, rows_b
+        )
+
+        self.assertEqual(len(diff_rows), 1)
+        self.assertEqual(
+            diff_rows[0][diff_header.index("Base Filename")],
+            "Show.S01E01.mkv|Show.S01E01.mp4",
+        )
+        self.assertEqual(
+            diff_rows[0][diff_header.index("Missing Subtitles (L|R)")], "y|n"
+        )
+
+    def test_matches_rows_across_differing_filename_case(self) -> None:
+        header_a = ("Library", "Base Directory", "Base Filename", "Missing Subtitles")
+        rows_a = (("TV Shows", "Show Name", "Show.S01E01.MKV", "Yes"),)
+        header_b = ("Library", "Base Directory", "Base Filename", "Missing Subtitles")
+        rows_b = (("TV Shows", "Show Name", "show.s01e01.mkv", "No"),)
+
+        diff_header, diff_rows = compare_csv_files.diff_header_and_rows(
+            header_a, rows_a, header_b, rows_b
+        )
+
+        self.assertEqual(len(diff_rows), 1)
+        self.assertEqual(
+            diff_rows[0][diff_header.index("Missing Subtitles (L|R)")], "y|n"
+        )
+
     def test_build_header_never_marks_identity_columns_l_r(self) -> None:
         header = compare_csv_files.build_header(
             ("Library", "Base Directory", "Base Filename", "Missing Subtitles")

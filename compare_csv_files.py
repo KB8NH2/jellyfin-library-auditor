@@ -6,7 +6,11 @@ servers, so the audit's "Base Filename" column - everything after the last
 regardless of each server's own mount point or drive letter, and the two
 files won't necessarily have the same number of rows (one server may be
 missing items the other has). This script matches rows between the two files
-by that Base Filename column and writes one line per differing item: identity
+by that Base Filename column, ignoring case and file extension so the same
+episode stored under different containers on the two servers (e.g. a ".mkv"
+remux on one and the original ".mp4" on the other) still lines up as one
+item instead of showing as missing from both, and writes one line per
+differing item: identity
 columns (Library, Base Directory, Title, Season, Episode, Base Filename) show
 a single value (or "L|R" when an identity column other than Base Filename -
 which is what matched the rows in the first place - actually differs), and
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os.path
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -163,6 +168,18 @@ def combine_row(
     return tuple(combined)
 
 
+def _match_key(base_filename: str) -> str:
+    """Return the case-insensitive, extension-stripped key used to match a Base Filename across servers.
+
+    The same episode can be stored under different containers on the two
+    servers (e.g. a ".mkv" remux on one and the original ".mp4" on the
+    other), which must still be matched up as the same item - otherwise it
+    shows up as two spurious "missing from the other server" rows instead of
+    a single row surfacing the real difference (e.g. mismatched codecs).
+    """
+    return os.path.splitext(base_filename)[0].casefold()
+
+
 def diff_header_and_rows(
     header_a: tuple[str, ...],
     rows_a: tuple[tuple[str, ...], ...],
@@ -185,11 +202,11 @@ def diff_header_and_rows(
     # counts or ordering.
     remaining_b: dict[str, list[tuple[str, ...]]] = defaultdict(list)
     for row in rows_b:
-        remaining_b[row[base_filename_index]].append(row)
+        remaining_b[_match_key(row[base_filename_index])].append(row)
 
     diff_rows: list[tuple[str, ...]] = []
     for row_a in rows_a:
-        key = row_a[base_filename_index]
+        key = _match_key(row_a[base_filename_index])
         bucket = remaining_b.get(key)
         if bucket:
             row_b = bucket.pop(0)
