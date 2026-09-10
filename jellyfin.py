@@ -52,6 +52,13 @@ ITEM_FIELDS = ",".join(
         "RunTimeTicks",
         "ImageTags",
         "MediaStreams",
+        # Lists every version of this item Jellyfin knows about (e.g. a
+        # ".mkv" remux and the original ".mp4" kept side by side) - top-level
+        # Path only ever reflects whichever one Jellyfin treats as primary.
+        # Used to populate MediaItem.media_containers so an audit run (and
+        # the cross-server diff built from its CSV) can see every container
+        # actually present, not just the primary pick.
+        "MediaSources",
         # Also gated behind Fields. Used only to decide which items need a
         # fresh per-item Name re-check - see _resolve_stale_title() - not
         # stored on MediaItem itself.
@@ -1740,10 +1747,37 @@ class JellyfinClient:
                 subtitle_tracks=tuple(subtitle_tracks),
                 audio_tracks=tuple(audio_tracks),
                 video_track=video_track,
+                media_containers=self._media_containers_from_json(item_data),
             )
         except Exception as e:
             print(item_data)
             raise e
+
+    def _media_containers_from_json(
+        self,
+        item_data: Mapping[str, Any],
+    ) -> tuple[str, ...]:
+        """Return every file extension Jellyfin's MediaSources reports for one item.
+
+        Falls back to the item's own top-level Path when MediaSources is
+        absent or carries no usable Path of its own, so a server that omits
+        MediaSources entirely (or an older Jellyfin version) still reports
+        the one container it does know about instead of none at all.
+        """
+        extensions: set[str] = set()
+        for raw_source in self._get_optional_list(item_data, "MediaSources", "media item"):
+            if not isinstance(raw_source, Mapping):
+                continue
+            source_path = self._get_optional_str(raw_source, "Path")
+            if source_path:
+                extensions.add(Path(source_path).suffix)
+
+        if not extensions:
+            own_path = self._get_optional_str(item_data, "Path")
+            if own_path:
+                extensions.add(Path(own_path).suffix)
+
+        return tuple(extensions)
 
     def _subtitle_track_from_stream(
         self,

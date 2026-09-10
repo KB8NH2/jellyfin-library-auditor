@@ -834,6 +834,24 @@ def get_display_base_filename(item: MediaItem) -> str:
     return get_display_path(item).replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def get_display_media_containers(item: MediaItem) -> str:
+    """Return every container Jellyfin's MediaSources reports for an item, for display.
+
+    An item kept in two versions (e.g. a ".mkv" remux alongside the
+    original ".mp4") reports both here, comma-separated and sorted - unlike
+    get_display_base_filename(), which only ever shows the extension of
+    whichever version Jellyfin treats as primary.
+
+    Args:
+        item: Media item to format.
+
+    Returns:
+        The item's containers joined by ", " (e.g. "mkv, mp4"), or "" if
+        Jellyfin reported none at all.
+    """
+    return ", ".join(item.media_containers)
+
+
 def media_files(item: MediaItem) -> tuple[Path, ...]:
     """Return media-adjacent files that share the same basename.
 

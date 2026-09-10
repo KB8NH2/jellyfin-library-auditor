@@ -181,6 +181,80 @@ class CompareCsvFilesBaseDirectoryAndFilenameTests(unittest.TestCase):
             diff_rows[0][diff_header.index("Missing Subtitles (L|R)")], "y|n"
         )
 
+    def test_matching_media_containers_suppresses_extension_only_diff(self) -> None:
+        """When both servers report the same set of containers via
+        MediaSources (e.g. both actually have the .mkv and the .mp4), a
+        Base Filename difference is just Jellyfin's primary-version pick
+        differing - not a real gap - so the row isn't reported as a diff
+        even though every other column also matches."""
+        header_a = (
+            "Library",
+            "Base Directory",
+            "Base Filename",
+            "Media Containers",
+            "Missing Subtitles",
+        )
+        rows_a = (("TV Shows", "Show Name", "Show.S01E01.mkv", "mkv, mp4", "No"),)
+        header_b = header_a
+        rows_b = (("TV Shows", "Show Name", "Show.S01E01.mp4", "mkv, mp4", "No"),)
+
+        _, diff_rows = compare_csv_files.diff_header_and_rows(
+            header_a, rows_a, header_b, rows_b
+        )
+
+        self.assertEqual(diff_rows, ())
+
+    def test_differing_media_containers_is_still_reported(self) -> None:
+        """A genuine gap - one server missing a container the other has -
+        must still be flagged even though it's carried on the same column
+        that a matching Media Containers value would otherwise suppress."""
+        header_a = (
+            "Library",
+            "Base Directory",
+            "Base Filename",
+            "Media Containers",
+            "Missing Subtitles",
+        )
+        rows_a = (("TV Shows", "Show Name", "Show.S01E01.mkv", "mkv, mp4", "No"),)
+        header_b = header_a
+        rows_b = (("TV Shows", "Show Name", "Show.S01E01.mp4", "mp4", "No"),)
+
+        diff_header, diff_rows = compare_csv_files.diff_header_and_rows(
+            header_a, rows_a, header_b, rows_b
+        )
+
+        self.assertEqual(len(diff_rows), 1)
+        self.assertEqual(
+            diff_rows[0][diff_header.index("Media Containers")], "mkv, mp4|mp4"
+        )
+
+    def test_matching_media_containers_still_shown_as_l_r_when_row_differs_elsewhere(
+        self,
+    ) -> None:
+        """The suppression only affects whether the row is reported at all -
+        Base Filename still displays as "L|R" once a genuine difference
+        elsewhere (here, Missing Subtitles) makes the row appear."""
+        header_a = (
+            "Library",
+            "Base Directory",
+            "Base Filename",
+            "Media Containers",
+            "Missing Subtitles",
+        )
+        rows_a = (("TV Shows", "Show Name", "Show.S01E01.mkv", "mkv, mp4", "Yes"),)
+        header_b = header_a
+        rows_b = (("TV Shows", "Show Name", "Show.S01E01.mp4", "mkv, mp4", "No"),)
+
+        diff_header, diff_rows = compare_csv_files.diff_header_and_rows(
+            header_a, rows_a, header_b, rows_b
+        )
+
+        self.assertEqual(len(diff_rows), 1)
+        self.assertEqual(
+            diff_rows[0][diff_header.index("Base Filename")],
+            "Show.S01E01.mkv|Show.S01E01.mp4",
+        )
+
     def test_build_header_never_marks_identity_columns_l_r(self) -> None:
         header = compare_csv_files.build_header(
             ("Library", "Base Directory", "Base Filename", "Missing Subtitles")

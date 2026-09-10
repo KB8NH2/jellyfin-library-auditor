@@ -83,7 +83,16 @@ _SERIES_SUMMARY_PROBLEM_COUNT_COLUMNS = frozenset(
     {"Missing Seasons", "Missing Episodes", "Missing Subtitles"}
 )
 _SERVER_IDENTITY_COLUMNS = frozenset(
-    {"Library", "Base Directory", "Base Filename", "Series", "Title", "Season", "Episode"}
+    {
+        "Library",
+        "Base Directory",
+        "Base Filename",
+        "Media Containers",
+        "Series",
+        "Title",
+        "Season",
+        "Episode",
+    }
 )
 _YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 _GREEN_FILL = PatternFill(start_color="FFC6EFCE", end_color="FFC6EFCE", fill_type="solid")

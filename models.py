@@ -192,6 +192,16 @@ class MediaItem:
     subtitle_tracks: tuple[SubtitleTrack, ...]
     audio_tracks: tuple[AudioTrack, ...]
     video_track: VideoTrack | None
+    # Every distinct file extension Jellyfin's MediaSources reports for this
+    # item (lowercase, no leading dot), e.g. ("mkv", "mp4") for an episode
+    # kept in two containers - not just the one extension its own `path`
+    # happens to point at. Jellyfin merges same-episode files sharing this
+    # one item rather than creating a duplicate library entry per version,
+    # and top-level `path` only ever reflects whichever version it treats
+    # as primary, so this is the only way to see the rest. Defaults to ()
+    # for callers that never populate it (e.g. apply_titles_from_filename.py's
+    # synthetic items).
+    media_containers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize path-like and collection fields."""
@@ -203,6 +213,19 @@ class MediaItem:
         object.__setattr__(self, "image_tags", dict(self.image_tags))
         object.__setattr__(self, "subtitle_tracks", tuple(self.subtitle_tracks))
         object.__setattr__(self, "audio_tracks", tuple(self.audio_tracks))
+        object.__setattr__(
+            self,
+            "media_containers",
+            tuple(
+                sorted(
+                    {
+                        extension.strip().lstrip(".").lower()
+                        for extension in self.media_containers
+                        if extension.strip().lstrip(".")
+                    }
+                )
+            ),
+        )
 
     @staticmethod
     def _normalize_optional_text(value: str | None) -> str | None:

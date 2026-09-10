@@ -278,6 +278,51 @@ class StaleTitleResolutionTests(unittest.TestCase):
 
         self.assertEqual(items[0].title, "Movie Name")
 
+    def test_media_sources_populate_media_containers(self) -> None:
+        """MediaSources reports every container an item has, not just the
+        one top-level Path points at - e.g. a ".mkv" remux kept alongside
+        the original ".mp4"."""
+        client = self._make_client()
+        library = jellyfin.MediaLibrary(id="lib1", name="Movies", collection_type="movies", locations=())
+        raw_item = {
+            "Id": "item1",
+            "Type": "Movie",
+            "Name": "Movie Name",
+            "Path": "/media/movies/Movie Name (2001).mkv",
+            "MediaSources": [
+                {"Path": "/media/movies/Movie Name (2001).mkv"},
+                {"Path": "/media/movies/Movie Name (2001).mp4"},
+            ],
+        }
+
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[self._library_listing_response(raw_item)],
+        ):
+            items = client._get_library_items_for_library(library)
+
+        self.assertEqual(items[0].media_containers, ("mkv", "mp4"))
+
+    def test_missing_media_sources_falls_back_to_own_path_extension(self) -> None:
+        client = self._make_client()
+        library = jellyfin.MediaLibrary(id="lib1", name="Movies", collection_type="movies", locations=())
+        raw_item = {
+            "Id": "item1",
+            "Type": "Movie",
+            "Name": "Movie Name",
+            "Path": "/media/movies/Movie Name (2001).mkv",
+        }
+
+        with patch.object(
+            client._session,
+            "request",
+            side_effect=[self._library_listing_response(raw_item)],
+        ):
+            items = client._get_library_items_for_library(library)
+
+        self.assertEqual(items[0].media_containers, ("mkv",))
+
 
 class JellyfinClientRetryTests(unittest.TestCase):
     def _make_client(self, *, max_retries: int = 3) -> JellyfinClient:

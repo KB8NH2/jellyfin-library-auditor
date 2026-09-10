@@ -54,6 +54,7 @@ def _make_item(
     episode_number: int | None = None,
     year: int | None = 2024,
     video_track: VideoTrack | None = None,
+    media_containers: tuple[str, ...] = (),
 ) -> MediaItem:
     return MediaItem(
         id=title.casefold().replace(" ", "-") if item_id is None else item_id,
@@ -72,6 +73,7 @@ def _make_item(
         subtitle_tracks=subtitle_tracks,
         audio_tracks=audio_tracks,
         video_track=video_track,
+        media_containers=media_containers,
     )
 
 

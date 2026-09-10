@@ -25,6 +25,17 @@ case-insensitive title/episode-name comparison the app's own HTML "Mismatched
 Metadata" report already uses. A pure capitalization difference between two
 servers' metadata (e.g. "The Search For..." vs "The Search for...") is not
 treated as a difference.
+
+A "Media Containers" column (when present in both input CSVs) lists every
+container Jellyfin's MediaSources reports for an item, e.g. "mkv, mp4" for
+an episode kept in two versions. Jellyfin's top-level Path - and so this
+tool's own Base Filename match key - only ever reflects whichever version
+it treats as primary, so two servers can each have both files yet pick a
+different one as primary. When Media Containers agrees between the two
+rows, a Base Filename difference is therefore just that primary-pick
+difference, not a real gap, and is ignored when deciding whether the row
+differs (though it's still shown as "L|R" for information). A Media
+Containers difference itself is a real gap and is never ignored.
 """
 
 from __future__ import annotations
@@ -38,8 +49,18 @@ from pathlib import Path
 
 EPISODE_COLUMN_NAME = "Episode"
 BASE_FILENAME_COLUMN_NAME = "Base Filename"
+MEDIA_CONTAINERS_COLUMN_NAME = "Media Containers"
 IDENTITY_COLUMNS = frozenset(
-    {"Library", "Base Directory", "Series", "Title", "Season", EPISODE_COLUMN_NAME, BASE_FILENAME_COLUMN_NAME}
+    {
+        "Library",
+        "Base Directory",
+        "Series",
+        "Title",
+        "Season",
+        EPISODE_COLUMN_NAME,
+        BASE_FILENAME_COLUMN_NAME,
+        MEDIA_CONTAINERS_COLUMN_NAME,
+    }
 )
 
 
@@ -180,6 +201,32 @@ def _match_key(base_filename: str) -> str:
     return os.path.splitext(base_filename)[0].casefold()
 
 
+def _rows_differ(
+    row_a: tuple[str, ...],
+    row_b: tuple[str, ...],
+    base_filename_index: int,
+    media_containers_index: int | None,
+) -> bool:
+    """Return whether a matched pair of rows has a real, reportable difference.
+
+    Ordinarily this is a plain case-insensitive comparison of every column.
+    But when both rows carry a Media Containers value and it agrees between
+    them, the two servers are confirmed to have the exact same set of files
+    for this item - so a Base Filename difference can only be Jellyfin's
+    primary-version pick differing, not a real gap, and is excluded from the
+    comparison (it's still shown as "L|R" in the output row by
+    combine_row(), just not what triggers the row to appear at all).
+    """
+    normalized_a = list(normalized(row_a))
+    normalized_b = list(normalized(row_b))
+    if (
+        media_containers_index is not None
+        and normalized_a[media_containers_index] == normalized_b[media_containers_index]
+    ):
+        normalized_a[base_filename_index] = normalized_b[base_filename_index] = ""
+    return normalized_a != normalized_b
+
+
 def diff_header_and_rows(
     header_a: tuple[str, ...],
     rows_a: tuple[tuple[str, ...], ...],
@@ -196,6 +243,11 @@ def diff_header_and_rows(
         base_filename_index = header_a.index(BASE_FILENAME_COLUMN_NAME)
     except ValueError:
         raise ValueError(f"'{BASE_FILENAME_COLUMN_NAME}' column not found in header") from None
+    media_containers_index = (
+        header_a.index(MEDIA_CONTAINERS_COLUMN_NAME)
+        if MEDIA_CONTAINERS_COLUMN_NAME in header_a
+        else None
+    )
 
     # Bucket file B's rows by base filename so file A's rows can be realigned
     # to their counterpart even when the two files don't have matching row
@@ -212,7 +264,7 @@ def diff_header_and_rows(
             row_b = bucket.pop(0)
             if not bucket:
                 del remaining_b[key]
-            if normalized(row_a) != normalized(row_b):
+            if _rows_differ(row_a, row_b, base_filename_index, media_containers_index):
                 diff_rows.append(combine_row(header_a, row_a, row_b))
         else:
             # No counterpart in file B: this row only exists in file A.
