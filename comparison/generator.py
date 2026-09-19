@@ -1843,24 +1843,34 @@ def _transfer_cell(
 ) -> str:
     """Return the transfer-metadata button cell for one mismatched-metadata row.
 
-    The button copies a ready-made ``transfer_metadata.py`` command to the
+    Each button copies a ready-made ``transfer_metadata.py`` command to the
     clipboard rather than performing the transfer itself, since the static
     report has no live backend to call into. Running the copied command
     performs the actual read/merge/write against both Jellyfin servers and
-    prompts for confirmation before overwriting anything.
+    prompts for confirmation before overwriting anything. Two buttons are
+    shown so metadata can be transferred in either direction.
     """
     if not left_server_key or not right_server_key:
         return '<td class="transfer-cell"></td>'
 
-    command = (
+    right_command = (
         "python transfer_metadata.py"
         f' --from-server "{left_server_key}" --from-item "{left_item_id}"'
         f' --to-server "{right_server_key}" --to-item "{right_item_id}"'
     )
+    left_command = (
+        "python transfer_metadata.py"
+        f' --from-server "{right_server_key}" --from-item "{right_item_id}"'
+        f' --to-server "{left_server_key}" --to-item "{left_item_id}"'
+    )
     return (
         '<td class="transfer-cell">'
         '<button type="button" class="transfer-button" '
-        f'data-command="{escape(command)}" '
+        f'data-command="{escape(left_command)}" '
+        'title="Copy command to transfer metadata from the right server to the left server" '
+        'onclick="copyTransferCommand(this)">&#8592;</button>'
+        '<button type="button" class="transfer-button" '
+        f'data-command="{escape(right_command)}" '
         'title="Copy command to transfer metadata from the left server to the right server" '
         'onclick="copyTransferCommand(this)">&#8594;</button>'
         "</td>"

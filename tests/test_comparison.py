@@ -422,6 +422,17 @@ class TransferCellRenderingTests(unittest.TestCase):
         )
         self.assertIn('onclick="copyTransferCommand(this)">&#8594;</button>', html)
 
+    def test_builds_reverse_copy_command_with_quoted_arguments(self) -> None:
+        html = comparison_generator._transfer_cell("left", "abc123", "right", "def456")
+
+        self.assertIn(
+            'data-command="python transfer_metadata.py --from-server &quot;right&quot; '
+            '--from-item &quot;def456&quot; --to-server &quot;left&quot; '
+            '--to-item &quot;abc123&quot;"',
+            html,
+        )
+        self.assertIn('onclick="copyTransferCommand(this)">&#8592;</button>', html)
+
 
 class SubtitleTransferCellRenderingTests(unittest.TestCase):
     def test_omits_button_when_server_key_missing(self) -> None:

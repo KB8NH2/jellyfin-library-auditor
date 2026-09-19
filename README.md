@@ -203,7 +203,7 @@ When a transfer actually changes `Name`, it's added to the destination item's `L
 
 ### One item at a time
 
-Each row in the comparison report's "Mismatched Metadata" table has a → button between the two servers' episode name columns. Clicking it copies a ready-made command to your clipboard:
+Each row in the comparison report's "Mismatched Metadata" table has two buttons between the two servers' episode name columns: a → button and a ← button, one for each transfer direction. Clicking either copies a ready-made command to your clipboard, with `--from-server`/`--to-server` set to match the arrow's direction:
 
 ```powershell
 python transfer_metadata.py --from-server main --from-item <id> --to-server backup --to-item <id>
