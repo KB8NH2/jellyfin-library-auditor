@@ -10,6 +10,7 @@ import shutil
 from urllib.parse import urlsplit
 
 from config import get_config
+from media import get_display_audio_codecs
 from media import get_display_base_directory
 from media import get_display_base_filename
 from media import get_display_episode_number
@@ -39,6 +40,7 @@ CSV_HEADER = (
     "Base Directory",
     "Base Filename",
     "Media Containers",
+    "Audio Codec(s)",
     "Series",
     "Title",
     "Season",
@@ -296,7 +298,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
     )
     trustworthy_tvdb_series = result.tvdb_available_series - mismatched_tvdb_series_names
     rows = []
-    for item in sorted(result.audited_items, key=templates.check_row_sort_key):
+    for item in _sorted_audited_items(result):
         check_names = checks_by_item.get(item.id, frozenset())
         rows.append(
             (
@@ -304,6 +306,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 get_display_base_directory(item),
                 get_display_base_filename(item),
                 get_display_media_containers(item),
+                get_display_audio_codecs(item),
                 item.series_name if item.is_episode and item.series_name else "",
                 item.title,
                 str(item.season_number) if item.is_episode and item.season_number is not None else "",
@@ -331,6 +334,24 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
             )
         )
     return tuple(rows)
+
+
+def _sorted_audited_items(result: AuditServerResult) -> tuple[MediaItem, ...]:
+    """Return ``result.audited_items`` in the same order _csv_rows() emits them."""
+    return tuple(sorted(result.audited_items, key=templates.check_row_sort_key))
+
+
+def csv_row_full_paths(result: AuditServerResult) -> tuple[str, ...]:
+    """Return each audited item's full media file path, in _csv_rows() row order.
+
+    Used by xlsx_report.py to add a "Full Path" column to each server
+    worksheet - not part of CSV_HEADER, since the plain CSV/HTML reports
+    don't need it - so a user can filter/sort the worksheet and copy
+    selected paths out for a separate bulk-processing script. Sorted with
+    the same key as _sorted_audited_items()/_csv_rows(), so zipping this
+    with _csv_rows(result) lines up row for row.
+    """
+    return tuple(str(item.path) for item in _sorted_audited_items(result))
 
 
 def _check_names_by_item(

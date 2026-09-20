@@ -10,9 +10,12 @@ guard) so a merged range like "19-20" isn't misread as a date. Every cell,
 header and data alike, is wrapped and center-aligned, and every column after
 Title has a fixed width rather than the content-fitted width the columns up
 through Title get. A server sheet also gets a "Problems" column (a per-row
-count of that row's "Yes" cells) and a "Totals" row below the table (a
-per-column count of "Yes" cells, plus the sum of "Problems") - neither
-exists in the server's own audit CSV, which stays a plain per-item export.
+count of that row's "Yes" cells) and a "Full Path" column (the audited
+item's full media file path, content-fitted rather than fixed-width, so a
+user can filter/sort the sheet and copy selected paths out for a separate
+bulk-processing script) and a "Totals" row below the table (a per-column
+count of "Yes" cells, plus the sum of "Problems") - none of those three
+exist in the server's own audit CSV, which stays a plain per-item export.
 
 Each server also gets a second, smaller "<label> Series Summary" worksheet:
 one row per TV series (movies excluded - there's nothing to roll up), with
@@ -54,11 +57,13 @@ from models import MediaItem
 from output_layout import audit_results_xlsx_path
 from reports.generator import CSV_HEADER
 from reports.generator import _csv_rows
+from reports.generator import csv_row_full_paths
 from results import AuditServerResult
 
 
 DIFFS_SHEET_LABEL = "diffs"
 PROBLEMS_COLUMN_LABEL = "Problems"
+FULL_PATH_COLUMN_LABEL = "Full Path"
 TOTALS_ROW_LABEL = "Totals"
 SERIES_SUMMARY_SHEET_SUFFIX = "Series Summary"
 COMPLETE_COLUMN_LABEL = "Complete"
@@ -88,6 +93,7 @@ _SERVER_IDENTITY_COLUMNS = frozenset(
         "Base Directory",
         "Base Filename",
         "Media Containers",
+        "Audio Codec(s)",
         "Series",
         "Title",
         "Season",
@@ -152,10 +158,12 @@ def write_audit_results_workbook(
     for result in server_results:
         label = _server_label(result)
         rows = _csv_rows(result)
+        full_paths = csv_row_full_paths(result)
         _write_server_sheet(
             workbook,
             label=label,
             rows=rows,
+            full_paths=full_paths,
             used_sheet_titles=used_sheet_titles,
             used_table_names=used_table_names,
         )
@@ -197,6 +205,7 @@ def _write_server_sheet(
     *,
     label: str,
     rows: tuple[tuple[str, ...], ...],
+    full_paths: tuple[str, ...],
     used_sheet_titles: set[str],
     used_table_names: set[str],
 ) -> None:
@@ -207,19 +216,32 @@ def _write_server_sheet(
     yes_no_indices = _yes_no_column_indices(CSV_HEADER)
     first_yes_no_letter = get_column_letter(yes_no_indices[0] + 1)
     last_yes_no_letter = get_column_letter(yes_no_indices[-1] + 1)
-    header = CSV_HEADER + (PROBLEMS_COLUMN_LABEL,)
-    rows_with_problems = tuple(
-        row + (f'=COUNTIF({first_yes_no_letter}{row_number}:{last_yes_no_letter}{row_number},"Yes")',)
-        for row_number, row in enumerate(rows, start=2)
+    header = CSV_HEADER + (PROBLEMS_COLUMN_LABEL, FULL_PATH_COLUMN_LABEL)
+    rows_with_extra_columns = tuple(
+        row
+        + (
+            f'=COUNTIF({first_yes_no_letter}{row_number}:{last_yes_no_letter}{row_number},"Yes")',
+            full_path,
+        )
+        for row_number, (row, full_path) in enumerate(zip(rows, full_paths), start=2)
     )
 
     last_row = _write_table(
         sheet,
         header=header,
-        rows=rows_with_problems,
+        rows=rows_with_extra_columns,
         table_name=_unique_table_name(label, used_table_names),
     )
     _set_fixed_width_after_title(sheet, header)
+    # Full Path gets its own content-fitted width rather than the fixed
+    # width every other post-Title column gets above - a full media path is
+    # routinely far longer than a Yes/No/Problems cell, and this column
+    # exists specifically so it's readable enough to copy out for a bulk
+    # shell script.
+    full_path_column_letter = get_column_letter(len(header))
+    sheet.column_dimensions[full_path_column_letter].width = _column_width(
+        FULL_PATH_COLUMN_LABEL, rows_with_extra_columns, len(header) - 1
+    )
 
     _add_yes_no_conditional_formatting(sheet, CSV_HEADER, last_row)
     _add_episode_text_format(sheet, CSV_HEADER, last_row)

@@ -852,6 +852,32 @@ def get_display_media_containers(item: MediaItem) -> str:
     return ", ".join(item.media_containers)
 
 
+def get_display_audio_codecs(item: MediaItem) -> str:
+    """Return every distinct audio codec on the item, for display.
+
+    An item with more than one audio track (e.g. a stereo AAC track
+    alongside a 5.1 AC3 track, or separate tracks per language) reports
+    every distinct codec here, in first-seen order and comma-separated -
+    unlike media.get_primary_audio_codec(), which only ever reflects the
+    first track.
+
+    Args:
+        item: Media item to format.
+
+    Returns:
+        The item's distinct audio codecs joined by ", ", or "" if it has no
+        audio tracks.
+    """
+    seen_codecs: set[str] = set()
+    codecs: list[str] = []
+    for track in item.audio_tracks:
+        if track.codec in seen_codecs:
+            continue
+        seen_codecs.add(track.codec)
+        codecs.append(track.codec)
+    return ", ".join(codecs)
+
+
 def media_files(item: MediaItem) -> tuple[Path, ...]:
     """Return media-adjacent files that share the same basename.
 

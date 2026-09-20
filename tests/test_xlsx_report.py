@@ -165,7 +165,10 @@ class WriteAuditResultsWorkbookTests(unittest.TestCase):
         self.assertGreater(
             sheet.column_dimensions[title_letter].width, xlsx_report._FIXED_COLUMN_WIDTH_AFTER_TITLE
         )
-        for index in range(title_index + 1, len(header)):
+        # Full Path is the last column and is deliberately exempted from the
+        # fixed width every other post-Title column gets - see
+        # test_full_path_column_is_content_fitted_not_fixed_width below.
+        for index in range(title_index + 1, len(header) - 1):
             column_letter = openpyxl.utils.get_column_letter(index + 1)
             self.assertEqual(
                 sheet.column_dimensions[column_letter].width,
@@ -211,7 +214,7 @@ class WriteAuditResultsWorkbookTests(unittest.TestCase):
             xlsx_report._FIXED_COLUMN_WIDTH_AFTER_TITLE,
         )
 
-    def test_header_matches_csv_header_plus_problems_column(self) -> None:
+    def test_header_matches_csv_header_plus_problems_and_full_path_columns(self) -> None:
         item = _make_item("Some Title")
         result = _make_single_library_result(
             (item,),
@@ -230,7 +233,65 @@ class WriteAuditResultsWorkbookTests(unittest.TestCase):
             sheet = workbook["Primary"]
             header = tuple(cell.value for cell in sheet[1])
 
-        self.assertEqual(header, CSV_HEADER + ("Problems",))
+        self.assertEqual(header, CSV_HEADER + ("Problems", "Full Path"))
+
+    def test_full_path_column_holds_the_items_full_media_path(self) -> None:
+        item = _make_item(
+            "Movie One",
+            is_movie=True,
+            is_episode=False,
+            path=Path("Movies/Movie One (2024)/Movie One (2024).mkv"),
+        )
+        result = _make_single_library_result(
+            (item,),
+            library_id="lib1",
+            library_name="Movies",
+            collection_type="movies",
+            server_name="Primary",
+            server_key="primary",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary"]
+            header = [cell.value for cell in sheet[1]]
+            full_path_column = header.index("Full Path") + 1
+
+        self.assertEqual(
+            sheet.cell(row=2, column=full_path_column).value,
+            str(Path("Movies/Movie One (2024)/Movie One (2024).mkv")),
+        )
+
+    def test_full_path_column_is_content_fitted_not_fixed_width(self) -> None:
+        long_path = Path("Movies") / ("Very " * 20 + "Long Folder Name") / "file.mkv"
+        item = _make_item("Some Title", is_movie=True, is_episode=False, path=long_path)
+        result = _make_single_library_result(
+            (item,),
+            library_id="lib1",
+            library_name="Movies",
+            collection_type="movies",
+            server_name="Primary",
+            server_key="primary",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir) / "audit_results"
+            output_path = xlsx_report.write_audit_results_workbook(root_dir, (result,))
+
+            workbook = openpyxl.load_workbook(output_path)
+            sheet = workbook["Primary"]
+            header = [cell.value for cell in sheet[1]]
+            full_path_column_letter = openpyxl.utils.get_column_letter(
+                header.index("Full Path") + 1
+            )
+
+        self.assertGreater(
+            sheet.column_dimensions[full_path_column_letter].width,
+            xlsx_report._FIXED_COLUMN_WIDTH_AFTER_TITLE,
+        )
 
 
 class SeriesSummarySheetTests(unittest.TestCase):
