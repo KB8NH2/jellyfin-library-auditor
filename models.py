@@ -202,6 +202,12 @@ class MediaItem:
     # for callers that never populate it (e.g. apply_titles_from_filename.py's
     # synthetic items).
     media_containers: tuple[str, ...] = ()
+    # Every video stream Jellyfin reports for this item, in stream order -
+    # `video_track` above is only ever the first of these. Defaults to ()
+    # for callers that never populate it; __post_init__ then falls back to
+    # (video_track,) so an item with a primary video track always reports
+    # at least that one here.
+    video_tracks: tuple[VideoTrack, ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize path-like and collection fields."""
@@ -213,6 +219,10 @@ class MediaItem:
         object.__setattr__(self, "image_tags", dict(self.image_tags))
         object.__setattr__(self, "subtitle_tracks", tuple(self.subtitle_tracks))
         object.__setattr__(self, "audio_tracks", tuple(self.audio_tracks))
+        video_tracks = tuple(self.video_tracks)
+        if not video_tracks and self.video_track is not None:
+            video_tracks = (self.video_track,)
+        object.__setattr__(self, "video_tracks", video_tracks)
         object.__setattr__(
             self,
             "media_containers",

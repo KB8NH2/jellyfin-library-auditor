@@ -93,6 +93,7 @@ _SERVER_IDENTITY_COLUMNS = frozenset(
         "Base Directory",
         "Base Filename",
         "Media Containers",
+        "Video Codec(s)",
         "Audio Codec(s)",
         "Series",
         "Title",

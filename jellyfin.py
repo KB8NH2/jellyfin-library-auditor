@@ -1703,7 +1703,7 @@ class JellyfinClient:
 
         subtitle_tracks: list[SubtitleTrack] = []
         audio_tracks: list[AudioTrack] = []
-        video_track: VideoTrack | None = None
+        video_tracks: list[VideoTrack] = []
 
         for stream_data in self._get_optional_list(
             item_data,
@@ -1725,8 +1725,8 @@ class JellyfinClient:
                 subtitle_tracks.append(self._subtitle_track_from_stream(stream_data))
             elif stream_type == AUDIO_STREAM_TYPE:
                 audio_tracks.append(self._audio_track_from_stream(stream_data))
-            elif stream_type == VIDEO_STREAM_TYPE and video_track is None:
-                video_track = self._video_track_from_stream(stream_data)
+            elif stream_type == VIDEO_STREAM_TYPE:
+                video_tracks.append(self._video_track_from_stream(stream_data))
         try:
             if "Path" not in item_data:
                 return None
@@ -1746,7 +1746,8 @@ class JellyfinClient:
                 image_tags=self._get_string_dict(item_data, "ImageTags"),
                 subtitle_tracks=tuple(subtitle_tracks),
                 audio_tracks=tuple(audio_tracks),
-                video_track=video_track,
+                video_track=next(iter(video_tracks), None),
+                video_tracks=tuple(video_tracks),
                 media_containers=self._media_containers_from_json(item_data),
             )
         except Exception as e:

@@ -15,6 +15,7 @@ from media import get_display_base_directory
 from media import get_display_base_filename
 from media import get_display_episode_number
 from media import get_display_media_containers
+from media import get_display_video_codecs
 from models import MediaItem
 from output_layout import audit_results_root
 from output_layout import comparison_output_dir
@@ -40,6 +41,7 @@ CSV_HEADER = (
     "Base Directory",
     "Base Filename",
     "Media Containers",
+    "Video Codec(s)",
     "Audio Codec(s)",
     "Series",
     "Title",
@@ -306,6 +308,7 @@ def _csv_rows(result: AuditServerResult) -> tuple[tuple[str, ...], ...]:
                 get_display_base_directory(item),
                 get_display_base_filename(item),
                 get_display_media_containers(item),
+                get_display_video_codecs(item),
                 get_display_audio_codecs(item),
                 item.series_name if item.is_episode and item.series_name else "",
                 item.title,

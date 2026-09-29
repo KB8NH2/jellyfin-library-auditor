@@ -50,6 +50,7 @@ from pathlib import Path
 EPISODE_COLUMN_NAME = "Episode"
 BASE_FILENAME_COLUMN_NAME = "Base Filename"
 MEDIA_CONTAINERS_COLUMN_NAME = "Media Containers"
+VIDEO_CODECS_COLUMN_NAME = "Video Codec(s)"
 AUDIO_CODECS_COLUMN_NAME = "Audio Codec(s)"
 IDENTITY_COLUMNS = frozenset(
     {
@@ -61,6 +62,7 @@ IDENTITY_COLUMNS = frozenset(
         EPISODE_COLUMN_NAME,
         BASE_FILENAME_COLUMN_NAME,
         MEDIA_CONTAINERS_COLUMN_NAME,
+        VIDEO_CODECS_COLUMN_NAME,
         AUDIO_CODECS_COLUMN_NAME,
     }
 )

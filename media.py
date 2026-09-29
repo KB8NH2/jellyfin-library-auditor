@@ -852,6 +852,31 @@ def get_display_media_containers(item: MediaItem) -> str:
     return ", ".join(item.media_containers)
 
 
+def get_display_video_codecs(item: MediaItem) -> str:
+    """Return every distinct video codec on the item, for display.
+
+    An item with more than one video stream reports every distinct codec
+    here, in first-seen order and comma-separated - unlike
+    media.get_video_codec(), which only ever reflects the first stream.
+    Useful for spotting e.g. "h264" items worth re-encoding to "hevc".
+
+    Args:
+        item: Media item to format.
+
+    Returns:
+        The item's distinct video codecs joined by ", ", or "" if it has no
+        video streams.
+    """
+    seen_codecs: set[str] = set()
+    codecs: list[str] = []
+    for track in item.video_tracks:
+        if track.codec in seen_codecs:
+            continue
+        seen_codecs.add(track.codec)
+        codecs.append(track.codec)
+    return ", ".join(codecs)
+
+
 def get_display_audio_codecs(item: MediaItem) -> str:
     """Return every distinct audio codec on the item, for display.
 

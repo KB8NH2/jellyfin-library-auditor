@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -105,6 +106,7 @@ class ReportGenerationTests(unittest.TestCase):
                 "Base Directory",
                 "Base Filename",
                 "Media Containers",
+                "Video Codec(s)",
                 "Audio Codec(s)",
                 "Series",
                 "Title",
@@ -133,6 +135,7 @@ class ReportGenerationTests(unittest.TestCase):
                     "",
                     "",
                     "",
+                    "",
                     "Movie One",
                     "",
                     "",
@@ -152,6 +155,7 @@ class ReportGenerationTests(unittest.TestCase):
                     "TV Shows",
                     "Show Name",
                     "Show Name S01E02.mkv",
+                    "",
                     "",
                     "",
                     "Show Name",
@@ -1506,3 +1510,35 @@ class ReportGenerationTests(unittest.TestCase):
         self.assertIn('<th colspan="2">Video Codec</th>', libraries_html)
         self.assertIn('class="comparison-diff">h264</td>', libraries_html)
         self.assertIn('class="comparison-diff">hevc</td>', libraries_html)
+
+
+class DisplayVideoCodecsTests(unittest.TestCase):
+    @staticmethod
+    def _video_track(codec: str) -> VideoTrack:
+        return VideoTrack(codec=codec, width=1920, height=1080, bitrate=None, hdr=False, video_range=None)
+
+    def test_lists_distinct_video_codecs_in_first_seen_order(self) -> None:
+        from media import get_display_video_codecs
+
+        item = replace(
+            _make_item("Multi Stream", video_track=self._video_track("h264")),
+            video_tracks=(
+                self._video_track("H264"),
+                self._video_track("hevc"),
+                self._video_track("h264"),
+            ),
+        )
+
+        self.assertEqual(get_display_video_codecs(item), "h264, hevc")
+
+    def test_falls_back_to_primary_video_track(self) -> None:
+        from media import get_display_video_codecs
+
+        item = _make_item("Single Stream", video_track=self._video_track("h264"))
+
+        self.assertEqual(get_display_video_codecs(item), "h264")
+
+    def test_empty_when_item_has_no_video(self) -> None:
+        from media import get_display_video_codecs
+
+        self.assertEqual(get_display_video_codecs(_make_item("No Video")), "")
